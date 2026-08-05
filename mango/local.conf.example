@@ -1,0 +1,31 @@
+# Per-machine overrides for mango/config.conf, sourced last (see the
+# `source=./local.conf` line at the end of config.conf).
+#
+# install.sh copies this file to ~/.config/mango/local.conf on first install
+# and never overwrites it again — edit the copy, not this template.
+#
+# Below are the values config.conf currently hardcodes for THIS machine.
+# Uncomment and adjust on a different machine; leave commented to inherit
+# config.conf's defaults as-is.
+
+# Output name/resolution — find yours with `mmsg get outputs` or `wlr-randr`.
+# Default in config.conf: name:^eDP-1$,width:1920,height:1080,refresh:60,x:0,y:0,scale:1.0,vrr:1
+#monitorrule=name:^eDP-1$,width:1920,height:1080,refresh:60,x:0,y:0,scale:1.0,vrr:1
+
+# XDG_DATA_DIRS: needed so kbuildsycoca6 builds a non-empty application
+# database (otherwise Dolphin's "Open With" list is blank). config.conf does
+# NOT set this — the first entry is under your home directory and mango's env=
+# parser does not expand $HOME or ~, so it has to be spelled out absolutely
+# here. Uncomment and replace YOURUSER.
+#env=XDG_DATA_DIRS,/home/YOURUSER/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share:/usr/share
+
+# XDG_MENU_PREFIX is set in config.conf; override only if your distro ships a
+# menu file other than plasma-applications.menu in /etc/xdg/menus.
+#env=XDG_MENU_PREFIX,plasma-
+
+# Path to your KeePassXC database, for mango/scripts/keepassxc-autounlock.sh.
+# That script greps this file directly rather than reading the environment:
+# mango applies env= only *after* forking its exec-once children, so an
+# exec-once script never sees these variables. Setting it here still works for
+# everything else, and the script picks it up either way.
+#env=MANGO_KEEPASS_DB,/home/YOURUSER/passwords.kdbx

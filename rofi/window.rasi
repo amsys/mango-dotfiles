@@ -1,0 +1,33 @@
+/* Window switcher. Everything visual comes from config.rasi; this only widens
+   the window and drops the icon column. */
+@import "config.rasi"
+
+/* Wider than the 520px default for the same reason clipboard.rasi is: a row
+   here is "tag · appid · window title", and a browser or editor title is a
+   sentence, not a menu label. */
+window {
+    width: 760px;
+}
+
+entry {
+    placeholder: "Search windows…";
+}
+
+/* window.sh attaches no icon option, so the 1.1em element-icon from config.rasi
+   would reserve an empty column in front of every row. */
+element-icon {
+    size: 0;
+}
+
+/* Nine tags' worth of windows still fits without scrolling in the common case. */
+listview {
+    lines: 12;
+    scrollbar: true;
+}
+
+/* The caption carries the window count and the hint, so it needs to be readable
+   rather than a whisper — same call ai.rasi and clipboard.rasi make. */
+message textbox {
+    font: "Google Sans Flex 10";
+    text-color: @muted;
+}

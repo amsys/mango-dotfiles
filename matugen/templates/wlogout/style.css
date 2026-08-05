@@ -1,0 +1,88 @@
+/*
+ * Power menu colors generated with Matugen. Same palette vocabulary as the
+ * bar (matugen/templates/waybar/style.css), so the menu and waybar agree.
+ *
+ * Sizing note: wlogout sets hexpand/vexpand on every button, so CSS cannot
+ * make the menu smaller — buttons always fill their grid cell and the grid
+ * fills whatever its margins leave. The compact size comes from the pixel
+ * margins mango/scripts/powermenu.sh computes and passes as -L/-R/-T/-B.
+ *
+ * Icon note: wlogout builds buttons with gtk_button_new_with_label and never
+ * enables markup, so the button's own text can only ever be one size. The
+ * glyph is therefore a background-image (see the icons directory) rather than
+ * text, which is also the only way to scale and centre it independently of
+ * the label. GTK3 cannot tint a background-image — -gtk-recolor() silently
+ * draws nothing on a plain SVG — so those icons carry a fixed white fill and
+ * the panel below is kept dark in every palette to suit them.
+ */
+
+@define-color fg {{colors.on_surface.default.hex}};
+@define-color fg_dim {{colors.on_surface_variant.default.hex}};
+@define-color panel {{colors.surface_container_low.default.hex}};
+@define-color btn {{colors.surface_container_high.default.hex}};
+@define-color urgent {{colors.error.default.hex}};
+
+* {
+	all: unset;
+	background-image: none;
+	transition: 200ms cubic-bezier(0.05, 0.7, 0.1, 1);
+}
+
+/* The scrim outside the panel. */
+window {
+	background: rgba(0, 0, 0, 0.55);
+}
+
+/* The panel. wlogout's tree is window > widget > grid > button, and the grid
+ * is the only node sitting exactly behind the buttons, so it is what gets the
+ * rounded background. The padding is load-bearing: GTK3 does not clip children
+ * to a parent's border-radius, so without it the square buttons paint over the
+ * rounded corners. Padding is inside the CSS box; the -L/-R/-T/-B margins are
+ * outside it, so the two do not fight.
+ */
+grid {
+	background-color: alpha(@panel, 0.96);
+	border-radius: 1.25rem;
+	padding: 0.9rem;
+}
+
+/* Same font as the bar. The label is a hint under the icon, so it is small and
+ * dimmed until the button is under the cursor. */
+button {
+	font-family: "Google Sans Flex", "Rubik", sans-serif;
+	font-size: 0.8rem;
+	font-weight: 500;
+	/* on_surface_variant is only a shade off on_surface in most palettes, which
+	 * would make the hover highlight invisible. Fade it properly instead, so
+	 * the label reads as inactive until the button is picked out. */
+	color: alpha(@fg_dim, 0.5);
+	background-color: alpha(@btn, 0.55);
+	border-radius: 0.9rem;
+	margin: 0.35rem;
+	padding: 0.75rem;
+
+	background-repeat: no-repeat;
+	background-position: center 34%;
+	background-size: 3.4rem;
+}
+
+button:focus,
+button:hover,
+button:active {
+	color: @fg;
+	background-color: alpha(@btn, 1.0);
+}
+
+/* Shutdown is the one that cannot be undone. */
+#shutdown:focus,
+#shutdown:hover,
+#shutdown:active {
+	background-color: alpha(@urgent, 0.55);
+}
+
+#lock      { background-image: url("icons/lock.svg"); }
+#suspend   { background-image: url("icons/suspend.svg"); }
+#logout    { background-image: url("icons/logout.svg"); }
+#reboot    { background-image: url("icons/reboot.svg"); }
+#shutdown  { background-image: url("icons/shutdown.svg"); }
+#hibernate { background-image: url("icons/hibernate.svg"); }

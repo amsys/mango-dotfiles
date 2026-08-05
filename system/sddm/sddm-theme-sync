@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Install matugen's rendered colours (and the current wallpaper) into the
+# mango-sddm greeter theme. Called from matugen's post_hook on every wallpaper
+# switch, via one fixed sudoers rule.
+#
+# Why this is not just a `cp`: the file being installed is QML, executed by the
+# greeter as the `sddm` user before anyone has authenticated. So the sudo target
+# is this script — root-owned, not user-writable, and argument-free — and it
+# installs a render only if that render differs from the root-owned template by
+# colour literals alone. Anything structural and it refuses. Fails closed.
+#
+# Usage: sudo sddm-theme-sync      (no arguments; the sudoers rule forbids them)
+#        sddm-theme-sync test      (self-check, writes nothing, no root needed)
+
+set -u
+
+THEME_DIR=/usr/share/sddm/themes/mango-sddm
+REFERENCE=/usr/local/share/sddm-theme-sync/Colors.qml.in
+MAX_QML_BYTES=$((64 * 1024))
+MAX_IMAGE_BYTES=$((32 * 1024 * 1024))
+
+die() {
+	printf 'sddm-theme-sync: %s\n' "$1" >&2
+	exit 1
+}
+
+# Collapse every colour literal to one token — "#7b4f2a" in a render,
+# "{{colors.primary.default.hex}}" in the template. Two files compare equal
+# after this if and only if nothing but colour values differs between them.
+normalise() {
+	sed -E 's/"#[0-9a-fA-F]{3,8}"/"@"/g; s/"\{\{[^"]*\}\}"/"@"/g' "$1"
+}
+
+# check_colors <candidate> <uid-that-must-own-it>
+check_colors() {
+	candidate=$1
+	owner=$2
+
+	[ ! -L "$candidate" ] || die "refusing a symlink: $candidate"
+	[ -f "$candidate" ] || die "not found: $candidate"
+	[ "$(stat -c %u "$candidate")" = "$owner" ] ||
+		die "not owned by uid $owner: $candidate"
+	[ "$(stat -c %s "$candidate")" -le "$MAX_QML_BYTES" ] ||
+		die "over $MAX_QML_BYTES bytes: $candidate"
+	[ -f "$REFERENCE" ] ||
+		die "reference template missing: $REFERENCE — run: sudo system/sddm/install.sh"
+
+	cmp -s <(normalise "$REFERENCE") <(normalise "$candidate") || die \
+"$candidate differs from $REFERENCE by more than colour values — refusing.
+If you edited matugen/templates/sddm/Colors.qml, re-run: sudo system/sddm/install.sh"
+}
+
+# install_wallpaper <path-to-the-file-holding-the-wallpaper-path> <owner-uid>
+install_wallpaper() {
+	list=$1
+	owner=$2
+
+	# No wallpaper recorded yet (colour-only theming, or a fresh install).
+	[ -e "$list" ] || return 0
+
+	[ ! -L "$list" ] || die "refusing a symlink: $list"
+	[ "$(stat -c %u "$list")" = "$owner" ] || die "not owned by uid $owner: $list"
+	image=$(head -n 1 "$list")
+
+	[ -n "$image" ] || return 0
+	case $image in
+		/*) ;;
+		*) die "wallpaper path is not absolute: $image" ;;
+	esac
+	[ ! -L "$image" ] || die "refusing a symlinked wallpaper: $image"
+	[ -f "$image" ] || die "wallpaper not found: $image"
+	[ "$(stat -c %s "$image")" -le "$MAX_IMAGE_BYTES" ] ||
+		die "wallpaper over $MAX_IMAGE_BYTES bytes: $image"
+
+	# The extension comes from the verified content type, never from the
+	# filename — nothing user-controlled reaches the destination path.
+	case $(file --brief --mime-type -- "$image") in
+		image/png) ext=png ;;
+		image/jpeg) ext=jpg ;;
+		image/webp) ext=webp ;;
+		*) die "unsupported wallpaper type: $image" ;;
+	esac
+
+	if ! cmp -s "$image" "$THEME_DIR/background.$ext"; then
+		install -m 644 -- "$image" "$THEME_DIR/.background.$ext.new" ||
+			die "could not stage the wallpaper in $THEME_DIR"
+		mv -f "$THEME_DIR/.background.$ext.new" "$THEME_DIR/background.$ext"
+	fi
+
+	# Drop a leftover background.* from a previous wallpaper format.
+	for stale in "$THEME_DIR"/background.*; do
+		[ "$stale" = "$THEME_DIR/background.$ext" ] || rm -f -- "$stale"
+	done
+
+	sed -i -E "s|^Background=.*|Background=\"background.$ext\"|" "$THEME_DIR/theme.conf"
+}
+
+# ------------------------------------------------------------------ self-check
+
+if [ "${1:-}" = "test" ]; then
+	tmp=$(mktemp -d) || exit 1
+	trap 'rm -rf "$tmp"' EXIT
+	uid=$(id -u)
+	failures=0
+
+	# A render is the template with every slot replaced by a colour.
+	sed -E 's/"\{\{[^"]*\}\}"/"#808080"/g' "$REFERENCE" > "$tmp/clean.qml" 2>/dev/null ||
+		die "reference template missing: $REFERENCE — run: sudo system/sddm/install.sh"
+
+	expect() {
+		want=$1
+		name=$2
+		file=$3
+		if (check_colors "$file" "$uid") >/dev/null 2>&1; then
+			got=accept
+		else
+			got=refuse
+		fi
+		if [ "$got" = "$want" ]; then
+			printf 'ok    %s (%s)\n' "$name" "$got"
+		else
+			printf 'FAIL  %s: wanted %s, got %s\n' "$name" "$want" "$got"
+			failures=$((failures + 1))
+		fi
+	}
+
+	expect accept "a clean render" "$tmp/clean.qml"
+
+	cp "$tmp/clean.qml" "$tmp/injected.qml"
+	printf '\nComponent.onCompleted { console.log("pwned") }\n' >> "$tmp/injected.qml"
+	expect refuse "injected QML statement" "$tmp/injected.qml"
+
+	sed 's/property color primary:/property color prImary:/' "$tmp/clean.qml" > "$tmp/renamed.qml"
+	expect refuse "renamed property" "$tmp/renamed.qml"
+
+	sed 's/property color primary: "#808080"/property color primary: Qt.rgba(1,0,0,1)/' \
+		"$tmp/clean.qml" > "$tmp/expression.qml"
+	expect refuse "expression in place of a literal" "$tmp/expression.qml"
+
+	sed 's|^import QtQuick$|import QtQuick\nimport QtQuick.Window|' "$tmp/clean.qml" > "$tmp/import.qml"
+	expect refuse "extra import" "$tmp/import.qml"
+
+	ln -s "$tmp/clean.qml" "$tmp/link.qml"
+	expect refuse "symlinked source" "$tmp/link.qml"
+
+	# A colour change is the one thing that must still get through.
+	sed 's/"#808080"/"#123456"/g' "$tmp/clean.qml" > "$tmp/recoloured.qml"
+	expect accept "different colours" "$tmp/recoloured.qml"
+
+	[ "$failures" -eq 0 ] || exit 1
+	echo "ok"
+	exit 0
+fi
+
+# ----------------------------------------------------------------------- apply
+
+[ $# -eq 0 ] || die "takes no arguments"
+[ "$(id -u)" -eq 0 ] || die "must run as root, through sudo"
+
+uid=${SUDO_UID:-}
+[ -n "$uid" ] || die "SUDO_UID is unset — run me through sudo, not as root directly"
+[ "$uid" -gt 0 ] 2>/dev/null || die "refusing to run for uid ${uid}"
+
+home=$(getent passwd "$uid" | cut -d: -f6)
+[ -n "$home" ] && [ -d "$home" ] || die "no home directory for uid $uid"
+[ -d "$THEME_DIR" ] || die "$THEME_DIR is missing — run: sudo system/sddm/install.sh"
+
+state=$home/.local/state/mango/generated
+colors=$state/sddm-colors.qml
+
+check_colors "$colors" "$uid"
+
+if ! cmp -s "$colors" "$THEME_DIR/Colors.qml"; then
+	install -m 644 -- "$colors" "$THEME_DIR/.Colors.qml.new" ||
+		die "could not stage the colours in $THEME_DIR"
+	mv -f "$THEME_DIR/.Colors.qml.new" "$THEME_DIR/Colors.qml"
+fi
+
+install_wallpaper "$state/wallpaper/path.txt" "$uid"

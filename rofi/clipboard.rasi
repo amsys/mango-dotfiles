@@ -1,0 +1,41 @@
+/* Clipboard history. Everything visual comes from config.rasi; this only makes
+   room for the image thumbnails clipboard.sh attaches to binary entries. */
+@import "config.rasi"
+
+/* Fallback only. clipboard.sh --launch measures the widest entry and overrides
+   this with -theme-str; this value is what a bare `rofi -show clipboard` gets,
+   and it beats the 520px default for the same reason ai.rasi does — a clipboard
+   row is a line of prose, not a menu label. */
+window {
+    width: 720px;
+}
+
+entry {
+    placeholder: "Search clipboard…";
+}
+
+/* The global 1.1em icon is sized for an app icon beside a name. At that size an
+   800x600 screenshot is a smudge, so previews get their own row height. */
+element {
+    padding: 4px 10px;
+    spacing: 10px;
+}
+
+element-icon {
+    size: 5em;
+}
+
+/* Fewer lines than the 10 elsewhere, because rofi has no variable-height rows:
+   element-icon sets the height of *every* row, text ones included, so 10 rows
+   at 5em would be most of a 1080px screen. */
+listview {
+    lines: 8;
+    scrollbar: true;
+}
+
+/* The caption carries the hotkey legend and the wipe confirmation, so it has to
+   be readable rather than a whisper — same call ai.rasi makes. */
+message textbox {
+    font: "Google Sans Flex 10";
+    text-color: @muted;
+}

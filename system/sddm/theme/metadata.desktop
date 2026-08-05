@@ -1,0 +1,12 @@
+[SddmGreeterTheme]
+Name=mango-sddm
+Description=Material You login screen for the mango desktop
+Author=Martin
+Type=sddm-theme
+Version=1.0
+Website=https://github.com/martin/mango-dotfiles
+ConfigFile=theme.conf
+MainScript=Main.qml
+Theme-Id=mango-sddm
+Theme-API=2.0
+QtVersion=6

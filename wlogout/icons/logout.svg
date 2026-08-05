@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+<!-- Material Symbols Rounded ligature "logout", the same font waybar uses.
+     GTK3 cannot tint a background-image, so the fill is baked in; the
+     panel is kept dark enough for it in every matugen palette. -->
+<text x="48" y="48" font-family="Material Symbols Rounded" font-size="76"
+      fill="#ffffff" text-anchor="middle" dominant-baseline="central">logout</text>
+</svg>

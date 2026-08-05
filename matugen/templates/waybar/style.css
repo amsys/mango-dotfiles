@@ -1,0 +1,384 @@
+/*
+* Waybar colors generated with Matugen.
+* Bar design ported from end-4/dots-hyprland (illogical-impulse), GPL-3.0 —
+* see README Credits: opaque 40px bar, three centered rounded pills, matching
+* fonts and warning colors.
+*/
+
+@define-color bar_bg {{colors.surface.default.hex}};
+@define-color bar_fg {{colors.on_surface.default.hex}};
+@define-color bar_fg_dim {{colors.on_surface_variant.default.hex}};
+@define-color pill_bg {{colors.surface_container_low.default.hex}};
+@define-color pill_bg_hi {{colors.surface_container_high.default.hex}};
+@define-color accent {{colors.primary.default.hex}};
+@define-color accent_fg {{colors.on_primary.default.hex}};
+@define-color urgent {{colors.error.default.hex}};
+@define-color urgent_fg {{colors.on_error.default.hex}};
+@define-color warn {{colors.tertiary.default.hex}};
+@define-color separator {{colors.outline_variant.default.hex}};
+
+/* Deliberately NOT matugen-derived. These two are the network-security lock's
+   "safe" and "degraded" colors, and a security signal must not change meaning
+   with the wallpaper — green always has to read as green. Everything else on
+   the bar still follows the generated palette. */
+@define-color ok #a6da95;
+@define-color caution #eed49f;
+
+* {
+    font-family: "Google Sans Flex", "Rubik", sans-serif;
+    font-size: 15px;
+    min-height: 0;
+}
+
+window#waybar {
+    background-color: @bar_bg;
+    color: @bar_fg;
+}
+
+/* ii pill groups: rounding.small (12px), surfaceContainerLow, 4px vertical margin
+   (-> 32px tall inside a 40px bar), 5px horizontal padding, 4px item spacing. */
+#leftcenter,
+#workspaces,
+#rightcenter,
+#indicators {
+    background-color: @pill_bg;
+    border-radius: 12px;
+    margin: 4px 0;
+    padding: 0 5px;
+}
+
+#leftcenter,
+#rightcenter {
+    min-width: 360px;
+}
+
+/* GridLayout columnSpacing: 4 */
+#leftcenter > *,
+#rightcenter > *,
+#indicators > * {
+    margin: 0 4px;
+}
+
+#custom-spark,
+#custom-window,
+#custom-cpu,
+#custom-memory,
+#mpris,
+#custom-clock,
+#custom-date,
+#custom-colorpicker,
+#custom-darkmode,
+#custom-snip,
+#idle_inhibitor,
+#custom-battery,
+#custom-claudebar,
+#custom-volume,
+#pulseaudio,
+#pulseaudio.source,
+#custom-netwatch,
+#custom-wifi,
+#custom-eth,
+#custom-netsec,
+#bluetooth {
+    background-color: transparent;
+    color: @bar_fg_dim;
+    padding: 0 4px;
+}
+
+/* The busy spinner stands in for custom/wifi's signal arc while a link is
+   changing state, so it has to be the same font — md-circle_slice is Nerd Font
+   PUA, exactly like the arcs, and lives nowhere else on this box. The old scan
+   spinner had no font-family rule at all, which is why it came out as tofu.
+   Size and baseline come from the same 115%/-1200 span net.sh wraps its icons
+   in, so nothing here needs a magic pixel value. */
+#custom-netwatch {
+    font-family: "JetBrainsMono Nerd Font", monospace;
+}
+
+/* Icon-bearing modules: text font first so digits/%/labels render identically
+   to every other module (clock#date included); Material Symbols Rounded is a
+   fallback used only for the PUA icon codepoints Google Sans Flex lacks.
+   (Material Symbols Rounded ships its own 0-9 glyphs, so putting it first
+   made every digit in these modules render in the icon font's digit style
+   instead of Google Sans Flex — this order avoids that.) */
+#custom-spark,
+#custom-window,
+#custom-cpu,
+#custom-memory,
+#mpris,
+#custom-clock,
+#custom-date,
+#custom-colorpicker,
+#custom-darkmode,
+#custom-snip,
+#idle_inhibitor,
+#custom-battery,
+#custom-volume,
+#pulseaudio,
+#pulseaudio.source,
+#custom-wifi,
+#custom-eth,
+#custom-netsec,
+#bluetooth,
+#custom-power {
+    font-family: "Google Sans Flex", "Material Symbols Rounded", sans-serif;
+}
+
+/* The one destructive target on the bar, so it reads as one on hover rather
+   than picking up the neutral tint the other icon buttons use. */
+#custom-power {
+    border-radius: 9999px;
+    padding: 0 6px;
+}
+#custom-power:hover {
+    background-color: alpha(@urgent, 0.18);
+    color: @urgent;
+}
+
+/* Same reasoning for claudebar; JetBrainsMono stays only as a trailing
+   fallback for anything the binary itself emits in its tooltip. */
+#custom-claudebar {
+    font-family: "Google Sans Flex", "Material Symbols Rounded", "JetBrainsMono Nerd Font", sans-serif;
+}
+
+/* Tooltips are their own GTK windows, so they only ever picked up the `*` rule
+   above — the Nerd Font section glyphs and the █/░ meters that claudebar and
+   net.sh draw were surviving on fontconfig fallback alone. Name the stack, and
+   keep a monospace tail so the meters line up column-for-column.
+
+   The surface is deliberately NOT matugen-derived, for the same reason
+   tooltip.sh hardcodes one-dark foregrounds: there is a light/dark toggle on
+   this bar, and a generated surface could go light under text that cannot.
+   Both `tooltip` and `tooltip.background` are named because adw-gtk3 paints
+   its rgba(0,0,0,0.8) on the `.background` node — a bare `tooltip {}` loses on
+   specificity and the transparency survives.
+
+   The label padding is the one lever that reaches claudebar's tooltip, which
+   draws its own markup from outside this repo. */
+tooltip,
+tooltip.background {
+    /* The toplevel is a transparent frame; `tooltip box` below carries the
+       visible surface. GTK clamps a tooltip to the monitor edge by its *window
+       geometry*, and geometry excludes the shadow margin — so the `margin: 8px`
+       that used to live here spilled off-screen and the right-hand tooltips
+       (wifi/eth/netsec, the only ones wide enough to get clamped) still sat
+       flush while every tiled window was inset. Padding is inside the geometry,
+       so it survives the clamp.
+
+       11px, not 8: gappoh insets a window's *border*, and mango draws a 3px one,
+       so a window's dark content stops 11px in. The tooltip's 1px border is too
+       faint to read as an edge, so lining its surface up with the window surface
+       is what actually looks aligned. Keep as gappoh + borderpx (config.conf).
+
+       No top pad — the tooltip hangs off the bar, which is not a screen edge, and
+       a gap there just reads as detached. */
+    background-color: transparent;
+    border: none;
+    padding: 0 11px 11px;
+    margin: 0;
+}
+tooltip box {
+    background-color: #21252b;
+    border: 1px solid #3e4451;
+    border-radius: 12px;
+    padding: 0;
+    /* Offset down-right so it reads as one light source rather than a halo —
+       a symmetric shadow on a small surface just looks like a smudge.
+
+       The shadow can only draw into the transparent padding above; past that
+       the tooltip's window geometry clips it. Budget against that 11px pad:
+       ~2px left, ~8px right, ~9px down. The ~1px that wants to go up is
+       clipped by the 0 top pad — invisible on a downward shadow. Shrink the
+       padding, or grow the offsets past it, and this truncates silently. */
+    box-shadow: 3px 4px 10px rgba(0, 0, 0, 0.55);
+}
+tooltip label {
+    font-family: "Google Sans Flex", "Material Symbols Rounded", "JetBrainsMono Nerd Font", monospace;
+    color: #abb2bf;
+    padding: 10px 14px;
+}
+
+#custom-spark {
+    font-size: 20px;
+    padding: 0 8px;
+}
+
+/* Left side: 2-line app id / window title (mango-window.sh sets its own markup sizes). */
+#custom-window {
+    color: @bar_fg;
+    padding: 0 10px;
+}
+
+/* Center: clock reads large like ii's ClockWidget. The large time and the small
+   date/pomodoro line are pango spans inside clock.sh — these rules only set the
+   base the spans scale from. Date is a second module so it can carry its own
+   tooltip (the month) and its own click (the calendar app). */
+#custom-clock,
+#custom-date {
+    color: @bar_fg;
+}
+
+/* Circular hover targets for the icon-only buttons, matching ii's
+   CircleUtilButton. idle_inhibitor belongs to this set: it used to be in none
+   of these lists, which is why it sat unpadded and a shade too bright. */
+#custom-colorpicker,
+#custom-darkmode,
+#custom-snip,
+#idle_inhibitor {
+    border-radius: 9999px;
+    padding: 0 6px;
+}
+#custom-colorpicker:hover,
+#custom-darkmode:hover,
+#custom-snip:hover,
+#idle_inhibitor:hover {
+    background-color: alpha(@bar_fg, 0.08);
+}
+
+/* Keep-awake has to be readable at a glance from across the desk, so the active
+   state is a filled pill rather than a tint — a colour shift on one small glyph
+   was not carrying. */
+#idle_inhibitor.activated {
+    background-color: @accent;
+    color: @accent_fg;
+}
+#idle_inhibitor.activated:hover {
+    background-color: alpha(@accent, 0.85);
+}
+
+/* Workspaces: 26px round pills, active = primary, urgent = error, empty dimmed.
+   Same geometry these had as ext/workspaces, moved from `#workspaces button`
+   onto the widget name — custom modules are GtkLabels, not GtkButtons, so the
+   old selector matches nothing now. One rule set covers all nine because they
+   are named custom/ws#1..9 and waybar collapses the suffix into a style class.
+   (The classes .1..9 are never referenced: a CSS identifier cannot start with
+   a digit. Only the state classes workspace.sh emits are.) */
+#custom-ws {
+    min-width: 26px;
+    padding: 0 4px;
+    margin: 0 2px;
+    background: transparent;
+    color: alpha(@bar_fg_dim, 0.90);
+    border-radius: 9999px;
+}
+#custom-ws.empty {
+    color: alpha(@bar_fg_dim, 0.40);
+}
+#custom-ws:hover {
+    background: alpha(@bar_fg_dim, 0.10);
+}
+#custom-ws.active {
+    background: @accent;
+    color: @accent_fg;
+}
+#custom-ws.urgent {
+    background: @urgent;
+    color: @urgent_fg;
+}
+
+/* Warning / critical states -> ii's error color. */
+#custom-cpu.warning,
+#custom-memory.warning,
+#custom-battery.critical {
+    color: @urgent;
+}
+
+/* Swap has no pill of its own any more (it lives in the memory tooltip), so
+   this tint is the only signal that anything got paged out. */
+#custom-memory.swapping {
+    color: @warn;
+}
+
+/* Pomodoro: focus borrows the accent, breaks stay quiet, paused reads dimmer
+   than idle so a forgotten timer looks forgotten. */
+#custom-clock.work {
+    color: @accent;
+}
+#custom-clock.paused {
+    color: @bar_fg_dim;
+}
+
+/* Wi-Fi / ethernet state colors: dim = normal, tertiary = degraded, error =
+   down. net.sh emits .weak/.good/.excellent from the RSSI it reads out of
+   `iw`, and .linked when the cable is in but there's no IP yet. */
+#custom-wifi.weak,
+#custom-eth.linked {
+    color: @warn;
+}
+#custom-wifi.good,
+#custom-wifi.excellent,
+#custom-eth.connected {
+    color: @bar_fg_dim;
+}
+
+/* Both slots are always visible (clicking them toggles the adapter), so a
+   downed link reads neutral rather than shouting in red — the lock below is
+   what's responsible for shouting. */
+#custom-wifi.disconnected,
+#custom-eth.disconnected {
+    color: @bar_fg_dim;
+}
+
+/* The security lock, in ascending order of "do something about this":
+   green = tunnelled end to end, amber = tunnelled but a resolver is off it,
+   red = traffic leaving in the clear. Open/WEP links and captive portals also
+   pulse, because a static red in the corner of a bar stops being seen. */
+#custom-netsec.secure {
+    color: @ok;
+}
+#custom-netsec.dnsleak,
+#custom-netsec.conflict {
+    color: @caution;
+}
+#custom-netsec.exposed {
+    color: @urgent;
+}
+#custom-netsec.offline {
+    color: @bar_fg_dim;
+}
+@keyframes netsec-pulse {
+    to {
+        color: @bar_fg_dim;
+    }
+}
+#custom-netsec.open,
+#custom-netsec.portal {
+    color: @urgent;
+    animation: netsec-pulse 1.1s ease-in-out infinite alternate;
+}
+
+/* Everything with a tooltip or a click target reacts the same way. battery,
+   clock and claudebar were missing from this list, so three of the four
+   right-hand modules felt dead under the pointer. */
+#custom-volume:hover,
+#pulseaudio:hover,
+#pulseaudio.source:hover,
+#custom-wifi:hover,
+#custom-eth:hover,
+#custom-netsec:hover,
+#bluetooth:hover,
+#custom-cpu:hover,
+#custom-memory:hover,
+#custom-clock:hover,
+#custom-date:hover,
+#custom-battery:hover,
+#custom-claudebar:hover,
+#mpris:hover {
+    background-color: alpha(@bar_fg, 0.06);
+    border-radius: 8px;
+}
+
+#tray {
+    padding: 0 10px;
+}
+#tray > * {
+    margin: 0 2px;
+}
+#tray > .needs-attention {
+    background-color: @urgent;
+    border-radius: 6px;
+}
+#tray menu {
+    background-color: @pill_bg_hi;
+    color: @bar_fg;
+}

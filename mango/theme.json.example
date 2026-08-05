@@ -1,0 +1,14 @@
+{
+  "background": {
+    "wallpaperPath": ""
+  },
+  "appearance": {
+    "palette": {
+      "accentColor": "",
+      "type": "auto"
+    },
+    "wallpaperTheming": {
+      "enableAppsAndShell": true
+    }
+  }
+}

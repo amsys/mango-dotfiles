@@ -1,0 +1,8 @@
+# Installed to /etc/sudoers.d/sddm-theme-sync (0440) by system/sddm/install.sh.
+#
+# Lets matugen's post_hook refresh the login screen without a password prompt on
+# every wallpaper switch. The target is root-owned and not user-writable, and the
+# trailing "" forbids arguments — so this grants exactly one fixed action, not
+# root. Pointing a NOPASSWD rule at a script inside $HOME (which is what the
+# upstream ii-sddm-theme README suggests) would instead grant NOPASSWD: ALL.
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/sddm-theme-sync ""

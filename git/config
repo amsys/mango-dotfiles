@@ -1,0 +1,43 @@
+# Migrated from ~/.gitconfig so it is tracked like everything else here.
+#
+# IMPORTANT: git reads $XDG_CONFIG_HOME/git/config first and ~/.gitconfig
+# second, and the later file wins. So this file does nothing until ~/.gitconfig
+# is deleted — see the README checklist. Do not add settings here and assume
+# they took effect while that file still exists.
+#
+# Requires git-delta. If delta is missing, every paged git command fails with
+# "cannot run delta", so install it before running install-config.sh.
+
+# Identity lives in config.local, which is not tracked — see config.local.example.
+# install-config.sh seeds it on first install and never overwrites it after that.
+# A missing file is not an error to git, so this include is safe either way.
+[include]
+	path = config.local
+
+# gh manages GitHub credentials. The empty helper line first is deliberate: it
+# clears any inherited helper so gh is the only one consulted.
+[credential "https://github.com"]
+	helper =
+	helper = !/usr/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper =
+	helper = !/usr/bin/gh auth git-credential
+
+[core]
+	pager = delta
+
+[interactive]
+	diffFilter = delta --color-only
+
+[delta]
+	navigate = true
+	line-numbers = true
+	# No theme set on purpose: matugen owns colour on this machine and a
+	# hardcoded delta theme would drift from the wallpaper palette at the next
+	# switch. Delta falls back to $BAT_THEME, which is the hook if you ever
+	# want it themed.
+
+[merge]
+	# zdiff3 shows the common ancestor in conflict markers, which turns most
+	# "which side do I want" guesses into a readable three-way.
+	conflictStyle = zdiff3

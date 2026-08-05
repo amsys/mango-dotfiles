@@ -1,0 +1,92 @@
+[config]
+version_check = false
+
+# ANSI base ported from end-4/dots-hyprland's scheme-base.json (gruvbox dark).
+# blend = true harmonizes each hue toward the wallpaper's source colour, which
+# replaces that project's generate_colors_material.py entirely.
+[config.custom_colors]
+term1 = { color = "#CC241D", blend = true }  # red
+term2 = { color = "#98971A", blend = true }  # green
+term3 = { color = "#D79921", blend = true }  # yellow
+term4 = { color = "#458588", blend = true }  # blue
+term5 = { color = "#B16286", blend = true }  # magenta
+term6 = { color = "#689D6A", blend = true }  # cyan
+
+[templates.kitty]
+input_path = '~/.config/matugen/templates/kitty/theme.conf'
+output_path = '~/.config/kitty/theme.conf'
+post_hook = 'pkill -USR1 -x kitty || true'
+
+[templates.m3colors]
+input_path = '~/.config/matugen/templates/colors.json'
+output_path = '~/.local/state/mango/generated/colors.json'
+
+[templates.hyprland]
+input_path = '~/.config/matugen/templates/hyprland/colors.conf'
+output_path = '~/.config/hypr/hyprland/colors.conf'
+
+[templates.mango]
+input_path = '~/.config/matugen/templates/mango/colors.conf'
+output_path = '~/.config/mango/colors.conf'
+
+[templates.waybar]
+input_path = '~/.config/matugen/templates/waybar/style.css'
+output_path = '~/.config/waybar/style.css'
+
+[templates.claudebar]
+input_path = '~/.config/matugen/templates/waybar/claudebar.sh'
+output_path = '~/.config/waybar/scripts/claudebar.sh'
+
+[templates.hyprlock]
+input_path = '~/.config/matugen/templates/hyprland/hyprlock-colors.conf'
+output_path = '~/.config/hypr/hyprlock/colors.conf'
+
+[templates.swaylock]
+input_path = '~/.config/matugen/templates/swaylock/config'
+output_path = '~/.config/swaylock/config'
+
+[templates.fuzzel]
+input_path = '~/.config/matugen/templates/fuzzel/fuzzel_theme.ini'
+output_path = '~/.config/fuzzel/fuzzel_theme.ini'
+
+[templates.rofi]
+input_path = '~/.config/matugen/templates/rofi/colors.rasi'
+output_path = '~/.config/rofi/colors.rasi'
+
+[templates.gtk3]
+input_path = '~/.config/matugen/templates/gtk-3.0/gtk.css'
+output_path = '~/.config/gtk-3.0/gtk.css'
+
+[templates.gtk4]
+input_path = '~/.config/matugen/templates/gtk-4.0/gtk.css'
+output_path = '~/.config/gtk-4.0/gtk.css'
+
+[templates.kde_colors]
+input_path = '~/.config/matugen/templates/kde/color.txt'
+output_path = '~/.local/state/mango/generated/color.txt'
+
+[templates.kdeglobals]
+input_path = '~/.config/matugen/templates/kde/kdeglobals'
+output_path = '~/.config/kdeglobals'
+
+[templates.wallpaper]
+input_path = '~/.config/matugen/templates/wallpaper.txt'
+output_path = '~/.local/state/mango/generated/wallpaper/path.txt'
+
+[templates.wlogout]
+input_path = '~/.config/matugen/templates/wlogout/style.css'
+output_path = '~/.config/wlogout/style.css'
+
+[templates.mako]
+input_path = '~/.config/matugen/templates/mako/config'
+output_path = '~/.config/mako/config'
+post_hook = 'makoctl reload || true'
+
+# Rendered as martin into a state file, then installed into the login screen by
+# /usr/local/bin/sddm-theme-sync — root-owned, argument-free, and it refuses any
+# render that differs from the template by more than colour values. See
+# system/sddm/. `|| true` so a missing sudoers rule can't break a wallpaper switch.
+[templates.sddm]
+input_path = '~/.config/matugen/templates/sddm/Colors.qml'
+output_path = '~/.local/state/mango/generated/sddm-colors.qml'
+post_hook = 'sudo -n /usr/local/bin/sddm-theme-sync || true'

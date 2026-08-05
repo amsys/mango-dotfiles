@@ -1,0 +1,15 @@
+# Per-machine git identity, included from git/config. Not tracked.
+#
+# install-config.sh copies this file to ~/.config/git/config.local on first
+# install and never overwrites it again — edit the copy, not this template.
+#
+# Without this, git refuses to commit ("Please tell me who you are").
+
+[user]
+	#email = you@example.com
+	#name = Your Name
+
+# Anything else that is yours rather than this machine's setup belongs here
+# too — signing keys, per-host URL rewrites, work-only aliases.
+#[user]
+#	signingkey = ...

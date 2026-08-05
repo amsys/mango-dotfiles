@@ -1,0 +1,130 @@
+/* Themed via matugen — colors.rasi is regenerated on every wallpaper switch,
+   this file is the static layout and stays put. */
+configuration {
+    modes: "drun,run,recursivebrowser,calc,clipboard:~/.config/rofi/clipboard.sh,ai:~/.config/rofi/ai.sh,window:~/.config/rofi/window.sh";
+    font: "Google Sans Flex 11";
+    show-icons: true;
+}
+
+@import "colors.rasi"
+
+/* rofi 2.0 paints any widget with no background-color opaque white — every
+   shipped theme declares this global and so must we, or mainbox/entry/listview
+   render as a white box. The blocks below still override it. */
+* {
+    background-color: transparent;
+}
+
+window {
+    background-color: @background;
+    border: 1px;
+    border-color: @border-color;
+    border-radius: 18px;
+    width: 520px;
+    location: center;
+    padding: 10px;
+}
+
+mainbox {
+    padding: 4px;
+}
+
+inputbar {
+    /* Default children also include "prompt", which duplicates the glyph with
+       the mode name ("Ask AI", "Launch"). The glyph already says the mode. */
+    children: [ "textbox-prompt-colon", "entry" ];
+    padding: 10px 14px;
+    spacing: 10px;
+    border-radius: 14px;
+    background-color: @surface-high;
+    text-color: @foreground;
+}
+
+/* expand:false is in rofi's built-in theme, but -theme replaces that theme
+   wholesale — without it the glyph widget eats half the inputbar and the entry
+   text starts in the middle of the bar. */
+textbox-prompt-colon {
+    str: "󰍉";
+    /* Google Sans Flex has no PUA glyphs — name the Nerd Font or this renders
+       as blank space. */
+    font: "JetBrainsMono Nerd Font 11";
+    expand: false;
+    margin: 0px 0.3em 0px 0px;
+    text-color: @accent;
+}
+
+/* Same trap as element-text below — rofi's built-in theme is what normally
+   gives entry its foreground, and -theme drops it. Without this, typed text
+   falls back to rofi's near-black default on the dark inputbar. inputbar's
+   text-color does not inherit down into entry. */
+entry {
+    placeholder: "Search…";
+    placeholder-color: @muted;
+    text-color: @foreground;
+}
+
+listview {
+    padding: 8px 0px 0px;
+    spacing: 2px;
+    border: 0;
+    scrollbar: false;
+}
+
+element {
+    padding: 8px 12px;
+    border-radius: 10px;
+    background-color: transparent;
+}
+
+element normal.normal, element alternate.normal {
+    background-color: transparent;
+    text-color: @foreground;
+}
+
+element selected.normal {
+    background-color: @accent-soft;
+    text-color: @on-accent-soft;
+}
+
+element urgent.normal, element alternate.urgent {
+    text-color: @red;
+}
+
+element active.normal, element alternate.active {
+    text-color: @accent;
+}
+
+element-icon {
+    size: 1.1em;
+    background-color: transparent;
+}
+
+/* Same trap as expand:false above — rofi's built-in theme is what normally
+   gives element-text "inherit", and -theme drops it. Without this the row text
+   falls back to rofi's near-black default and vanishes on a dark background. */
+element-text {
+    background-color: inherit;
+    text-color: inherit;
+}
+
+element-text highlight {
+    weight: bold;
+    text-color: @accent;
+}
+
+/* rofi's built-in theme puts a dashed rule on #message — override it, the hint
+   should read as a caption, not a boxed warning. */
+message {
+    border: 0;
+    padding: 2px 12px 0px;
+    background-color: transparent;
+}
+
+message textbox {
+    font: "Google Sans Flex 9";
+    text-color: @outline;
+}
+
+textbox {
+    text-color: @muted;
+}

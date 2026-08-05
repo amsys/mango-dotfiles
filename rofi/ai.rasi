@@ -1,0 +1,55 @@
+/* AI chat mode. Everything visual comes from config.rasi; this only widens the
+   window enough for a transcript and relabels the entry — the same 720px the
+   Wi-Fi and VPN pickers already use via -theme-str. */
+@import "config.rasi"
+
+configuration {
+    /* One text line per row: ai.sh wraps each message itself and emits one row
+       per wrapped line, so a long answer takes more rows instead of needing a
+       taller row (rofi has no variable-height rows). */
+    eh: 1;
+}
+
+window {
+    width: 720px;
+}
+
+entry {
+    placeholder: "Ask anything…";
+}
+
+/* The global prompt glyph is a magnifier, which is wrong for a chat. Name the
+   Nerd Font explicitly — Google Sans Flex has no PUA glyphs, and leaving this
+   to fontconfig fallback is how the waybar icons ended up mismatched. */
+textbox-prompt-colon {
+    str: "󰭹 ";
+    font: "JetBrainsMono Nerd Font 11";
+}
+
+listview {
+    lines: 14;
+    scrollbar: true;
+}
+
+/* Transcript rows are dense lines of a conversation, not menu items — drop the
+   menu-ish vertical padding and the per-row rounding. */
+element {
+    padding: 1px 8px;
+    border-radius: 0px;
+}
+
+element selected.normal {
+    border-radius: 6px;
+}
+
+/* Chat text is monospace-ish so the hanging indent under "You"/"AI" lines up. */
+element-text {
+    font: "JetBrainsMono Nerd Font 10";
+}
+
+/* The caption carries the chat position and the hotkeys, so it needs to be
+   readable rather than a whisper. */
+message textbox {
+    font: "Google Sans Flex 10";
+    text-color: @muted;
+}

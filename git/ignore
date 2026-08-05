@@ -1,0 +1,4 @@
+# Global gitignore. Applies to every repo on this machine, which is why the
+# Claude local-settings file lives here rather than in each project's
+# .gitignore — it is machine state, not project state.
+**/.claude/settings.local.json

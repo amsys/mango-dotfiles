@@ -1,0 +1,336 @@
+{
+    "layer": "top",
+    "position": "top",
+    "height": 40,
+    "spacing": 0,
+
+    "modules-left": ["custom/spark", "custom/window"],
+    "modules-center": ["group/leftcenter", "group/workspaces", "group/rightcenter"],
+    "modules-right": ["tray", "group/indicators"],
+
+    "custom/spark": {
+        "format": "",
+        "tooltip-format": "Launcher",
+        "on-click": "rofi -show drun"
+    },
+
+    "custom/window": {
+        "exec": "~/.config/waybar/scripts/mango-window.sh",
+        "return-type": "json",
+        "escape": false,
+        "max-length": 32,
+        "on-scroll-up": "brightnessctl set +5%",
+        "on-scroll-down": "brightnessctl set 5%-"
+    },
+
+    "group/leftcenter": {
+        "orientation": "horizontal",
+        "modules": ["custom/cpu", "custom/memory", "custom/battery", "custom/claudebar", "mpris"]
+    },
+    // cpu, memory, battery and clock run through scripts rather than waybar's
+    // built-ins for the same reason custom/wifi does: a built-in tooltip is a
+    // fixed string, so it cannot draw the meters the other tooltips use, name
+    // the process responsible, or show battery wear. Swap folded into the
+    // memory tooltip — a permanently-0% pill was noise.
+    "custom/cpu": {
+        "exec": "~/.config/waybar/scripts/cpu.sh",
+        "return-type": "json",
+        "interval": 3,
+        "escape": false,
+        "on-click": "kitty --class mango-monitor -e btop"
+    },
+    "custom/memory": {
+        "exec": "~/.config/waybar/scripts/memory.sh",
+        "return-type": "json",
+        "interval": 5,
+        "escape": false,
+        "on-click": "kitty --class mango-monitor -e btop"
+    },
+    "mpris": {
+        "format": "<span size='115%' rise='-1200'></span> {dynamic}",
+        "format-paused": "<span size='115%' rise='-1200'></span> {dynamic}",
+        "title-len": 28,
+        "dynamic-len": 30,
+        "player": "playerctld",
+        "on-click": "playerctl play-pause"
+    },
+
+    "group/workspaces": {
+        "orientation": "horizontal",
+        "modules": ["custom/wswatch", "custom/ws#1", "custom/ws#2", "custom/ws#3", "custom/ws#4", "custom/ws#5", "custom/ws#6", "custom/ws#7", "custom/ws#8", "custom/ws#9"]
+    },
+    // Nine custom modules instead of ext/workspaces: that module has no
+    // `tooltip` option at all, so a per-tag window list needs a per-tag widget.
+    // The `#N` suffix is what keeps the CSS to one rule set — waybar names all
+    // nine widgets `custom-ws` and turns the suffix into a style class, exactly
+    // like pulseaudio#source below.
+    //
+    // No interval on any of them: with a `signal` and no `interval` waybar runs
+    // the script once at startup and then only on SIGRTMIN+20, which
+    // custom/wswatch raises off mango's own event stream. `view` is mango's
+    // dispatch verb for switching tags, the same one bind=Ctrl,N,view,N,0 uses.
+    //
+    // The `exec` lines below name no monitor, so they render the FIRST monitor's
+    // tags — right on one screen, a lie on the second. scripts/bars.sh is what
+    // fixes that: it generates one bar per output and overrides nothing but each
+    // pill's `exec`, appending that bar's monitor name. Everything else in these
+    // nine blocks — and this whole file — is merged in underneath by `include`.
+    // Launched bare, waybar still works; it just shows one monitor's tags twice.
+    "custom/wswatch": {
+        "exec": "~/.config/waybar/scripts/workspace.sh --watch",
+        "restart-interval": 5,
+        "tooltip": false
+    },
+    "custom/ws#1": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 1",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,1,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+    "custom/ws#2": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 2",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,2,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+    "custom/ws#3": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 3",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,3,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+    "custom/ws#4": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 4",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,4,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+    "custom/ws#5": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 5",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,5,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+    "custom/ws#6": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 6",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,6,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+    "custom/ws#7": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 7",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,7,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+    "custom/ws#8": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 8",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,8,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+    "custom/ws#9": {
+        "exec": "~/.config/waybar/scripts/workspace.sh 9",
+        "return-type": "json",
+        "signal": 20,
+        "escape": false,
+        "on-click": "mmsg dispatch view,9,0",
+        "on-scroll-up": "mmsg dispatch viewtoleft,0",
+        "on-scroll-down": "mmsg dispatch viewtoright,0"
+    },
+
+    "group/rightcenter": {
+        "orientation": "horizontal",
+        "modules": ["custom/clock", "custom/date", "custom/colorpicker", "custom/darkmode", "custom/snip", "idle_inhibitor"]
+    },
+    // Both replace the built-in clock + clock#date pair: waybar's clock can
+    // scroll through timezones but cannot show several at once, and its tooltip
+    // is a strftime string, so there is nowhere to put a world clock grid, a
+    // month grid or the pomodoro meter. The two font sizes are pango spans now
+    // instead of two CSS rules.
+    //
+    // They are two modules rather than one because waybar hangs the tooltip and
+    // the clicks off the module, and each wants its own: the world clocks and
+    // the pomodoro on the time, the month and the calendar app on the date.
+    "custom/clock": {
+        "exec": "~/.config/waybar/scripts/clock.sh",
+        "return-type": "json",
+        "interval": 1,
+        "signal": 14,
+        "escape": false,
+        "on-click": "~/.config/waybar/scripts/clock.sh --toggle",
+        "on-click-right": "~/.config/waybar/scripts/clock.sh --reset"
+    },
+    // No signal: nothing but the wall clock ever changes this, and a minute is
+    // as fine-grained as a date gets.
+    "custom/date": {
+        "exec": "~/.config/waybar/scripts/clock.sh --date",
+        "return-type": "json",
+        "interval": 60,
+        "escape": false,
+        "on-click": "~/.config/waybar/scripts/clock.sh --calendar"
+    },
+    "custom/colorpicker": {
+        "format": "",
+        "tooltip-format": "Pick a color",
+        "on-click": "hyprpicker -a"
+    },
+    "custom/darkmode": {
+        "exec": "~/.config/waybar/scripts/darkmode.sh",
+        "interval": "once",
+        "tooltip-format": "Toggle dark/light",
+        "on-click": "~/.config/waybar/scripts/darkmode.sh --toggle"
+    },
+    "custom/snip": {
+        "format": "",
+        "tooltip-format": "Screenshot region",
+        "on-click": "grim -g \"$(slurp)\" - | wl-copy"
+    },
+    // U+E541 is not in Material Symbols Rounded — fontconfig was serving it out
+    // of Font Awesome, which is why this one icon never matched its neighbours.
+    // Same coffee cup in both states on purpose: the CSS pill is what carries
+    // the state, and a colour change on one small glyph was not carrying it.
+    "idle_inhibitor": {
+        "format": "<span size='115%' rise='-1200'>{icon}</span>",
+        "format-icons": { "activated": "", "deactivated": "" },
+        "tooltip-format-activated": "Keep awake: on — sleep and screen blanking inhibited",
+        "tooltip-format-deactivated": "Keep awake: off"
+    },
+    "custom/battery": {
+        "exec": "~/.config/waybar/scripts/battery.sh",
+        "return-type": "json",
+        "interval": 15,
+        "escape": false
+    },
+    "custom/claudebar": {
+        "exec": "sh ~/.config/waybar/scripts/claudebar.sh",
+        "return-type": "json",
+        "interval": 300,
+        "signal": 13,
+        "escape": false,
+        "on-click": "xdg-open https://claude.ai/settings/usage"
+    },
+
+    "tray": {
+        "icon-size": 18,
+        "spacing": 10
+    },
+
+    "group/indicators": {
+        "orientation": "horizontal",
+        "modules": ["custom/volwatch", "custom/volume", "pulseaudio#source", "custom/netwatch", "custom/wifi", "custom/eth", "custom/netsec", "bluetooth", "custom/power"]
+    },
+    // Last module of the last group of modules-right — the far right of the bar.
+    // Same menu the power key's tap opens, so there is one session UI, not two.
+    "custom/power": {
+        "format": "<span size='115%' rise='-1200'>󰐥</span>",
+        "tooltip-format": "Session menu",
+        "on-click": "~/.config/mango/scripts/powermenu.sh"
+    },
+    // NetworkManager watcher. Continuous module — no interval, no signal: it
+    // blocks on `nmcli monitor` and streams one spinner frame per line, so the
+    // animation costs a pipe write instead of re-running the 190ms net.sh.
+    // Sits immediately before custom/wifi, which emits empty text (= hidden)
+    // for the same period, so the spinner takes over the Wi-Fi icon's slot
+    // rather than appearing next to it. It also pkills 10 and 12 together on
+    // every NM event — that is what stops the security lock and the signal
+    // readout from disagreeing for up to a poll interval. `restart-interval`
+    // respawns it after a NetworkManager restart closes the monitor.
+    "custom/netwatch": {
+        "exec": "~/.config/waybar/scripts/net-watch.sh",
+        "restart-interval": 5,
+        "tooltip": false
+    },
+    // Volume goes through volume.sh rather than waybar's built-in `pulseaudio`
+    // for the same reason wifi/eth do: the built-in tooltip can only print
+    // waybar's own placeholders, so the active port, the card profile, the mic
+    // and the per-app streams have nowhere to go. Bar text is unchanged.
+    // Refresh is signal 21 from custom/volwatch on pactl subscribe, not a poll.
+    "custom/volwatch": {
+        "exec": "~/.config/waybar/scripts/volume.sh --watch",
+        "restart-interval": 5,
+        "tooltip": false
+    },
+    "custom/volume": {
+        "exec": "~/.config/waybar/scripts/volume.sh",
+        "return-type": "json",
+        "signal": 21,
+        "escape": false,
+        "on-click": "pavucontrol-qt",
+        "on-click-right": "pavucontrol-qt -t 5",
+        "on-scroll-up": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%+ -l 1.0",
+        "on-scroll-down": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%-"
+    },
+    "pulseaudio#source": {
+        "format": "{format_source}",
+        "format-source": "",
+        "format-source-muted": ""
+    },
+    // Wi-Fi and ethernet run through net.sh rather than waybar's built-in
+    // `network` module: its tooltip can only print waybar's own placeholders,
+    // and none of them expose RSSI, MFP, bitrate or link-quality counters.
+    // Both share signal 12, so one pkill refreshes the pair.
+    "custom/wifi": {
+        "exec": "~/.config/waybar/scripts/net.sh --wifi",
+        "return-type": "json",
+        "interval": 5,
+        "signal": 12,
+        "escape": false,
+        "on-click": "~/.config/waybar/scripts/wifi-menu.sh",
+        "on-click-right": "nm-connection-editor"
+    },
+    "custom/eth": {
+        "exec": "~/.config/waybar/scripts/net.sh --eth",
+        "return-type": "json",
+        "interval": 5,
+        "signal": 12,
+        "escape": false,
+        "on-click": "~/.config/waybar/scripts/eth-toggle.sh",
+        "on-click-right": "nm-connection-editor"
+    },
+    // The lock: grades link encryption, which interface actually carries the
+    // v4 and v6 default routes, and whether the resolvers ride the tunnel.
+    // Replaces the old custom/vpn — click is the VPN picker, or the captive
+    // portal login page when NM reports one.
+    "custom/netsec": {
+        "exec": "~/.config/waybar/scripts/net.sh --sec",
+        "return-type": "json",
+        "interval": 5,
+        "signal": 10,
+        "escape": false,
+        "on-click": "~/.config/waybar/scripts/net.sh --sec-click",
+        "on-click-right": "~/.config/waybar/scripts/net.sh --sec-edit"
+    },
+    "bluetooth": {
+        "format": "<span size='115%' rise='-1200'></span>",
+        "format-connected": "<span size='115%' rise='-1200'></span>",
+        "format-disabled": "<span size='115%' rise='-1200'></span>",
+        "tooltip-format": "{controller_alias}",
+        "tooltip-format-connected": "{controller_alias}: {device_enumerate}",
+        "on-click": "blueman-manager"
+    }
+}
