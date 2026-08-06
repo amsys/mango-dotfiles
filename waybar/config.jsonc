@@ -25,7 +25,7 @@
 
     "group/leftcenter": {
         "orientation": "horizontal",
-        "modules": ["custom/cpu", "custom/memory", "custom/battery", "custom/claudebar", "mpris"]
+        "modules": ["custom/cpu", "custom/memory", "custom/docker", "custom/battery", "custom/claudebar", "mpris"]
     },
     // cpu, memory, battery and clock run through scripts rather than waybar's
     // built-ins for the same reason custom/wifi does: a built-in tooltip is a
@@ -45,6 +45,19 @@
         "interval": 5,
         "escape": false,
         "on-click": "kitty --class mango-monitor -e btop"
+    },
+    // `docker ps` is ~65ms so this polls; `docker stats` is ~2s so the tooltip
+    // has no per-container CPU/RAM column. Signal 15 is pushed by
+    // docker-menu.sh after start/stop/restart so the pill doesn't wait out
+    // the interval — signals in use elsewhere: 10 netsec, 12 wifi/eth,
+    // 13 claudebar, 14 clock, 20 workspaces, 21 volume.
+    "custom/docker": {
+        "exec": "~/.config/waybar/scripts/docker.sh",
+        "return-type": "json",
+        "interval": 10,
+        "signal": 15,
+        "escape": false,
+        "on-click": "~/.config/waybar/scripts/docker-menu.sh"
     },
     "mpris": {
         "format": "<span size='115%' rise='-1200'></span> {dynamic}",

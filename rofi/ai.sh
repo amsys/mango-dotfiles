@@ -315,7 +315,9 @@ if [ "${1:-}" = "--launch" ]; then
 	# History is Alt+[ / Alt+] because mango grabs Alt+Left/Right (focusdir) —
 	# a compositor bind never reaches rofi. Check mango/config.conf before
 	# picking any Alt combo here.
-	exec rofi -show ai -theme "$HOME/.config/rofi/ai.rasi" \
+	# -modes restricts rofi to this mode alone: without it, rofi runs every
+	# mode in config.rasi's list at startup, including clipboard.sh (~1.3s).
+	exec rofi -show ai -modes "ai:$HOME/.config/rofi/ai.sh" -theme "$HOME/.config/rofi/ai.rasi" \
 		-kb-accept-custom "Return" \
 		-kb-accept-entry "Control+Return" \
 		-kb-custom-1 "Alt+n" \

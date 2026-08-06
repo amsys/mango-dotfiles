@@ -90,7 +90,9 @@ if [[ ${1:-} == --launch ]]; then
 	# No -kb-custom here: Enter is the only action, so unlike ai.sh and
 	# clipboard.sh this could be a bare `rofi -show window`. It keeps the
 	# --launch shape anyway so every rofi bind in config.conf looks the same.
-	exec rofi -show window -theme "$THEME"
+	# -modes restricts rofi to this mode alone: without it, rofi runs every
+	# mode in config.rasi's list at startup, including clipboard.sh (~1.3s).
+	exec rofi -show window -modes "window:$HOME/.config/rofi/window.sh" -theme "$THEME"
 fi
 
 # ---------------------------------------------------------------- mode

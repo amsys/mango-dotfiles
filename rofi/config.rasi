@@ -1,7 +1,12 @@
 /* Themed via matugen — colors.rasi is regenerated on every wallpaper switch,
    this file is the static layout and stays put. */
 configuration {
-    modes: "drun,run,recursivebrowser,calc,clipboard:~/.config/rofi/clipboard.sh,ai:~/.config/rofi/ai.sh,window:~/.config/rofi/window.sh";
+    /* rofi runs EVERY mode listed here at startup, to completion, before it
+       draws — even the one you didn't ask for. Only the free C builtins belong
+       in this list. recursivebrowser walks all 244k dirs under ~; the three
+       script modes cost ~1.35s between them (clipboard.sh alone is ~1.3s).
+       Each of those is declared via -modes in its own launcher instead. */
+    modes: "drun,run,calc";
     font: "Google Sans Flex 11";
     show-icons: true;
 }

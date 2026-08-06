@@ -63,6 +63,7 @@ window#waybar {
 #custom-window,
 #custom-cpu,
 #custom-memory,
+#custom-docker,
 #mpris,
 #custom-clock,
 #custom-date,
@@ -92,6 +93,15 @@ window#waybar {
    Size and baseline come from the same 115%/-1200 span net.sh wraps its icons
    in, so nothing here needs a magic pixel value. */
 #custom-netwatch {
+    font-family: "JetBrainsMono Nerd Font", monospace;
+}
+
+/* The whale is nf-linux-docker (U+F308), Nerd Font PUA — Google Sans Flex and
+   Material Symbols Rounded both lack it, so this module names the Nerd Font
+   rather than joining the shared icon stack above. Same exception
+   #custom-netwatch makes, for the same reason. Size and baseline still come
+   from barico()'s 115%/-1200 span, so no magic pixel value here. */
+#custom-docker {
     font-family: "JetBrainsMono Nerd Font", monospace;
 }
 
@@ -279,6 +289,7 @@ tooltip label {
 /* Warning / critical states -> ii's error color. */
 #custom-cpu.warning,
 #custom-memory.warning,
+#custom-docker.warning,
 #custom-battery.critical {
     color: @urgent;
 }
@@ -359,6 +370,7 @@ tooltip label {
 #bluetooth:hover,
 #custom-cpu:hover,
 #custom-memory:hover,
+#custom-docker:hover,
 #custom-clock:hover,
 #custom-date:hover,
 #custom-battery:hover,

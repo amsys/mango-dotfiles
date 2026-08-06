@@ -8,8 +8,9 @@
 #
 # Launched through --launch rather than a bare `rofi -show clipboard` because
 # -kb-custom-N can only be set on the command line, and the delete and wipe
-# keys are the whole point. The `clipboard:` mode stays registered in
-# config.rasi so `rofi -show clipboard` still works from anywhere else.
+# keys are the whole point. `-modes` is passed explicitly rather than relying
+# on config.rasi's modes list — rofi runs every listed mode at startup, and
+# this script alone costs over a second (see the fork counts below).
 set -euo pipefail
 
 THEME="$HOME/.config/rofi/clipboard.rasi"
@@ -28,26 +29,30 @@ opt() { printf '\0%s\x1f%s\n' "$1" "$2"; }
 # the [[ ]] test itself.
 BIN_RE='^\[\[ binary data ([0-9.]+ [KMGT]?i?B) ([^ ]+)( ([0-9]+x[0-9]+))? \]\]$'
 
-# Echoes the extension, or nothing when the row is text or a binary we cannot
-# render (a pdf has no thumbnail to decode).
+# Echoes the extension via $REPLY, or empty when the row is text or a binary
+# we cannot render (a pdf has no thumbnail to decode). $REPLY instead of a
+# `$( )` return: this runs once per row (up to $LIMIT of them) and a command
+# substitution forks a subshell every time — measurably the slow part.
 img_ext() { # preview text
+	REPLY=""
 	[[ $1 =~ $BIN_RE ]] || return 0
 	# Copied out first: the next =~ overwrites BASH_REMATCH.
 	local kind=${BASH_REMATCH[2]}
-	[[ $kind =~ ^(png|jpg|jpeg|gif|bmp|webp)$ ]] && printf '%s' "$kind"
+	[[ $kind =~ ^(png|jpg|jpeg|gif|bmp|webp)$ ]] && REPLY=$kind
 	return 0
 }
 
-# What the row actually shows. Text passes through untouched; a binary entry
-# becomes "png · 717×433 · 10 KiB", because the thumbnail beside it is already
-# the preview — repeating "[[ binary data ]]" next to the image says nothing.
+# What the row actually shows, via $REPLY (see img_ext for why). Text passes
+# through untouched; a binary entry becomes "png · 717×433 · 10 KiB", because
+# the thumbnail beside it is already the preview — repeating "[[ binary data
+# ]]" next to the image says nothing.
 pretty() { # preview text
-	[[ $1 =~ $BIN_RE ]] || { printf '%s' "$1"; return 0; }
+	[[ $1 =~ $BIN_RE ]] || { REPLY=$1; return 0; }
 	local size=${BASH_REMATCH[1]} kind=${BASH_REMATCH[2]} dim=${BASH_REMATCH[4]}
 	if [[ -n $dim ]]; then
-		printf '%s · %s · %s' "$kind" "${dim/x/×}" "$size"
+		REPLY="$kind · ${dim/x/×} · $size"
 	else
-		printf '%s · %s' "$kind" "$size"
+		REPLY="$kind · $size"
 	fi
 }
 
@@ -83,14 +88,14 @@ prune() { # ids currently listed, one per line
 # ---------------------------------------------------------------- selftest
 
 if [[ ${1:-} == test ]]; then
-	[[ $(img_ext '[[ binary data 12 KiB png 800x600 ]]') == png ]] || { echo "png not detected"; exit 1; }
-	[[ $(img_ext '[[ binary data 1 MiB jpeg 4000x3000 ]]') == jpeg ]] || { echo "jpeg not detected"; exit 1; }
-	[[ -z $(img_ext 'some copied text') ]] || { echo "text misread as image"; exit 1; }
-	[[ -z $(img_ext 'see [[ binary data 1 KiB png 1x1 ]] in the docs') ]] || { echo "prose misread as image"; exit 1; }
-	[[ -z $(img_ext '[[ binary data 3 KiB application/pdf ]]') ]] || { echo "pdf offered a thumbnail"; exit 1; }
-	[[ $(pretty '[[ binary data 10 KiB png 717x433 ]]') == 'png · 717×433 · 10 KiB' ]] || { echo "image label wrong"; exit 1; }
-	[[ $(pretty '[[ binary data 3 KiB application/pdf ]]') == 'application/pdf · 3 KiB' ]] || { echo "non-image label wrong"; exit 1; }
-	[[ $(pretty 'git push --force-with-lease') == 'git push --force-with-lease' ]] || { echo "text label rewritten"; exit 1; }
+	img_ext '[[ binary data 12 KiB png 800x600 ]]'; [[ $REPLY == png ]] || { echo "png not detected"; exit 1; }
+	img_ext '[[ binary data 1 MiB jpeg 4000x3000 ]]'; [[ $REPLY == jpeg ]] || { echo "jpeg not detected"; exit 1; }
+	img_ext 'some copied text'; [[ -z $REPLY ]] || { echo "text misread as image"; exit 1; }
+	img_ext 'see [[ binary data 1 KiB png 1x1 ]] in the docs'; [[ -z $REPLY ]] || { echo "prose misread as image"; exit 1; }
+	img_ext '[[ binary data 3 KiB application/pdf ]]'; [[ -z $REPLY ]] || { echo "pdf offered a thumbnail"; exit 1; }
+	pretty '[[ binary data 10 KiB png 717x433 ]]'; [[ $REPLY == 'png · 717×433 · 10 KiB' ]] || { echo "image label wrong"; exit 1; }
+	pretty '[[ binary data 3 KiB application/pdf ]]'; [[ $REPLY == 'application/pdf · 3 KiB' ]] || { echo "non-image label wrong"; exit 1; }
+	pretty 'git push --force-with-lease'; [[ $REPLY == 'git push --force-with-lease' ]] || { echo "text label rewritten"; exit 1; }
 	[[ $(confirm_wipe '') == armed ]] || { echo "wipe armed wrongly"; exit 1; }
 	[[ $(confirm_wipe armed) == wiped ]] || { echo "wipe did not confirm"; exit 1; }
 	tmp=$(mktemp -d)
@@ -109,18 +114,14 @@ if [[ ${1:-} == --launch ]]; then
 	# Alt+d / Alt+Shift+d match ai.sh's delete / wipe-everything pair. Check
 	# mango/config.conf before picking any other Alt combo: a compositor bind
 	# never reaches rofi.
-	# Size the window to the widest preview instead of a fixed width. -theme-str
-	# is the only way in: the width has to be settled before rofi starts and the
-	# mode script does not run until after. wc -L, not awk length(), because it
-	# counts display width — an entry full of "…" must not overcount.
-	# ponytail: cliphist truncates previews at 100 chars, so a full history
-	# usually lands on the upper clamp; this earns its keep on a short one.
-	W=$(($(cliphist list 2> /dev/null | head -"$LIMIT" | cut -f2- | wc -L) + 12))
-	((W < 55)) && W=55   # the message line's hotkey legend is ~55 wide
-	((W > 118)) && W=118 # ~830px at font 11, comfortable on a 1920px screen
-
-	exec rofi -show clipboard -theme "$THEME" \
-		-theme-str "window { width: ${W}ch; }" \
+	# ponytail: fixed width instead of measuring the widest preview with a
+	# `cliphist list | wc -L` pass. cliphist truncates previews at 100 chars,
+	# so any history past a couple dozen entries lands on the upper clamp
+	# anyway (750 entries here) — the old probe paid a full db scan for a
+	# constant. Restore it (see git history) if the window ever needs to
+	# shrink for a near-empty clipboard.
+	exec rofi -show clipboard -modes "clipboard:$HOME/.config/rofi/clipboard.sh" -theme "$THEME" \
+		-theme-str "window { width: 118ch; }" \
 		-kb-custom-1 "Alt+d" \
 		-kb-custom-2 "Alt+Shift+d"
 fi
@@ -186,8 +187,8 @@ trap 'rm -f "$BUF"' EXIT
 while IFS= read -r row; do
 	[[ -n $row ]] || continue
 	preview=${row#*$'\t'}
-	disp=$(pretty "$preview")
-	ext=$(img_ext "$preview")
+	pretty "$preview"; disp=$REPLY
+	img_ext "$preview"; ext=$REPLY
 	if [[ -n $ext ]] && path=$(thumb "${row%%$'\t'*}" "$ext" "$row"); then
 		printf '%s\0icon\x1f%s\x1fdisplay\x1f%s\n' "$row" "$path" "$disp" >> "$BUF"
 	else
