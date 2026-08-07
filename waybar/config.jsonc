@@ -308,10 +308,17 @@
     // `network` module: its tooltip can only print waybar's own placeholders,
     // and none of them expose RSSI, MFP, bitrate or link-quality counters.
     // Both share signal 12, so one pkill refreshes the pair.
+    //
+    // The interval below each is a backstop, not the real refresh path:
+    // net-watch.sh (custom/netwatch) already fires this signal the instant
+    // NetworkManager reports a transition, so these only cover a signal that
+    // was somehow missed or a watcher mid-respawn. wifi keeps a shorter one
+    // because the signal-strength arc drifts continuously between join
+    // events, which `nmcli monitor` has nothing to say about.
     "custom/wifi": {
         "exec": "~/.config/waybar/scripts/net.sh --wifi",
         "return-type": "json",
-        "interval": 5,
+        "interval": 30,
         "signal": 12,
         "escape": false,
         "on-click": "~/.config/waybar/scripts/wifi-menu.sh",
@@ -320,7 +327,7 @@
     "custom/eth": {
         "exec": "~/.config/waybar/scripts/net.sh --eth",
         "return-type": "json",
-        "interval": 5,
+        "interval": 60,
         "signal": 12,
         "escape": false,
         "on-click": "~/.config/waybar/scripts/eth-toggle.sh",
@@ -333,7 +340,7 @@
     "custom/netsec": {
         "exec": "~/.config/waybar/scripts/net.sh --sec",
         "return-type": "json",
-        "interval": 5,
+        "interval": 60,
         "signal": 10,
         "escape": false,
         "on-click": "~/.config/waybar/scripts/net.sh --sec-click",

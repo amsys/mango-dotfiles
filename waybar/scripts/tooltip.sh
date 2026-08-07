@@ -156,6 +156,27 @@ hdur() { # seconds -> "2h 14m" / "14m" / "48s"
 	}'
 }
 
+# Cache a tooltip across polls faster than it needs to change — waybar re-execs
+# a module on its text interval just to redraw one number, and the tooltip
+# underneath is hidden ~99% of the time it is built. Key is caller-chosen: a
+# bucketed timestamp for a TTL ("$(( $(date +%s) / 10 ))" = a new key every
+# 10s) or content that only changes when the tooltip actually should
+# ("$MINUTE|$POMODORO_STATE"). Cache file is "key\ntooltip-markup", and
+# tip_stale reads only the first line, so a large tooltip costs nothing to
+# check.
+#
+#   if tip_stale "$CACHE" "$KEY"; then TIP=$(…); tip_save "$CACHE" "$KEY" "$TIP"
+#   else TIP=$(tip_load "$CACHE"); fi
+tip_stale() { # cache-file, key
+	{ IFS= read -r _ts_k; } < "$1" 2> /dev/null
+	[ "${_ts_k:-}" = "$2" ] && return 1
+	return 0
+}
+tip_load() { tail -n +2 "$1" 2> /dev/null; }
+tip_save() { # cache-file, key, tooltip
+	{ printf '%s\n' "$2"; printf '%s' "$3"; } > "$1.tmp" && mv -f "$1.tmp" "$1"
+}
+
 if [ "${1:-}" = "tooltip-selftest" ]; then
 	bar 50 "$C_GOOD" | grep -q '>██████████</span><span foreground="#3e4451">░░░░░░░░░░<' || { echo "bar 50 wrong"; exit 1; }
 	bar 0 "$C_GOOD" | grep -q '></span><span foreground="#3e4451">░░░░░░░░░░░░░░░░░░░░<' || { echo "bar 0 wrong"; exit 1; }
@@ -181,6 +202,13 @@ if [ "${1:-}" = "tooltip-selftest" ]; then
 	[ "$(hkib 0)" = "none" ] || { echo "hkib 0 should read as none, not 0.0 KiB"; exit 1; }
 	[ "$(hcount 1234567)" = "1.2M" ] || { echo "hcount wrong: $(hcount 1234567)"; exit 1; }
 	[ "$(hdur 8040)" = "2h 14m" ] && [ "$(hdur 90)" = "1m 30s" ] && [ "$(hdur 9)" = "9s" ] || { echo "hdur wrong"; exit 1; }
+	TC=$(mktemp)
+	tip_stale "$TC" k1 || { echo "tip_stale should be stale for a missing/empty cache"; exit 1; }
+	tip_save "$TC" k1 hello
+	tip_stale "$TC" k1 && { echo "tip_stale should not be stale right after a save with the same key"; exit 1; }
+	tip_stale "$TC" k2 || { echo "tip_stale should go stale once the key changes"; exit 1; }
+	[ "$(tip_load "$TC")" = hello ] || { echo "tip_load wrong: $(tip_load "$TC")"; exit 1; }
+	rm -f "$TC" "$TC.tmp"
 	echo "ok"
 	exit 0
 fi

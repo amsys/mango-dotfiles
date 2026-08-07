@@ -358,6 +358,17 @@ LOCALZ=$(printf '%(%z)T' "$NOW")
 LOCALDAY=$(printf '%(%j)T' "$NOW")
 LOCALZONE=$(local_zone)
 
+# Keyed on the displayed minute, not a TTL: the tooltip (world clocks,
+# calendar) only changes when TIME does, so this costs zero staleness rather
+# than trading it for a cheaper poll. Only while idle, though — a running or
+# paused pomodoro's "left" countdown ticks every second (this script's poll
+# *is* the tick, see the file header), and caching it would freeze the
+# countdown for up to a minute. Idle is the common case, so this still
+# collapses ~59 of every 60 polls into one cat.
+TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-clock-tip"
+if [ "$ST" = idle ] && ! tip_stale "$TIP_CACHE" "$TIME"; then
+	TIP=$(tip_load "$TIP_CACHE")
+else
 TIP=$(
 	title "$(printf '%(%A, %d %B %Y)T' "$NOW")"
 	rule
@@ -420,5 +431,7 @@ TIP=$(
 		;;
 	esac
 )
+	[ "$ST" = idle ] && tip_save "$TIP_CACHE" "$TIME" "$TIP"
+fi
 
 emit "$CLASS" "$TEXT" "$TIP"

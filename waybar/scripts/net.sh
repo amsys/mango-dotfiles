@@ -341,6 +341,17 @@ sec_emit() {
 	secure) HEAD="Encrypted end to end"; ICO=$(ic_lock) ;;
 	esac
 
+	# CLASS/ICO above are recomputed every call — that lock icon has to stay
+	# live. The tooltip body (route conflicts, tunnel rows, resolver rows…) is
+	# cached on the state that actually drives it, not a timer: routes,
+	# tunnels and resolvers only change on a real network event, which
+	# net-watch.sh already turns into an immediate re-exec (RTMIN+10). A
+	# time-based TTL would either serve a stale tooltip after a real change
+	# within the same window, or rebuild for no reason when nothing did — this
+	# has zero staleness and a near-total cache hit rate on an idle network.
+	TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-sec-tip"
+	TIP_KEY=$(printf '%s' "$CLASS$CONN$SEC$V4$V6$TROWS$CONF$DNS$DNSDEVS" | tr '\n\t' '  ')
+	if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 	TIP=$(
 		title "$HEAD"
 		rule 56
@@ -464,6 +475,10 @@ sec_emit() {
 			dim "connectivity: $CONN — click to open the login page"
 		fi
 	)
+	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
+	else
+		TIP=$(tip_load "$TIP_CACHE")
+	fi
 	emit "$CLASS" "$(barico "$ICO")" "$TIP"
 }
 
@@ -627,6 +642,11 @@ wifi_emit() {
 	WROW=$(wifi_row)
 	SECRAW=$(link_sec "$WROW")
 
+	# CLASS/PCT/the arc above stay live every call; only the tooltip body is
+	# cached — see the matching comment in sec_emit.
+	TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-wifi-tip"
+	TIP_KEY="$CLASS-$(( $(date +%s) / 15 ))"
+	if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 	TIP=$(
 		title "$(printf '%s' "${SSID:-Wi-Fi}" | esc)"
 		rule 50
@@ -674,6 +694,10 @@ wifi_emit() {
 		sect "󰩟" "Addressing"
 		addr_rows "$WIFI_DEV"
 	)
+	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
+	else
+		TIP=$(tip_load "$TIP_CACHE")
+	fi
 	emit "$CLASS" "$(barico "$(arc "$PCT")") $PCT%" "$TIP"
 }
 
@@ -694,6 +718,16 @@ eth_emit() {
 		CLASS=connected TEXT=" $IP4" ICO=$(ic_eth)
 	fi
 
+	# Same reasoning as sec_emit: carrier/speed/IP only change on a real link
+	# event, which net-watch.sh already turns into an immediate re-exec, so
+	# keying on that state beats a timer. The rx/tx counters in "Counters"
+	# below are left out of the key deliberately — those climb every poll on
+	# an active link and would defeat caching entirely if included; they are
+	# the one part of this tooltip that stays only as fresh as the last real
+	# link change or the 60s backstop interval.
+	TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-eth-tip"
+	TIP_KEY="$CLASS$CARRIER$OPER$SPEED$DUPLEX$IP4"
+	if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 	TIP=$(
 		title "Ethernet · $ETH_DEV"
 		rule 34
@@ -727,6 +761,10 @@ eth_emit() {
 			dim "unavailable"
 		fi
 	)
+	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
+	else
+		TIP=$(tip_load "$TIP_CACHE")
+	fi
 	emit "$CLASS" "$(barico "$ICO")$TEXT" "$TIP"
 }
 

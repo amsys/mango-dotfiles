@@ -132,6 +132,13 @@ CLASS=normal
 
 TEXT="$(barico "$(ic_mem)") ${PCT}%"
 
+# Invisible ~99% of the time, so it rebuilds on a slower clock (15s) than the
+# 5s text does — see tip_stale() in tooltip.sh. Ceiling: "Top by RSS" and the
+# fault rates can be up to 15s stale.
+TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-memory-tip"
+TIP_KEY=$(( $(date +%s) / 15 ))
+if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
+
 # Fault rates need an interval, so keep the previous sample next to its clock.
 NOW=$(awk '{ printf "%d", $1 }' /proc/uptime)
 MINRATE=0 MAJRATE=0
@@ -194,5 +201,9 @@ TIP=$(
 		done
 	fi
 )
+	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
+else
+	TIP=$(tip_load "$TIP_CACHE")
+fi
 
 emit "$CLASS" "$TEXT" "$TIP"

@@ -359,6 +359,13 @@ CLASS=normal
 
 TEXT="$(barico "$(ic_cpu)") ${TOTAL}%"
 
+# The tooltip is two ps passes plus every hwmon and is invisible ~99% of the
+# time, so it rebuilds on a slower clock (10s) than the 3s text does — see
+# tip_stale() in tooltip.sh. Ceiling: "Top now" and "Cores" can be up to 10s
+# stale on a tooltip that was already only as fresh as the last hover.
+TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-cpu-tip"
+TIP_KEY=$(( $(date +%s) / 10 ))
+if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 TIP=$(
 	title "CPU"
 	# Fixed width: the rule is the widest line, so this tooltip does not resize
@@ -427,5 +434,9 @@ TIP=$(
 		dim "atop history unavailable"
 	fi
 )
+	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
+else
+	TIP=$(tip_load "$TIP_CACHE")
+fi
 
 emit "$CLASS" "$TEXT" "$TIP"

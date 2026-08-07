@@ -326,6 +326,15 @@ if [ "$STATUS" = Discharging ] && rapl_readable; then
 	fi
 fi
 
+
+# Wear, DIMM-style hardware info and the power-history graph move slowly, so
+# the tooltip rebuilds on a much slower clock (60s) than the 15s poll — but
+# the RAPL sampling above always runs every poll regardless: it is a
+# two-sample delta against $RAPL_STATE, and skipping a sample would bias the
+# next wattage reading across whatever gap the cache introduced.
+TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-battery-tip"
+TIP_KEY="$CLASS-$(( $(date +%s) / 60 ))"
+if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 TIP=$(
 	title "Battery${MODEL:+ · $MODEL}"
 	rule
@@ -383,5 +392,9 @@ TIP=$(
 		dim "click for a powertop report"
 	fi
 )
+	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
+else
+	TIP=$(tip_load "$TIP_CACHE")
+fi
 
 emit "$CLASS" "$TEXT" "$TIP"
