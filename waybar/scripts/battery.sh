@@ -35,11 +35,14 @@ ic_bat() { # capacity -> the matching fill level
 	esac
 }
 
-# Nerd Font MDI for the tooltip sections, matching net.sh.
-IC_CHARGE='󰁹'  # md-battery      U+F0079
-IC_HEALTH='󰗶'  # md-heart_pulse  U+F05F6
-IC_POWER='󰉁'   # md-flash        U+F0241
-IC_SHARE='󰞯'   # md-chart_donut  U+F07AF
+# Material Symbols Rounded energy_savings_leaf, U+EC1A — the eco-mode marker
+# on the bar icon. Colour is inline pango, not a CSS class: waybar's `.class`
+# tints the whole widget, and `.critical` already needs the NN% text red at
+# <=20%, so the two would fight over one colour if this were a class instead.
+# #a6da95 matches @ok in matugen/templates/waybar/style.css — deliberately not
+# matugen-derived, same reasoning as the netsec lock: a mode signal has to
+# read as green regardless of the wallpaper.
+ic_leaf_green() { printf '<span foreground="#a6da95">\xee\xb0\x9a</span>'; }
 
 # ---------------------------------------------------------------- primitives
 
@@ -296,7 +299,13 @@ CLASS=discharging
 case "$STATUS" in Charging) CLASS=charging ;; Full) CLASS=full ;; esac
 [ "$CHARGE" -le 20 ] && [ "$CLASS" != charging ] && CLASS=critical
 
-TEXT="$(barico "$ICON") ${CHARGE}%"
+MODE=$(power_mode)
+WEAK=""
+[ -f "${XDG_RUNTIME_DIR:-/tmp}/mango-powermode.weak" ] && WEAK=1
+LEAF=""
+[ "$MODE" = eco ] && LEAF=" $(barico "$(ic_leaf_green)")"
+
+TEXT="$(barico "$ICON") ${CHARGE}%${LEAF}"
 
 SECS=$(remaining "$NOW" "$FULL" "$RATE" "$STATUS")
 
@@ -333,39 +342,41 @@ fi
 # two-sample delta against $RAPL_STATE, and skipping a sample would bias the
 # next wattage reading across whatever gap the cache introduced.
 TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-battery-tip"
-TIP_KEY="$CLASS-$(( $(date +%s) / 60 ))"
+# $MODE folded in so a toggle repaints instantly, not just on the next
+# minute's bucket — CLASS alone doesn't change on a mode flip.
+TIP_KEY="$CLASS-$MODE-$(tip_bucket 60)"
 if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 TIP=$(
 	title "Battery${MODEL:+ · $MODEL}"
-	rule
+	rule 44
 
-	sect "$IC_CHARGE" "Charge"
-	row "$(printf '%3s%%  %s' "$CHARGE" "$(bar "$CHARGE" "$(grade $((100 - CHARGE)) 70 80)")")"
-	row "$(uh "$NOW" "$UNIT") of $(uh "$FULL" "$UNIT")  ·  $STATUS"
+	kv Charge "$(bar "$CHARGE" "$(grade $((100 - CHARGE)) 70 80)") $(mono "$(printf '%3s%%' "$CHARGE")")"
+	CDET="$(uh "$NOW" "$UNIT") / $(uh "$FULL" "$UNIT") · $STATUS"
 	if [ "$SECS" -gt 0 ]; then
 		case "$STATUS" in
-		Charging) dim "$(hdur "$SECS") until full" ;;
-		*) dim "$(hdur "$SECS") left at this rate" ;;
+		Charging) CDET="$CDET · $(hdur "$SECS") until full" ;;
+		*) CDET="$CDET · $(hdur "$SECS") left" ;;
 		esac
 	elif [ "$ONLINE" = 1 ]; then
-		dim "on AC, not drawing"
+		CDET="$CDET · on AC, not drawing"
 	fi
+	kvsub "$CDET"
 
 	# Wear is the interesting direction: 100% health is good, so grade the
 	# complement or a healthy battery would read red.
-	sect "$IC_HEALTH" "Health"
-	row "$(printf '%3s%%  %s' "$HEALTH" "$(bar "$HEALTH" "$(grade $((100 - HEALTH)) 20 35)")")"
-	row "$(uh "$FULL" "$UNIT") of $(uh "$DESIGN" "$UNIT") when new  ·  $((100 - HEALTH))% worn"
-	[ -n "$CYCLES" ] && [ "$CYCLES" != 0 ] && dim "$CYCLES charge cycles"
-	[ -n "$VENDOR$TECH" ] && dim "$(printf '%s %s' "${VENDOR:-?}" "${TECH:-?}" | esc)"
+	kv Health "$(bar "$HEALTH" "$(grade $((100 - HEALTH)) 20 35)") $(mono "$(printf '%3s%%' "$HEALTH")")"
+	HDET="$((100 - HEALTH))% worn"
+	[ -n "$CYCLES" ] && [ "$CYCLES" != 0 ] && HDET="$HDET · $CYCLES cycles"
+	kvsub "$HDET"
+	[ -n "$VENDOR$TECH" ] && kvsub "$(printf '%s %s' "${VENDOR:-?}" "${TECH:-?}" | esc)"
 
-	sect "$IC_POWER" "Power"
 	if [ "$RATE" -gt 0 ]; then
-		row "$(watts "$RATE" "${VOLT:-0}" "$UNIT") draw"
+		PDET="$(watts "$RATE" "${VOLT:-0}" "$UNIT") draw"
 	else
-		row "idle"
+		PDET="idle"
 	fi
-	[ -n "$VOLT" ] && dim "$(awk -v v="$VOLT" 'BEGIN { printf "%.2f V", v / 1000000 }')$([ "$UNIT" = Ah ] && awk -v r="$RATE" 'BEGIN { printf "  ·  %.2f A", r / 1000000 }')"
+	[ -n "$VOLT" ] && PDET="$PDET · $(awk -v v="$VOLT" 'BEGIN { printf "%.2f V", v / 1000000 }')$([ "$UNIT" = Ah ] && awk -v r="$RATE" 'BEGIN { printf " · %.2f A", r / 1000000 }')"
+	kv Power "$PDET"
 	# world-readable upower history — no RAPL/system/rapl/install.sh needed for
 	# this part. Silently omitted on AC (nothing "discharging" to filter to) or
 	# if the file is missing/unparseable; the draw-now row above still stands.
@@ -376,8 +387,7 @@ TIP=$(
 			set -- $PS
 			PMIN=$1 PMAX=$2 PAVG=$3
 			shift 3
-			row "$(heatbar "$*" 70 90)  ${PMIN}–${PMAX} W over 1h"
-			dim "${PAVG} W avg over the last hour"
+			kvsub "$(heatbar "$*" 70 90)  ${PMIN}–${PMAX} W over 1h, ${PAVG} W avg"
 		fi
 	fi
 
@@ -385,12 +395,20 @@ TIP=$(
 	# status (nothing to subtract a package watt from on AC), and a second
 	# sample to diff against — all three fold into PKG_W being non-empty.
 	if [ -n "$PKG_W" ]; then
-		sect "$IC_SHARE" "Where it goes"
-		row "$(bar "$(sharepct "$PKG_W" "$TOTAL_W")" "$C_GOOD" 14)  ${PKG_W} W  CPU package"
-		row "$(bar "$(sharepct "$UNC_W" "$TOTAL_W")" "$C_GOOD" 14)  ${UNC_W} W  GPU (uncore)"
-		row "$(bar "$(sharepct "$RESID_W" "$TOTAL_W")" "$C_GOOD" 14)  ${RESID_W} W  screen, disk, radios$([ -n "$BL" ] && printf '  (backlight %s%%)' "$BL")"
-		dim "click for a powertop report"
+		kv Where "$(bar "$(sharepct "$PKG_W" "$TOTAL_W")" "$C_GOOD" 10) CPU $PKG_W W"
+		kvsub "$(bar "$(sharepct "$UNC_W" "$TOTAL_W")" "$C_GOOD" 10) GPU $UNC_W W"
+		kvsub "$(bar "$(sharepct "$RESID_W" "$TOTAL_W")" "$C_GOOD" 10) rest $RESID_W W$([ -n "$BL" ] && printf ' (backlight %s%%)' "$BL")"
 	fi
+
+	if [ -n "$WEAK" ]; then
+		kv Mode "$(bad "eco") · weak charger"
+	elif [ -f "${XDG_RUNTIME_DIR:-/tmp}/mango-powermode.manual" ]; then
+		kv Mode "$MODE · manual"
+	else
+		kv Mode "$MODE · $([ "$ONLINE" = 1 ] && echo "on AC" || echo "on battery")"
+	fi
+
+	dim "click to toggle mode  ·  right-click for a powertop report"
 )
 	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
 else

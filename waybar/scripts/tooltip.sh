@@ -46,9 +46,17 @@ IND3="$NBSP$NBSP$NBSP"
 
 # Tooltip markup is written with double quotes; escaping them (and folding the
 # newlines) happens once here, on the way into JSON.
-emit() { # class, full bar markup, tooltip markup
-	printf '{"text":"%s","class":"%s","tooltip":"%s"}\n' \
-		"$(printf '%s' "$2" | sed 's/"/\\"/g')" "$1" \
+#
+# class is always emitted as a JSON array — waybar-custom(5): "The class
+# parameter also accepts an array of strings." A single caller-passed class
+# still works unchanged (a one-element array matches the same CSS), and a
+# space-separated list (e.g. "portal eco") lets a caller layer a mode marker
+# onto its normal state class without a second custom class of its own.
+emit() { # class(es) space-separated, full bar markup, tooltip markup
+	_em_cl=''
+	for _em_c in $1; do _em_cl="$_em_cl${_em_cl:+,}\"$_em_c\""; done
+	printf '{"text":"%s","class":[%s],"tooltip":"%s"}\n' \
+		"$(printf '%s' "$2" | sed 's/"/\\"/g')" "$_em_cl" \
 		"$(printf '%s' "$3" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')"
 }
 
@@ -80,6 +88,15 @@ rule() { # [cells=30]
 sect() { printf '\n%s<span foreground="%s">%s  %s</span>%s\n' "$IND2" "$C_LABEL" "$1" "$2" "$IND2"; }
 row() { printf '%s%s%s\n' "$IND3" "$1" "$IND3"; }
 dim() { printf '%s<span foreground="%s">%s</span>%s\n' "$IND3" "$C_DIM" "$1" "$IND3"; }
+# Compact key/value row: an 8-cell label column in F_MONO (Google Sans Flex's
+# proportional figures are exactly why row()'s %3s%% columns never lined up —
+# a fixed-width label needs a fixed-width font, same reasoning as mono()
+# below), then the value as-is. kvsub is a second, label-less row that lines
+# up under the value column — an 8-space run in the same F_MONO span, so it
+# measures identically to an 8-character label instead of drifting in the
+# proportional face.
+kv() { printf '%s<span font_family="%s">%-8s</span>%s%s\n' "$IND3" "$F_MONO" "$1" "$2" "$IND3"; }
+kvsub() { printf '%s<span font_family="%s">%-8s</span><span foreground="%s">%s</span>%s\n' "$IND3" "$F_MONO" "" "$C_DIM" "$1" "$IND3"; }
 good() { printf '<span foreground="%s">%s</span>' "$C_GOOD" "$1"; }
 warn() { printf '<span foreground="%s">%s</span>' "$C_WARN" "$1"; }
 bad() { printf '<span foreground="%s">%s</span>' "$C_BAD" "$1"; }
@@ -90,13 +107,18 @@ grade() { # pct, warn-at, bad-at -> colour
 		'BEGIN { print (p >= b ? r : p >= w ? y : g) }'
 }
 
-# 20-cell bar, claudebar's ██░░ style. Third argument narrows it for list rows.
+# 20-cell capsule, third argument narrows it for list rows. Colored NBSP runs
+# on a bgcolor span rather than the old █/░ glyph run: a background rectangle
+# is font-metric independent (no glyph to hunt for at a given size/weight, no
+# gap between cells), and size="55%" is what turns the run into a thin bar
+# with a visible track instead of a row of text — a redraw, not the same
+# glyphs recolored, so anything measuring the old output has to be re-derived.
 bar() { # pct, fill-color, [cells=20]
-	awk -v p="$1" -v c="$2" -v w="${3:-20}" -v e="$C_EMPTY" 'BEGIN {
+	awk -v p="$1" -v c="$2" -v w="${3:-20}" -v e="$C_EMPTY" -v nbsp="$NBSP" 'BEGIN {
 		n = int(p * w / 100 + 0.5); if (n > w) n = w; if (n < 0) n = 0
-		for (i = 0; i < n; i++)  f = f "█"
-		for (i = n; i < w; i++)  m = m "░"
-		printf "<span foreground=\"%s\">%s</span><span foreground=\"%s\">%s</span>", c, f, e, m
+		for (i = 0; i < n; i++)  f = f nbsp
+		for (i = n; i < w; i++)  m = m nbsp
+		printf "<span size=\"55%%\" background=\"%s\">%s</span><span size=\"55%%\" background=\"%s\">%s</span>", c, f, e, m
 	}'
 }
 
@@ -177,11 +199,36 @@ tip_save() { # cache-file, key, tooltip
 	{ printf '%s\n' "$2"; printf '%s' "$3"; } > "$1.tmp" && mv -f "$1.tmp" "$1"
 }
 
+# mango/scripts/powermode.sh's mode file, read here rather than piped in so
+# every module can call this without threading a new argument through. Missing
+# file (mode never set, or a machine with no battery) reads as full — the
+# safer default for a bar that has never been told otherwise.
+power_mode() {
+	_pm=full
+	[ -r "${XDG_RUNTIME_DIR:-/tmp}/mango-powermode" ] && { IFS= read -r _pm < "${XDG_RUNTIME_DIR:-/tmp}/mango-powermode"; } 2> /dev/null
+	printf '%s' "${_pm:-full}"
+}
+
+# Widen a tip_stale() TTL bucket in eco, collapse it to effectively no cache
+# in full — "eco: refresh only when the state actually changes" vs.
+# "full: refresh every poll" from the power-modes spec. full's bucket is 1s,
+# not 0: every caller polls slower than that, so a new key every second reads
+# as "always rebuild" without a division by zero.
+tip_bucket() { # eco-ttl-seconds -> cache-key fragment
+	_tb=1
+	[ "$(power_mode)" = eco ] && _tb=${1:-60}
+	printf '%s' "$(( $(date +%s) / _tb ))"
+}
+
 if [ "${1:-}" = "tooltip-selftest" ]; then
-	bar 50 "$C_GOOD" | grep -q '>██████████</span><span foreground="#3e4451">░░░░░░░░░░<' || { echo "bar 50 wrong"; exit 1; }
-	bar 0 "$C_GOOD" | grep -q '></span><span foreground="#3e4451">░░░░░░░░░░░░░░░░░░░░<' || { echo "bar 0 wrong"; exit 1; }
-	bar 999 "$C_GOOD" | grep -q '>████████████████████</span><span foreground="#3e4451"><' || { echo "bar clamp wrong"; exit 1; }
-	bar 50 "$C_GOOD" 10 | grep -q '>█████</span><span foreground="#3e4451">░░░░░<' || { echo "narrow bar wrong"; exit 1; }
+	# N copies of NBSP, for building the exact expected bar() string.
+	_nbsp_n() { _i=$1 _o=''; while [ "$_i" -gt 0 ]; do _o="$_o$NBSP"; _i=$((_i - 1)); done; printf '%s' "$_o"; }
+	_bar_exp() { printf '<span size="55%%" background="%s">%s</span><span size="55%%" background="%s">%s</span>' \
+		"$C_GOOD" "$(_nbsp_n "$1")" "$C_EMPTY" "$(_nbsp_n "$2")"; }
+	[ "$(bar 50 "$C_GOOD")" = "$(_bar_exp 10 10)" ] || { echo "bar 50 wrong"; exit 1; }
+	[ "$(bar 0 "$C_GOOD")" = "$(_bar_exp 0 20)" ] || { echo "bar 0 wrong"; exit 1; }
+	[ "$(bar 999 "$C_GOOD")" = "$(_bar_exp 20 0)" ] || { echo "bar clamp wrong"; exit 1; }
+	[ "$(bar 50 "$C_GOOD" 10)" = "$(_bar_exp 5 5)" ] || { echo "narrow bar wrong"; exit 1; }
 	# glyphs are no longer adjacent — each cell carries its own span
 	heatbar "0 50 100" 70 90 | grep -q '▁</span>.*▅</span>.*█</span>' || { echo "heatbar glyph ramp wrong"; exit 1; }
 	heatbar "0 75 95" 70 90 | grep -q "\"$C_GOOD\">▁</span><span foreground=\"$C_WARN\">▇</span><span foreground=\"$C_BAD\">█<" \
@@ -197,6 +244,14 @@ if [ "${1:-}" = "tooltip-selftest" ]; then
 	[ "$(row x | grep -o "$NBSP*" | head -1)" = "$IND3" ] || { echo "row left margin wrong"; exit 1; }
 	[ "$(row x | grep -o "$NBSP*\$")" = "$IND3" ] || { echo "row right margin wrong"; exit 1; }
 	[ "$(sect i l | grep -o "$NBSP*\$")" = "$IND2" ] || { echo "sect right margin wrong"; exit 1; }
+	# kv()'s label and kvsub()'s blank column must measure identically — both
+	# an 8-cell run in F_MONO — or a continuation line drifts under the value.
+	[ "$(kv Mode X)" = "${IND3}<span font_family=\"$F_MONO\">Mode    </span>X${IND3}" ] || { echo "kv wrong: $(kv Mode X)"; exit 1; }
+	[ "$(kvsub Y)" = "${IND3}<span font_family=\"$F_MONO\">        </span><span foreground=\"$C_DIM\">Y</span>${IND3}" ] || { echo "kvsub wrong: $(kvsub Y)"; exit 1; }
+	# emit()'s class is always a JSON array — a bare caller-passed class still
+	# reads as one element, and a space-separated list becomes several.
+	[ "$(emit ok x y | jq -r '.class | join(",")')" = ok ] || { echo "emit single class wrong"; exit 1; }
+	[ "$(emit "ok eco" x y | jq -r '.class | join(",")')" = ok,eco ] || { echo "emit multi class wrong"; exit 1; }
 	[ "$(grade 10 70 90)" = "$C_GOOD" ] && [ "$(grade 75 70 90)" = "$C_WARN" ] && [ "$(grade 95 70 90)" = "$C_BAD" ] || { echo "grade wrong"; exit 1; }
 	[ "$(hkib 1048576)" = "1.0 GiB" ] || { echo "hkib wrong: $(hkib 1048576)"; exit 1; }
 	[ "$(hkib 0)" = "none" ] || { echo "hkib 0 should read as none, not 0.0 KiB"; exit 1; }
@@ -209,6 +264,18 @@ if [ "${1:-}" = "tooltip-selftest" ]; then
 	tip_stale "$TC" k2 || { echo "tip_stale should go stale once the key changes"; exit 1; }
 	[ "$(tip_load "$TC")" = hello ] || { echo "tip_load wrong: $(tip_load "$TC")"; exit 1; }
 	rm -f "$TC" "$TC.tmp"
+
+	# power_mode reads a fixed runtime path, not an argument — fake it via XDG_RUNTIME_DIR
+	XDG_RUNTIME_DIR=$(mktemp -d)
+	[ "$(power_mode)" = full ] || { echo "power_mode with no state file should default to full"; exit 1; }
+	printf 'eco' > "$XDG_RUNTIME_DIR/mango-powermode"
+	[ "$(power_mode)" = eco ] || { echo "power_mode should read the state file"; exit 1; }
+	B1=$(tip_bucket 3600)
+	printf 'full' > "$XDG_RUNTIME_DIR/mango-powermode"
+	B2=$(tip_bucket 3600)
+	[ "$B1" != "$B2" ] || { echo "full mode should not share eco's wide bucket"; exit 1; }
+	rm -rf "$XDG_RUNTIME_DIR"
+
 	echo "ok"
 	exit 0
 fi

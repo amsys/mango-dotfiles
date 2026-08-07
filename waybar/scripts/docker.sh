@@ -123,12 +123,12 @@ printf '%s\n' "$ROWS" | awk -F'|' '$2 == "restarting" { f = 1 } $3 ~ /\(unhealth
 TEXT="$(barico "$(ic_docker)") ${RUNNING}"
 
 # `docker ps -a` itself is cheap (~18ms); the per-container row loop below is
-# the real cost, and is invisible ~99% of the time — cache it on a slower
-# clock (30s) than the 10s poll. Keyed on RUNNING+STOPPED so a container
-# starting or stopping invalidates it immediately rather than waiting out the
-# TTL.
+# the real cost, and is invisible ~99% of the time — cached in eco (60s TTL),
+# bypassed in full (tip_bucket in tooltip.sh). Keyed on RUNNING+STOPPED too,
+# so a container starting or stopping invalidates it immediately rather than
+# waiting out the TTL.
 TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-docker-tip"
-TIP_KEY="$RUNNING-$STOPPED-$(( $(date +%s) / 30 ))"
+TIP_KEY="$RUNNING-$STOPPED-$(tip_bucket 60)"
 if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 TIP=$(
 	title "Docker"

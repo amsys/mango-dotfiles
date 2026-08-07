@@ -132,11 +132,11 @@ CLASS=normal
 
 TEXT="$(barico "$(ic_mem)") ${PCT}%"
 
-# Invisible ~99% of the time, so it rebuilds on a slower clock (15s) than the
-# 5s text does — see tip_stale() in tooltip.sh. Ceiling: "Top by RSS" and the
-# fault rates can be up to 15s stale.
+# Invisible ~99% of the time. Full mode rebuilds every poll, eco rebuilds at
+# most every 60s — see tip_bucket() in tooltip.sh. Ceiling in eco: "Top by
+# RSS" and the fault rates can be up to 60s stale.
 TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-memory-tip"
-TIP_KEY=$(( $(date +%s) / 15 ))
+TIP_KEY=$(tip_bucket 60)
 if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 
 # Fault rates need an interval, so keep the previous sample next to its clock.

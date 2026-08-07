@@ -1,0 +1,9 @@
+# Installed to /etc/sudoers.d/mango-powermode (0440) by system/powermode/install.sh.
+#
+# Lets mango/scripts/powermode.sh apply CPU EPP/turbo, the ACPI platform
+# profile, PCI/NVMe runtime PM, snd_hda power save and vm.laptop_mode without
+# a password prompt. One fixed verb, no free arguments — the payload of
+# KEY=value lines travels on stdin, which sudoers cannot see or restrict, so
+# mango-powermode itself re-validates every value against a closed set before
+# writing anything. Same reasoning as sudoers.d-mango-powertop.
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-powermode apply

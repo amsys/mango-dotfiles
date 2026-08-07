@@ -23,6 +23,16 @@ IFS=, read -r WARN CRIT ACT FLOOR <<< "${MANGO_BATTERY:-20,10,5,3}"
 
 DRYRUN="${MANGO_BAT_DRYRUN:-}"
 
+POWERMODE="$(dirname "$0")/powermode.sh"
+# Same file mango/scripts/powermode.sh calls WEAK_FILE — read here only to
+# tell whether it's already latched, so a sustained weak charger doesn't
+# re-notify every 30s poll. powermode.sh remains the sole writer.
+WEAK_MARK="${XDG_RUNTIME_DIR:-/tmp}/mango-powermode.weak"
+CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
+[ -r "$CONF" ] && . "$CONF"
+PM_WEAK_MIN_W=${PM_WEAK_MIN_W:-45}
+PM_WEAK_POLLS=${PM_WEAK_POLLS:-2}
+
 POLL=30    # seconds between reads; 30s is well inside the time 1% takes to burn
 GRACE=60   # countdown before the suspend actually fires
 RENAG=300  # re-sound the critical alarm this often while it is ignored
@@ -68,6 +78,30 @@ tier() { # pct status -> none|warn|crit|act|floor
 rank() { case "$1" in none) echo 0 ;; warn) echo 1 ;; crit) echo 2 ;; act) echo 3 ;; floor) echo 4 ;; esac; }
 thr() { case "$1" in warn) echo "$WARN" ;; crit) echo "$CRIT" ;; act) echo "$ACT" ;; floor) echo "$FLOOR" ;; *) echo 101 ;; esac; }
 
+# A charger is plugged in but losing the race against the load — same symptom
+# as no charger at all, just easier to miss because the icon still says
+# "charging" territory. "Not charging" is deliberately excluded: that's a full
+# battery on a healthy charger topping off, not a weak one.
+weak_on_ac() { # status, online -> true if AC reports online but the battery is still draining
+	[ "$2" = 1 ] && [ "$1" = Discharging ]
+}
+
+# A USB-C source negotiating less than $1 watts — catches a phone brick
+# immediately, before net drain would ever show it. Globbed rather than
+# resolved once: which ucsi-source-psy-* is live can change across a
+# replug. MANGO_PM_UCSI_GLOB overrides the glob for the self-check.
+weak_ucsi() { # min-watts -> true if any live USB-C source is under it
+	for d in ${MANGO_PM_UCSI_GLOB:-/sys/class/power_supply/ucsi-source-psy-*}; do
+		[ -d "$d" ] || continue
+		[ "$(cat "$d/online" 2> /dev/null)" = 1 ] || continue
+		vmax=$(cat "$d/voltage_max" 2> /dev/null) imax=$(cat "$d/current_max" 2> /dev/null)
+		[ -n "$vmax" ] && [ -n "$imax" ] && [ "$vmax" -gt 0 ] 2> /dev/null && [ "$imax" -gt 0 ] 2> /dev/null || continue
+		w=$(awk -v v="$vmax" -v i="$imax" 'BEGIN { printf "%.0f", v * i / 1e12 }')
+		[ "$w" -lt "$1" ] && return 0
+	done
+	return 1
+}
+
 # ---------------------------------------------------------------- self-check
 
 if [ "${1:-}" = test ]; then
@@ -101,6 +135,25 @@ if [ "${1:-}" = test ]; then
 	# flaps on and off across a single percent
 	[ "$(thr warn)" -eq 20 ] && [ "$(thr floor)" -eq 3 ] && [ "$(thr none)" -eq 101 ] ||
 		{ echo "thr wrong"; exit 1; }
+
+	# --- weak charger ---
+	weak_on_ac Discharging 1 || { echo "AC online + Discharging should read weak"; exit 1; }
+	weak_on_ac Charging 1 && { echo "Charging on AC must not read weak"; exit 1; }
+	weak_on_ac "Not charging" 1 && { echo "Not charging (full battery, topped off) must not read weak"; exit 1; }
+	weak_on_ac Discharging 0 && { echo "no AC at all is not a weak-charger condition"; exit 1; }
+
+	T=$(mktemp -d)
+	trap 'rm -rf "$T"' EXIT
+	mkdir -p "$T/weak"
+	printf '1\n' > "$T/weak/online"
+	printf '5000000\n' > "$T/weak/voltage_max"  # 5V
+	printf '2000000\n' > "$T/weak/current_max"  # 2A -> 10W, under a 45W laptop charger
+	MANGO_PM_UCSI_GLOB="$T/weak"
+	weak_ucsi 45 || { echo "a 10W source should read weak against a 45W floor"; exit 1; }
+	weak_ucsi 5 && { echo "a 10W source should NOT read weak against a 5W floor"; exit 1; }
+
+	printf '0\n' > "$T/weak/online"
+	weak_ucsi 45 && { echo "an offline USB-C port must not count"; exit 1; }
 
 	echo "ok"
 	exit 0
@@ -164,6 +217,8 @@ attempt_suspend() { # tier pct
 LAST=none      # most severe tier already announced
 REARM=101      # charge at which LAST is forgotten, so tiers cannot flap
 CRIT_AT=0      # when the critical alarm last sounded
+WEAKN=0        # consecutive polls that read as a weak charger
+RECN=0         # consecutive healthy polls since a weak latch, before it's cleared
 
 while :; do
 	PCT=$(readf capacity)
@@ -172,6 +227,35 @@ while :; do
 
 	# A removed or unreadable battery is not an emergency either.
 	if [ -z "$PCT" ]; then sleep "$POLL"; continue; fi
+
+	# Weak-charger check runs independently of the low-battery ladder below —
+	# it can fire at 90% just as well as at 15%, the symptom is the charger,
+	# not the level. WEAK_MARK is powermode.sh's own latch file; this only
+	# reads it, to avoid re-notifying every 30s while it stays set.
+	ONLINE=$(cat "$AC/online" 2> /dev/null || echo 0)
+	if weak_on_ac "$STATUS" "$ONLINE" || weak_ucsi "$PM_WEAK_MIN_W"; then
+		WEAKN=$((WEAKN + 1))
+		RECN=0
+		if [ "$WEAKN" -ge "$PM_WEAK_POLLS" ] && [ ! -f "$WEAK_MARK" ]; then
+			notify critical "Weak charger — ${PCT}%" \
+				"Plugged in but still losing charge. Switched to eco mode."
+			beep dialog-warning
+			"$POWERMODE" weak
+		fi
+	else
+		WEAKN=0
+		if [ -f "$WEAK_MARK" ]; then
+			case "$STATUS" in
+			Charging | Full) RECN=$((RECN + 1)) ;;
+			*) RECN=0 ;;
+			esac
+			if [ "$RECN" -ge 2 ]; then
+				notify normal "Charger recovered" "Back to full performance."
+				"$POWERMODE" unweak
+				RECN=0
+			fi
+		fi
+	fi
 
 	case "$STATUS" in
 	Charging | Full) LAST=none REARM=101 ;;

@@ -479,7 +479,15 @@ sec_emit() {
 	else
 		TIP=$(tip_load "$TIP_CACHE")
 	fi
-	emit "$CLASS" "$(barico "$ICO")" "$TIP"
+	# eco is a second, independent class rather than a different CLASS value —
+	# TIP_KEY and the offline/portal/... case above must stay keyed on the
+	# real state, not on which power mode drew it. style.css uses the pair
+	# (.eco.open, .eco.portal) to hold this lock statically red instead of
+	# pulsing: an infinite repaint loop is exactly what eco exists to cut, and
+	# this is the one pill where "stay red" matters more than "look alive".
+	EMIT_CLASS=$CLASS
+	[ "$(power_mode)" = eco ] && EMIT_CLASS="$CLASS eco"
+	emit "$EMIT_CLASS" "$(barico "$ICO")" "$TIP"
 }
 
 sec_click() {
@@ -645,7 +653,7 @@ wifi_emit() {
 	# CLASS/PCT/the arc above stay live every call; only the tooltip body is
 	# cached — see the matching comment in sec_emit.
 	TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-wifi-tip"
-	TIP_KEY="$CLASS-$(( $(date +%s) / 15 ))"
+	TIP_KEY="$CLASS-$(tip_bucket 30)"
 	if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 	TIP=$(
 		title "$(printf '%s' "${SSID:-Wi-Fi}" | esc)"

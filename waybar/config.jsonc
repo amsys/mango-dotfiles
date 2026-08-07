@@ -49,8 +49,8 @@
     // `docker ps` is ~65ms so this polls; `docker stats` is ~2s so the tooltip
     // has no per-container CPU/RAM column. Signal 15 is pushed by
     // docker-menu.sh after start/stop/restart so the pill doesn't wait out
-    // the interval — signals in use elsewhere: 10 netsec, 12 wifi/eth,
-    // 13 claudebar, 14 clock, 20 workspaces, 21 volume.
+    // the interval — signals in use elsewhere: 10 netsec, 11 battery,
+    // 12 wifi/eth, 13 claudebar, 14 clock, 20 workspaces, 21 volume.
     "custom/docker": {
         "exec": "~/.config/waybar/scripts/docker.sh",
         "return-type": "json",
@@ -94,12 +94,17 @@
         "restart-interval": 5,
         "tooltip": false
     },
+    // on-click only, not the shared "mmsg dispatch view,N,0" the other eight
+    // use: pill 1 is the one still visible in overview, and a plain view,1,0
+    // there is a no-op (mango's view_in_mon early-returns while isoverview is
+    // set), so its click has to check for that and dispatch toggleoverview
+    // instead. See workspace.sh --click.
     "custom/ws#1": {
         "exec": "~/.config/waybar/scripts/workspace.sh 1",
         "return-type": "json",
         "signal": 20,
         "escape": false,
-        "on-click": "mmsg dispatch view,1,0",
+        "on-click": "~/.config/waybar/scripts/workspace.sh --click 1",
         "on-scroll-up": "mmsg dispatch viewtoleft,0",
         "on-scroll-down": "mmsg dispatch viewtoright,0"
     },
@@ -233,12 +238,17 @@
         "tooltip-format-activated": "Keep awake: on — sleep and screen blanking inhibited",
         "tooltip-format-deactivated": "Keep awake: off"
     },
+    // Left click cycles the two power modes (mango/scripts/powermode.sh),
+    // shown as a green leaf on the icon in eco — see battery.sh. Right click
+    // keeps the powertop report that used to be the left click.
     "custom/battery": {
         "exec": "~/.config/waybar/scripts/battery.sh",
         "return-type": "json",
         "interval": 15,
+        "signal": 11,
         "escape": false,
-        "on-click": "kitty --class mango-monitor -e sudo -n powertop"
+        "on-click": "~/.config/mango/scripts/powermode.sh toggle",
+        "on-click-right": "kitty --class mango-monitor -e sudo -n powertop"
     },
     "custom/claudebar": {
         "exec": "sh ~/.config/waybar/scripts/claudebar.sh",

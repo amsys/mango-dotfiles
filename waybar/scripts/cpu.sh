@@ -360,11 +360,11 @@ CLASS=normal
 TEXT="$(barico "$(ic_cpu)") ${TOTAL}%"
 
 # The tooltip is two ps passes plus every hwmon and is invisible ~99% of the
-# time, so it rebuilds on a slower clock (10s) than the 3s text does — see
-# tip_stale() in tooltip.sh. Ceiling: "Top now" and "Cores" can be up to 10s
-# stale on a tooltip that was already only as fresh as the last hover.
+# time. In full mode it rebuilds every poll (no cache, per the power-modes
+# spec); in eco it rebuilds at most once a minute — see tip_bucket() in
+# tooltip.sh. Ceiling in eco: "Top now" and "Cores" can be up to 60s stale.
 TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-cpu-tip"
-TIP_KEY=$(( $(date +%s) / 10 ))
+TIP_KEY=$(tip_bucket 60)
 if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
 TIP=$(
 	title "CPU"

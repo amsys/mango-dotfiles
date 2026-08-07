@@ -28,6 +28,40 @@ set -u
 CFG="${XDG_RUNTIME_DIR:-/tmp}/waybar-bars.json"
 SHARED="$HOME/.config/waybar/config.jsonc"
 WS="$HOME/.config/waybar/scripts/workspace.sh"
+CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
+RUN="${XDG_RUNTIME_DIR:-/tmp}"
+
+MODE=full     # re-resolved by resolve_pm() before every gen(); full is the safe default
+ECO_JSON='{}' # per-module interval overrides, applied only when MODE=eco
+
+# Reads mango/scripts/powermode.sh's current mode and mango/powermode.conf's
+# PM_ECO_INTERVAL_* — called fresh at the top of every gen(), not just once at
+# startup, so a mode switch or a config edit takes effect on the next restart
+# without needing bars.sh itself relaunched.
+resolve_pm() {
+	MODE=full
+	[ -r "$RUN/mango-powermode" ] && { IFS= read -r MODE < "$RUN/mango-powermode"; } 2> /dev/null
+	: "${MODE:=full}"
+
+	# shellcheck disable=SC1090  # the user's own tracked config, same as powermode.sh
+	[ -r "$CONF" ] && . "$CONF"
+	# custom/netsec is deliberately never in this object, eco or not: it's the
+	# leak monitor, and a lock that can be five minutes stale defeats its own
+	# purpose. It keeps config.jsonc's 60s in both modes; only its CSS animation
+	# (see the .eco.open/.eco.portal rule in the style template) responds to
+	# eco.
+	ECO_JSON=$(jq -n \
+		--argjson cpu "${PM_ECO_INTERVAL_CPU:-15}" \
+		--argjson mem "${PM_ECO_INTERVAL_MEM:-30}" \
+		--argjson dk "${PM_ECO_INTERVAL_DOCKER:-60}" \
+		--argjson wifi "${PM_ECO_INTERVAL_WIFI:-120}" \
+		--argjson eth "${PM_ECO_INTERVAL_ETH:-300}" \
+		--argjson bat "${PM_ECO_INTERVAL_BATTERY:-60}" \
+		'{"custom/cpu": {interval: $cpu}, "custom/memory": {interval: $mem},
+		  "custom/docker": {interval: $dk}, "custom/wifi": {interval: $wifi},
+		  "custom/eth": {interval: $eth},
+		  "custom/battery": {interval: $bat}}')
+}
 
 # `include` is resolved by waybar, not by a shell, so the path is absolute — a
 # relative one would resolve against mango's cwd, and a missing include is a
@@ -37,14 +71,17 @@ WS="$HOME/.config/waybar/scripts/workspace.sh"
 # `output` key in waybar(5)) means any monitor NOT in the generated set still
 # gets a bar the instant it is plugged in, falling back to first-monitor tags
 # until the hotplug watcher below regenerates. Without it a new output would
-# come up with no bar at all, which is worse than the bug this fixes.
+# come up with no bar at all, which is worse than the bug this fixes. It never
+# gets the eco interval override below — a freshly hot-plugged monitor polling
+# at full speed until the next regen is a smaller cost than the added branch.
 bars() { # all-monitors JSON on stdin -> waybar bar array on stdout
-	jq --arg cfg "$SHARED" --arg ws "$WS" '
+	jq --arg cfg "$SHARED" --arg ws "$WS" --arg mode "${MODE:-full}" --argjson eco "${ECO_JSON:-\{\}}" '
+		(if $mode == "eco" then $eco else {} end) as $ov |
 		[ .monitors[].name ] as $names |
 		[ $names[] | . as $m |
-			{ output: $m, include: [$cfg] } +
-			([ range(1; 10) | tostring |
-				{ ("custom/ws#" + .): { exec: "\($ws) \(.) \($m)" } } ] | add) ]
+			({ output: $m, include: [$cfg] } +
+				([ range(1; 10) | tostring |
+					{ ("custom/ws#" + .): { exec: "\($ws) \(.) \($m)" } } ] | add)) * $ov ]
 		+ [ { output: ([ $names[] | "!" + . ] + ["*"]), include: [$cfg] } ]'
 }
 
@@ -54,6 +91,7 @@ bars() { # all-monitors JSON on stdin -> waybar bar array on stdout
 # the monitor query came back empty.
 gen() {
 	local out
+	resolve_pm
 	out=$(mmsg get all-monitors 2> /dev/null | bars 2> /dev/null) || return 1
 	[ "$(printf '%s' "$out" | jq 'length' 2> /dev/null || echo 0)" -gt 1 ] || return 1
 	printf '%s\n' "$out" > "$CFG.tmp" && mv -f "$CFG.tmp" "$CFG"
@@ -68,7 +106,16 @@ SHIM="$HOME/.local/lib/mango/fast-tooltips.so"
 # exec, not a plain call: backgrounding a function forks a subshell around it,
 # and without exec that subshell just sits as waybar's parent — $! then names
 # the subshell, and kill/wait downstream stop hitting waybar at all.
-bar() { exec env LD_PRELOAD="$SHIM" waybar "$@"; }
+#
+# 9>&- closes the lock fd (opened below, in the launch section) on the way
+# in: exec replaces the process image but keeps file descriptors open by
+# default, so without this a launched waybar would sit on fd 9 and hold
+# mango-bars.lock for as long as it runs. Proven live, on the *other* fd-9
+# leak this script had (the hotplug watcher below, now closed the same way):
+# killing just the controller left an orphaned child still holding the lock,
+# and a fresh bars.sh's `flock -n 9` refused to start — silently, forever,
+# until that orphan was found and killed by hand.
+bar() { exec 9>&- env LD_PRELOAD="$SHIM" waybar "$@"; }
 
 # ---------------------------------------------------------------- selftest
 
@@ -97,11 +144,60 @@ if [ "${1:-}" = test ]; then
 	[ "$(q '.[2] | keys | join(",")')" = include,output ] || { echo "catch-all must override nothing"; exit 1; }
 	# A single monitor still produces an array, or waybar draws no bar at all.
 	[ "$(printf '{"monitors":[{"name":"eDP-1"}]}' | bars | jq 'length')" = 2 ] || { echo "single monitor wrong"; exit 1; }
+
+	# --- eco mode: every per-monitor bar gains the interval overrides ---
+	MODE=eco
+	ECO_JSON=$(jq -n '{"custom/cpu": {interval: 15}, "custom/battery": {interval: 60}}')
+	OUT=$(printf '%s\n' "$MONS" | bars) || { echo "bars failed in eco mode"; exit 1; }
+	q() { printf '%s' "$OUT" | jq -r "$1"; }
+	[ "$(q '.[0]["custom/cpu"].interval')" = 15 ] || { echo "eco should override custom/cpu interval"; exit 1; }
+	[ "$(q '.[1]["custom/battery"].interval')" = 60 ] || { echo "eco override should apply to every monitor's bar"; exit 1; }
+	# config.jsonc's own exec/on-click for an overridden module must still come
+	# through `include` untouched — this only ever adds an `interval` key.
+	[ "$(q '.[0]["custom/ws#3"].exec')" = "$WS 3 eDP-1" ] || { echo "eco override must not disturb unrelated pills"; exit 1; }
+	# the catch-all is deliberately never eco-overridden
+	[ "$(q '.[2] | keys | join(",")')" = include,output ] || { echo "catch-all must stay override-free even in eco"; exit 1; }
+	MODE=full
+	ECO_JSON='{}'
+
+	# --- full mode is unaffected even with an eco override loaded ---
+	MODE=full
+	ECO_JSON=$(jq -n '{"custom/cpu": {interval: 15}}')
+	OUT=$(printf '%s\n' "$MONS" | bars) || { echo "bars failed in full mode"; exit 1; }
+	printf '%s' "$OUT" | jq -e '.[0]["custom/cpu"]' > /dev/null 2>&1 \
+		&& { echo "full mode must not apply the eco override even if one is loaded"; exit 1; }
+	MODE=full
+	ECO_JSON='{}'
+
 	echo "ok"
 	exit 0
 fi
 
 # ---------------------------------------------------------------- launch
+
+# One waybar, ever. mango's exec-once can in principle re-fire (a compositor
+# restart re-runs config.conf without a fresh login), and a bars.sh killed
+# with -9 leaves its EXIT trap unrun, orphaning waybar with nothing left to
+# manage it — either way, a second bars.sh has to take over cleanly rather
+# than draw a second bar on top of the first. flock is the mutex; holding it
+# means nothing else is mid-launch, so an existing waybar is safe to reap.
+exec 9> "$RUN/mango-bars.lock"
+flock -n 9 || exit 0
+pkill -x waybar 2> /dev/null
+printf '%s' "$$" > "$RUN/mango-bars.pid" # read by powermode.sh to signal us on a mode change
+
+# Trap installed before anything is launched below, including the degraded
+# fallback: that fallback used to `exec` straight into waybar, which replaced
+# this process *before* the trap existed — the pid file above then named
+# waybar itself, so a later mode-change USR1 (see powermode.sh's bars_restart)
+# would land on waybar's own SIGUSR1 (toggle visibility, hides the bar
+# indefinitely) instead of on us. Backgrounding it below, every launch path
+# through, keeps this pid file accurate for as long as bars.sh runs.
+#
+# This script owns waybar from here on: the trap takes it, and the watch
+# producers, down with us rather than orphaning them on every restart — a
+# `mmsg watch` left in a pipeline is exactly the leak watch.sh exists to avoid.
+trap 'rm -f "$RUN/mango-bars.pid"; pkill -P $$ > /dev/null 2>&1' EXIT INT TERM
 
 # exec-once fires at compositor start, so the IPC socket may not be answering
 # yet — same race config.conf's arch-update line waits out. Losing it would cost
@@ -111,17 +207,55 @@ for _ in 1 2 3 4 5; do
 	sleep 0.5
 done
 
-# No IPC, no generated config: the plain bar. That costs the tag row its
-# per-monitor accuracy, not the whole bar.
-[ -s "$CFG" ] || bar
+# Anything named waybar that isn't the one we're about to manage — a manual
+# launch, or a second bars.sh's fallback from before it took over. Measured
+# live: a stray survives forever otherwise, since every restart/reload path
+# below only ever touches $BAR.
+reap_strays() { pgrep -x waybar 2> /dev/null | grep -vx "${BAR:-}" | xargs -r kill 2> /dev/null; }
 
-# This script owns waybar from here on: the trap takes it, and the watch
-# producers, down with us rather than orphaning them on every restart — a
-# `mmsg watch` left in a pipeline is exactly the leak watch.sh exists to avoid.
-trap 'pkill -P $$ > /dev/null 2>&1' EXIT INT TERM
-
-bar -c "$CFG" &
+if [ -s "$CFG" ]; then
+	bar -c "$CFG" &
+else
+	# No IPC, no generated config: the plain bar. That costs the tag row its
+	# per-monitor accuracy, not the whole bar. Backgrounded like the normal
+	# path, not exec'd — see the trap comment above for why that matters.
+	bar &
+fi
 BAR=$!
+
+restart_bar() { # regenerate first; caller decides whether to
+	reap_strays
+	kill "$BAR" 2> /dev/null
+	wait "$BAR" 2> /dev/null
+	bar -c "$CFG" &
+	BAR=$!
+}
+
+# Reload rather than restart: a mode switch changes nothing but a handful of
+# module `interval`s inside bars that already exist, so there is no torn
+# state to avoid by deferring — unlike the hotplug path below, where the bar
+# *list* itself changes. SIGUSR2 alone doesn't cost the bar its brief absence
+# a full kill+relaunch does, and by the time a mode switch signals us,
+# powermode.sh has usually already dropped the CPU to eco — the coldest
+# possible clock to cold-start waybar on.
+reload_bar() {
+	reap_strays
+	kill -USR2 "$BAR" 2> /dev/null
+}
+
+# USR1, not HUP: measured live that `nohup`-launched (or otherwise
+# HUP-preignoring) parents make HUP permanently untrappable here — bash
+# refuses to install a trap for any signal that was already SIG_IGN when the
+# shell started (see bash(1), SIGNALS), and there is no reliable way from
+# inside this script to know whether whatever launched it did that. USR1 is
+# never preignored by anything in this chain and isn't used by waybar's own
+# SIGUSR2 reload, so there's nothing to collide with.
+#
+# Acted on directly, not deferred through a flag: a mode switch has no bar-list
+# change to race against (see reload_bar above), so there is no torn state
+# the old flag-and-poll dance was protecting against here — only the hotplug
+# path below still needs that.
+trap 'gen && reload_bar' USR1
 
 # Hotplug: regenerate, then RESTART waybar. Not SIGUSR2 — waybar's reload
 # re-reads the config but does not rebuild the bar list from it, so a bar for a
@@ -137,15 +271,28 @@ BAR=$!
 # still manage $BAR.
 prev=$(mmsg get all-monitors 2> /dev/null | jq -r '[.monitors[].name] | sort | join(" ")')
 
-while IFS= read -r cur; do
-	[ "$cur" = "$prev" ] && continue
-	prev=$cur
-	gen || continue
-	kill "$BAR" 2> /dev/null
-	wait "$BAR" 2> /dev/null
-	bar -c "$CFG" &
-	BAR=$!
-done < <(mmsg watch all-monitors 2> /dev/null |
+while :; do
+	rc=0
+	IFS= read -r -t 2 cur <&3 || rc=$?
+	if [ "$rc" = 0 ]; then
+		if [ "$cur" != "$prev" ]; then
+			prev=$cur
+			gen && restart_bar
+		fi
+	elif [ "$rc" -le 128 ]; then
+		break # a genuine EOF/error, not a timeout: mmsg watch is not coming back
+	fi
+	# Still degraded (launched without a generated config, or gen() has been
+	# failing): retry every time this loop wakes rather than waiting for
+	# another hotplug event to come along and fix it as a side effect.
+	[ -s "$CFG" ] || { gen && restart_bar; }
+# exec 9>&- first: this subshell is long-lived for as long as bars.sh runs,
+# and without closing its inherited copy of the lock fd, killing only the
+# controller (e.g. `kill -9` the pid in mango-bars.pid, not its process
+# group) leaves this orphan holding mango-bars.lock — a fresh bars.sh's
+# `flock -n 9` then refuses to start, forever, with no message. Measured live.
+done 3< <(exec 9>&-
+	mmsg watch all-monitors 2> /dev/null |
 	jq -r --unbuffered '[.monitors[].name] | sort | join(" ")' 2> /dev/null)
 
 wait

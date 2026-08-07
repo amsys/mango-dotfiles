@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Chime and notify the moment the AC adapter goes in or comes out.
+# Chime and notify the moment the AC adapter goes in or comes out. Also the
+# only trigger for switching power mode off the cable: it already sees the
+# edge instantly (see below for why that matters), so mango/scripts/powermode.sh
+# rides the same udev event rather than getting a second poll of its own.
 #
 # battery-guard.sh already sees this transition — it polls the battery every 30s
 # and already resolves $AC — so this could have been six lines inside its loop.
@@ -18,6 +21,7 @@ set -uo pipefail
 
 AC="${MANGO_AC_DIR:-}"
 BAT="${MANGO_BAT_DIR:-}"
+POWERMODE="$(dirname "$0")/powermode.sh"
 
 RETRY=5 # before rebuilding the event source, if systemd-udevd goes away
 
@@ -120,6 +124,7 @@ online() { cat "$AC/online" 2> /dev/null; }
 capacity() { [ -r "$BAT/capacity" ] && cat "$BAT/capacity" 2> /dev/null || true; }
 
 PREV=$(online)
+"$POWERMODE" cable > /dev/null 2>&1 &  # mode has to be right at login too, not just on the next edge
 
 # The outer loop is not decoration: `read` hits EOF if systemd-udevd restarts,
 # which happens on any routine system update. exec-once has no supervisor behind
@@ -145,6 +150,7 @@ while :; do
 
 		notify "$(summary "$NOW")" "$(body "$NOW" "$(capacity)")"
 		if [ "$NOW" = 1 ]; then beep power-plug; else beep power-unplug; fi
+		"$POWERMODE" cable > /dev/null 2>&1 &
 	done
 
 	[ -n "${EV_PID:-}" ] && kill "$EV_PID" 2> /dev/null

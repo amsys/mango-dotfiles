@@ -84,6 +84,13 @@ in the README checklist if it can't be tracked as a file:
   RAPL's `energy_uj` for `wheel`) and `/etc/sudoers.d/mango-powertop`
   (NOPASSWD, arg-less `powertop`). Sources tracked in `system/rapl/` —
   `sudo system/rapl/install.sh` pushes them out
+- power modes: `/usr/local/bin/mango-powermode` (the only thing that writes
+  CPU EPP/turbo/platform-profile/PCI runtime PM) and
+  `/etc/sudoers.d/mango-powermode` (NOPASSWD, fixed `apply` verb, payload
+  re-validated inside the script). Sources tracked in `system/powermode/` —
+  `sudo system/powermode/install.sh` pushes them out. The values themselves
+  (`mango/powermode.conf`) ARE tracked and symlinked like any other file —
+  only the root helper needs this install step
 - KeePassXC entry attributes — `rofi/ai.sh` looks up `application=mango`
 
 ## Conventions

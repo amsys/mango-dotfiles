@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Root-owned power-mode helper. The only thing in this repo that writes CPU
+# EPP, the ACPI platform profile, turbo, PCI/NVMe runtime PM, snd_hda power
+# save, or vm.laptop_mode/dirty_writeback. Everything else about the two
+# power modes — deciding which mode to be in, brightness, docker, waybar
+# intervals — is userspace (mango/scripts/powermode.sh) and never needs root.
+#
+# mango/powermode.conf, which this indirectly acts on, is a user-writable
+# file. This script never sources or reads it, and never reads a path out of
+# it — powermode.sh resolves the config into KEY=value lines for one target
+# mode and pipes them in on stdin; this script re-validates every value
+# against a closed set (valid()) before writing anything, so a corrupted or
+# hand-edited-wrong config gets refused per key, not applied wholesale.
+#
+#   sudo mango-powermode apply <<< "$payload"   # normal use, from powermode.sh
+#   mango-powermode test                        # self-check, no root needed
+set -uo pipefail
+
+# Every path below is overridable so `test` runs against a fixture tree
+# instead of the real machine — same idiom as MANGO_CPU_SYS in cpu.sh.
+CPU_SYS="${MANGO_PM_CPU_SYS:-/sys/devices/system/cpu}"
+PROFILE_FILE="${MANGO_PM_PROFILE_FILE:-/sys/firmware/acpi/platform_profile}"
+PCI_ROOT="${MANGO_PM_PCI_ROOT:-/sys/bus/pci/devices}"
+SCSI_ROOT="${MANGO_PM_SCSI_ROOT:-/sys/class/scsi_host}"
+SND_HDA_PARAM="${MANGO_PM_SND_HDA:-/sys/module/snd_hda_intel/parameters/power_save}"
+VM_LM="${MANGO_PM_VM_LM:-/proc/sys/vm/laptop_mode}"
+VM_WB="${MANGO_PM_VM_WB:-/proc/sys/vm/dirty_writeback_centisecs}"
+WIFI_DEV="${MANGO_WIFI_DEV:-wlo1}"
+BASELINE="${MANGO_PM_BASELINE:-/run/mango-powermode.baseline}"
+
+# ---------------------------------------------------------------- validation
+
+# Closed set per key. Anything not matched here is refused — this is the
+# trust boundary: powermode.conf is user-writable, this function is not.
+valid() { # key value
+	case "$1" in
+	MODE) case "$2" in eco | full) return 0 ;; esac ;;
+	EPP) case "$2" in default | performance | balance_performance | balance_power | power) return 0 ;; esac ;;
+	PROFILE) case "$2" in quiet | balanced | performance) return 0 ;; esac ;;
+	NO_TURBO) case "$2" in 0 | 1) return 0 ;; esac ;;
+	PCI_PM) case "$2" in baseline | on | auto) return 0 ;; esac ;;
+	SND_HDA_POWERSAVE)
+		case "$2" in
+		baseline) return 0 ;;
+		*[!0-9]*) return 1 ;;
+		*) [ "$2" -le 600 ] && return 0 ;;
+		esac
+		;;
+	VM_LAPTOP_MODE)
+		case "$2" in
+		*[!0-9]*) return 1 ;;
+		*) [ "$2" -le 5 ] && return 0 ;;
+		esac
+		;;
+	VM_DIRTY_WB)
+		case "$2" in
+		*[!0-9]*) return 1 ;;
+		*) [ "$2" -ge 100 ] && [ "$2" -le 6000 ] && return 0 ;;
+		esac
+		;;
+	WIFI_POWERSAVE) case "$2" in on | off) return 0 ;; esac ;;
+	esac
+	return 1
+}
+
+# ---------------------------------------------------------------- baseline
+
+# First-touch-wins capture: "KEY DEVICE VALUE" lines, one per (key, device)
+# pair, appended once and never overwritten — so eco/full/eco/full... never
+# drifts what "baseline" means. Read back by restore() for PCI_PM=baseline
+# and SND_HDA_POWERSAVE=baseline.
+baseline_get() { # key, device -> value or empty; exit status: found or not
+	[ -r "$BASELINE" ] || return 1
+	awk -v k="$1" -v d="$2" '$1 == k && $2 == d { print $3; found=1; exit } END { exit !found }' "$BASELINE"
+}
+baseline_put() { # key, device, value
+	baseline_get "$1" "$2" > /dev/null 2>&1 && return 0 # already captured, don't overwrite
+	printf '%s %s %s\n' "$1" "$2" "$3" >> "$BASELINE"
+}
+
+# ---------------------------------------------------------------- writers
+
+writef() { # path, value -> best-effort write, silent on a missing/RO file
+	[ -w "$1" ] 2> /dev/null && printf '%s' "$2" > "$1" 2> /dev/null
+}
+
+apply_epp() { # value
+	for p in "$CPU_SYS"/cpu*/cpufreq/energy_performance_preference; do
+		[ -e "$p" ] || continue
+		writef "$p" "$1"
+	done
+}
+
+apply_profile() { [ -e "$PROFILE_FILE" ] && writef "$PROFILE_FILE" "$1"; }
+
+apply_no_turbo() {
+	f="$CPU_SYS/intel_pstate/no_turbo"
+	[ -e "$f" ] && writef "$f" "$1"
+}
+
+# PCI/NVMe runtime PM. "baseline" restores per-device from $BASELINE (silently
+# skips a device never captured — nothing to restore, leave it as-is). "on"/
+# "auto" capture the current value first (once, ever) before overwriting.
+apply_pci_pm() { # value
+	for d in "$PCI_ROOT"/*/power/control; do
+		[ -e "$d" ] || continue
+		dev=$(basename "$(dirname "$(dirname "$d")")")
+		if [ "$1" = baseline ]; then
+			v=$(baseline_get PCI_PM "$dev")
+			[ -n "$v" ] && writef "$d" "$v"
+		else
+			cur=$(cat "$d" 2> /dev/null) && [ -n "$cur" ] && baseline_put PCI_PM "$dev" "$cur"
+			writef "$d" "$1"
+		fi
+	done
+	# SATA ALPM follows the same on/off intent, not a config key — this
+	# machine has none, so the glob is a no-op here and stays one until this
+	# file is reused on a machine with a SATA host.
+	for h in "$SCSI_ROOT"/host*/link_power_management_policy; do
+		[ -e "$h" ] || continue
+		case "$1" in
+		baseline) : ;; # no per-device baseline tracked for this one; leave it
+		auto) writef "$h" med_power_with_dipm ;;
+		on) writef "$h" max_performance ;;
+		esac
+	done
+}
+
+apply_snd_hda() { # value
+	[ -e "$SND_HDA_PARAM" ] || return 0
+	if [ "$1" = baseline ]; then
+		v=$(baseline_get SND_HDA_POWERSAVE _)
+		[ -n "$v" ] && writef "$SND_HDA_PARAM" "$v"
+	else
+		cur=$(cat "$SND_HDA_PARAM" 2> /dev/null) && [ -n "$cur" ] && baseline_put SND_HDA_POWERSAVE _ "$cur"
+		writef "$SND_HDA_PARAM" "$1"
+	fi
+}
+
+apply_vm_laptop_mode() { writef "$VM_LM" "$1"; }
+apply_vm_dirty_wb() { writef "$VM_WB" "$1"; }
+
+apply_wifi_powersave() { # on|off
+	command -v iw > /dev/null 2>&1 || return 0
+	[ -d "/sys/class/net/$WIFI_DEV" ] || return 0
+	iw dev "$WIFI_DEV" set power_save "$1" > /dev/null 2>&1
+}
+
+# ---------------------------------------------------------------- self-check
+
+if [ "${1:-}" = test ]; then
+	T=$(mktemp -d)
+	trap 'rm -rf "$T"' EXIT
+
+	valid MODE eco || { echo "MODE eco should be valid"; exit 1; }
+	valid MODE weird && { echo "MODE weird should be refused"; exit 1; }
+	valid EPP power || { echo "EPP power should be valid"; exit 1; }
+	valid EPP "rm -rf /" && { echo "hostile EPP value should be refused"; exit 1; }
+	valid NO_TURBO 1 || { echo "NO_TURBO 1 should be valid"; exit 1; }
+	valid NO_TURBO 2 && { echo "NO_TURBO 2 should be refused"; exit 1; }
+	valid PCI_PM auto || { echo "PCI_PM auto should be valid"; exit 1; }
+	valid PCI_PM off && { echo "PCI_PM off should be refused"; exit 1; }
+	valid SND_HDA_POWERSAVE 10 || { echo "SND_HDA_POWERSAVE 10 should be valid"; exit 1; }
+	valid SND_HDA_POWERSAVE 9999 && { echo "SND_HDA_POWERSAVE 9999 should be refused (out of range)"; exit 1; }
+	valid SND_HDA_POWERSAVE baseline || { echo "SND_HDA_POWERSAVE baseline should be valid"; exit 1; }
+	valid VM_DIRTY_WB 50 && { echo "VM_DIRTY_WB below range should be refused"; exit 1; }
+	valid WIFI_POWERSAVE on || { echo "WIFI_POWERSAVE on should be valid"; exit 1; }
+	valid BOGUS_KEY anything && { echo "an unknown key must never validate"; exit 1; }
+
+	# --- EPP across multiple policies ---
+	mkdir -p "$T/sys/cpu0/cpufreq" "$T/sys/cpu1/cpufreq"
+	: > "$T/sys/cpu0/cpufreq/energy_performance_preference"
+	: > "$T/sys/cpu1/cpufreq/energy_performance_preference"
+	CPU_SYS="$T/sys"
+	apply_epp power
+	[ "$(cat "$T/sys/cpu0/cpufreq/energy_performance_preference")" = power ] \
+		&& [ "$(cat "$T/sys/cpu1/cpufreq/energy_performance_preference")" = power ] \
+		|| { echo "apply_epp should write every policy"; exit 1; }
+
+	# --- no_turbo, missing file must not error ---
+	apply_no_turbo 1 # $CPU_SYS/intel_pstate doesn't exist in this fixture — must be silent
+	mkdir -p "$T/sys/intel_pstate"
+	: > "$T/sys/intel_pstate/no_turbo"
+	apply_no_turbo 1
+	[ "$(cat "$T/sys/intel_pstate/no_turbo")" = 1 ] || { echo "apply_no_turbo wrong"; exit 1; }
+
+	# --- PCI PM: capture on first non-baseline apply, then baseline restores it ---
+	BASELINE="$T/baseline"
+	mkdir -p "$T/pci/0000:00:02.0/power"
+	printf 'on\n' > "$T/pci/0000:00:02.0/power/control"
+	PCI_ROOT="$T/pci"
+	SCSI_ROOT="$T/no-scsi"
+	apply_pci_pm auto
+	[ "$(cat "$T/pci/0000:00:02.0/power/control")" = auto ] || { echo "apply_pci_pm auto should write auto"; exit 1; }
+	grep -q "^PCI_PM 0000:00:02.0 on$" "$BASELINE" || { echo "apply_pci_pm should have captured the pre-eco value as baseline"; exit 1; }
+	apply_pci_pm auto # a second eco entry must not overwrite the captured baseline
+	[ "$(grep -c '^PCI_PM 0000:00:02.0' "$BASELINE")" = 1 ] || { echo "baseline must be captured once, not every apply"; exit 1; }
+	apply_pci_pm baseline
+	[ "$(cat "$T/pci/0000:00:02.0/power/control")" = on ] || { echo "apply_pci_pm baseline should restore the captured value"; exit 1; }
+
+	# --- a device never captured: baseline restore must leave it alone ---
+	mkdir -p "$T/pci/0000:00:03.0/power"
+	printf 'auto\n' > "$T/pci/0000:00:03.0/power/control"
+	rm -f "$BASELINE"
+	apply_pci_pm baseline
+	[ "$(cat "$T/pci/0000:00:03.0/power/control")" = auto ] || { echo "an uncaptured device must be left untouched by a baseline restore"; exit 1; }
+
+	# --- snd_hda baseline capture/restore, same shape ---
+	BASELINE="$T/baseline2"
+	printf '10\n' > "$T/sys/snd_hda_power_save"
+	SND_HDA_PARAM="$T/sys/snd_hda_power_save"
+	apply_snd_hda 1
+	[ "$(cat "$SND_HDA_PARAM")" = 1 ] || { echo "apply_snd_hda should write the eco value"; exit 1; }
+	apply_snd_hda baseline
+	[ "$(cat "$SND_HDA_PARAM")" = 10 ] || { echo "apply_snd_hda baseline should restore 10"; exit 1; }
+
+	echo "ok"
+	exit 0
+fi
+
+# ---------------------------------------------------------------- apply
+
+[ "${1:-}" = apply ] || { echo "usage: mango-powermode apply|test  (payload of KEY=value lines on stdin)" >&2; exit 1; }
+
+while IFS='=' read -r k v; do
+	[ -n "$k" ] || continue
+	if ! valid "$k" "$v"; then
+		printf 'mango-powermode: refusing %s=%s (not in the allowed set)\n' "$k" "$v" >&2
+		continue
+	fi
+	case "$k" in
+	EPP) apply_epp "$v" ;;
+	PROFILE) apply_profile "$v" ;;
+	NO_TURBO) apply_no_turbo "$v" ;;
+	PCI_PM) apply_pci_pm "$v" ;;
+	SND_HDA_POWERSAVE) apply_snd_hda "$v" ;;
+	VM_LAPTOP_MODE) apply_vm_laptop_mode "$v" ;;
+	VM_DIRTY_WB) apply_vm_dirty_wb "$v" ;;
+	WIFI_POWERSAVE) apply_wifi_powersave "$v" ;;
+	MODE) : ;; # informational only, no direct action
+	esac
+done
+
+exit 0

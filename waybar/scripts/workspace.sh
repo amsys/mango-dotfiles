@@ -11,6 +11,7 @@
 #
 #   workspace.sh <1-9> [monitor]  custom/ws#N exec — emit JSON
 #   workspace.sh --watch          custom/wswatch exec — block on mmsg, signal all nine
+#   workspace.sh --click <1-9>    custom/ws#1's on-click — exit overview, or switch tags
 #   workspace.sh test             assert the renderer against canned IPC output
 set -u
 
@@ -29,14 +30,22 @@ SIGNAL=20
 # bars.sh bakes the name into the exec line when it generates the per-output
 # bars. Empty means "first monitor in the document" — the fallback path where
 # waybar was launched bare, without bars.sh.
-render() { # tag-index, monitor (may be empty); reads {all_tags} then {clients}
+#
+# all-monitors, not all-tags: mango's `active_tags` is `[0]` — tag indices are
+# 1-based, so 0 is an unambiguous sentinel — exactly while SUPER+space's
+# overview has every tag active at once (~0 & TAGMASK). all-monitors already
+# carries both that flag and the same per-tag array all-tags did, at no extra
+# IPC round trip, so this is a straight swap, not an added query.
+render() { # tag-index, monitor (may be empty); reads {all_monitors} then {clients}
 	jq -rs --argjson n "$1" --arg mon "${2:-}" '
-		(if $mon == "" then .[0].all_tags[0].monitor else $mon end)        as $m |
-		(first(.[0].all_tags[] | select(.monitor == $m)).tags[]
-		 | select(.index == $n))                                          as $t |
-		[ .[1].clients[] | select(.tags | index($n))
+		(if $mon == "" then .[0].monitors[0].name else $mon end)          as $m |
+		(.[0].monitors[] | select(.name == $m))                          as $mo |
+		(($mo.active_tags // []) == [0])                                  as $ov |
+		($mo.tags[] | select(.index == $n))                               as $t |
+		[ .[1].clients[] | select($ov or (.tags | index($n)))
 		                 | select(.monitor == $m) ]                       as $c |
-		(if   $t.is_urgent       then "urgent"
+		(if   $ov                then "overview"
+		 elif $t.is_urgent       then "urgent"
 		 elif $t.is_active       then "active"
 		 elif ($c | length) == 0 then "empty"
 		 else                         "occupied" end),
@@ -79,15 +88,32 @@ if [ "${1:-}" = "--watch" ]; then
 	exit 0
 fi
 
+# ---------------------------------------------------------------- click
+
+if [ "${1:-}" = "--click" ]; then
+	# Only custom/ws#1 points here (config.jsonc) — it's the one pill still
+	# visible while in overview. `view,N,0` is a no-op there: mango's
+	# view_in_mon early-returns whenever isoverview is set and the target
+	# isn't the all-tags mask, so a plain click would otherwise do nothing.
+	CN=${2:?usage: workspace.sh --click <1-9>}
+	OV=$(mmsg get all-monitors 2> /dev/null | jq -r '(.monitors[] | select(.active) | .active_tags // []) == [0]')
+	if [ "$OV" = true ]; then
+		mmsg dispatch toggleoverview,
+	else
+		mmsg dispatch "view,$CN,0"
+	fi
+	exit 0
+fi
+
 # ---------------------------------------------------------------- selftest
 
 if [ "${1:-}" = "test" ]; then
-	TAGS='{"all_tags":[{"monitor":"eDP-1","tags":[
+	TAGS='{"monitors":[{"name":"eDP-1","active_tags":[2],"tags":[
 		{"index":1,"is_active":false,"is_urgent":false,"client_count":2},
 		{"index":2,"is_active":true,"is_urgent":false,"client_count":0},
 		{"index":3,"is_active":false,"is_urgent":true,"client_count":1},
 		{"index":4,"is_active":false,"is_urgent":false,"client_count":0}]},
-		{"monitor":"DP-1","tags":[
+		{"name":"DP-1","active_tags":[1],"tags":[
 		{"index":1,"is_active":true,"is_urgent":false,"client_count":1},
 		{"index":2,"is_active":false,"is_urgent":false,"client_count":0},
 		{"index":3,"is_active":false,"is_urgent":false,"client_count":0},
@@ -135,20 +161,45 @@ if [ "${1:-}" = "test" ]; then
 	printf '*\ta&b\ttt\n_\tlonger\tu\n' | winrows | sed -n 1p | grep -q 'a&amp;b   </span>' \
 		|| { echo "pad must precede escape"; exit 1; }
 	printf '*\tkitty\tx & y\n' | winrows | grep -q 'x &amp; y</span>$' || { echo "winrows title esc wrong"; exit 1; }
+
+	# Overview: active_tags == [0] outranks every per-tag state, on every tag
+	# of that monitor, and the client filter drops its per-tag restriction so
+	# the one visible pill's tooltip can list everything on the screen.
+	OVTAGS='{"monitors":[{"name":"eDP-1","active_tags":[0],"tags":[
+		{"index":1,"is_active":true,"is_urgent":false,"client_count":1},
+		{"index":2,"is_active":true,"is_urgent":true,"client_count":0}]}]}'
+	ovfeed() { printf '%s\n%s\n' "$OVTAGS" "$CLIENTS" | render "$1" eDP-1; }
+	[ "$(ovfeed 1 | head -1)" = overview ] || { echo "overview class wrong"; exit 1; }
+	[ "$(ovfeed 2 | head -1)" = overview ] || { echo "overview should outrank urgent"; exit 1; }
+	# kitty+firefox are tagged 1, slack is tagged 3 — none of that should
+	# matter in overview, only which monitor they're on.
+	[ "$(ovfeed 1 | wc -l)" -eq 4 ] || { echo "overview should list every client on the monitor: $(ovfeed 1)"; exit 1; }
+	ovfeed 1 | grep -q slack || { echo "overview client list missing a tag-3 client"; exit 1; }
 	echo "ok"
 	exit 0
 fi
 
 # ---------------------------------------------------------------- module
 
-N=${1:?usage: workspace.sh <1-9> [monitor] | --watch | test}
+N=${1:?usage: workspace.sh <1-9> [monitor] | --watch | --click <1-9> | test}
 MON=${2-}
 
-OUT=$({ mmsg get all-tags; mmsg get all-clients; } 2> /dev/null | render "$N" "$MON") || OUT=''
+OUT=$({ mmsg get all-monitors; mmsg get all-clients; } 2> /dev/null | render "$N" "$MON") || OUT=''
 [ -n "$OUT" ] || { printf '{"text":"%s","class":"empty","tooltip":"Tag %s"}\n' "$N" "$N"; exit 0; }
 
 CLASS=$(printf '%s\n' "$OUT" | head -1)
 WINS=$(printf '%s\n' "$OUT" | tail -n +2)
+
+# Overview, and not the pill that speaks for it: render nothing. .hidden
+# (style template) collapses #custom-ws's own min-width/padding/margin, so
+# the row reads as one wide pill rather than nine transparent placeholders —
+# plain empty text is not enough on its own, since #custom-ws still carries
+# an explicit min-width. Skip the tooltip build below too: nobody can hover a
+# zero-size widget.
+if [ "$CLASS" = overview ] && [ "$N" != 1 ]; then
+	printf '{"text":"","class":["overview","hidden"]}\n'
+	exit 0
+fi
 
 # No "Tag N" title and no "Windows" section header: you know which pill you are
 # hovering, so both were chrome above two lines of content. Dropping them also
@@ -173,4 +224,8 @@ TIP=$(
 	# event. Not worth a poll to fix.
 )
 
-emit "$CLASS" "$N" "$TIP"
+if [ "$CLASS" = overview ]; then
+	emit overview overview "$TIP"
+else
+	emit "$CLASS" "$N" "$TIP"
+fi

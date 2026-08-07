@@ -285,6 +285,28 @@ tooltip label {
     background: @urgent;
     color: @urgent_fg;
 }
+/* Overview (SUPER+space): mango sets every tag active at once, which used to
+   paint the whole row solid accent and lose which tag you were really on.
+   workspace.sh now collapses that to one pill speaking for the group — this
+   is that pill, sized to the row it replaces (8 pills at 38px apiece: 26
+   min-width + 2*4 padding + 2*2 margin, minus this pill's own padding and
+   margin) so the group's total width doesn't jump. Verify against a live
+   screenshot if #custom-ws's box model above ever changes — this constant is
+   measured, not derived from a CSS variable. */
+#custom-ws.overview {
+    min-width: 330px;
+    background: @accent;
+    color: @accent_fg;
+}
+/* The other eight pills while in overview: collapse to nothing rather than
+   sitting there as empty, still-sized boxes — plain empty text alone isn't
+   enough, since #custom-ws above already gives every pill an explicit
+   min-width/padding/margin regardless of its text. */
+#custom-ws.hidden {
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+}
 
 /* Warning / critical states -> ii's error color. */
 #custom-cpu.warning,
@@ -356,6 +378,15 @@ tooltip label {
 #custom-netsec.portal {
     color: @urgent;
     animation: netsec-pulse 1.1s ease-in-out infinite alternate;
+}
+/* eco: static, not pulsing. Two classes outrank the one-class rule above by
+   specificity, so this wins regardless of source order. An infinite CSS
+   animation is exactly the kind of wakeup eco exists to cut, and this is the
+   one pill where staying visibly red matters more than staying "alive". */
+#custom-netsec.eco.open,
+#custom-netsec.eco.portal {
+    color: @urgent;
+    animation: none;
 }
 
 /* Everything with a tooltip or a click target reacts the same way. battery,

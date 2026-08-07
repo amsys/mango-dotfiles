@@ -161,6 +161,19 @@ signalled — so `mango/scripts/screenrecord.sh` wraps both ends. It stops with
 moov atom, and killed any other way the `.mp4` exists but will not play. Output
 lands in `~/Videos/Recordings/`.
 
+| Key | Does |
+|---|---|
+| `Alt+S` / `Ctrl+Print` | screenshot the active monitor, save + copy |
+| `Alt+Shift+S` | screenshot a selection, save + copy |
+| `Print` | screenshot everything, clipboard only |
+| `Shift+Print` | screenshot a selection, opens in `swappy` to annotate |
+
+The save/copy pair share `mango/scripts/screenshot.sh` so the destination
+directory lives in one place (`MANGO_SCREENSHOT_DIR`, see below) instead of
+being duplicated per bind. "Active monitor" comes from `mmsg get
+all-monitors`' `active` flag — the compositor's own `selmon`, not a
+cursor-position guess.
+
 The window switcher exists because rofi-wayland's built-in `window` mode is
 X11/EWMH only. `rofi/window.sh` builds the list from `mmsg get all-clients` and
 selects with a single `mmsg dispatch focusid client,<id>`: `focusid` runs
@@ -273,6 +286,7 @@ To restyle: edit `matugen/templates/swaylock/config`, run
 | Power menu size | `mango/scripts/powermenu.sh` | set `MANGO_POWERMENU_SIZE` to `WIDTHxHEIGHT` in pixels (default `760x430`); the margins that centre it are derived from the active monitor, not hardcoded |
 | What counts as "busy" | `mango/scripts/busy.sh` | set `MANGO_DOWNLOAD_DIR` (default `~/Downloads`), `MANGO_DOWNLOAD_FRESH_MIN` (default `5`, so an abandoned `.part` stops blocking suspend), `MANGO_PACMAN_LCK` |
 | First-hover tooltip delay | `waybar/fast-tooltips.c` | set `MANGO_TOOLTIP_DELAY_MS` (default `80`); only takes effect if the LD_PRELOAD shim built, see "The system indicators" below |
+| Screenshot save directory | `mango/scripts/screenshot.sh` | set `env=MANGO_SCREENSHOT_DIR,/path` in `mango/local.conf` (default `~/Pictures/Screenshots`); a leading `~/` is expanded, mango's `env=` does not do it itself |
 
 `mango/config.conf` ends with `source=./local.conf`, installed once from
 `mango/local.conf.example` and never overwritten — put per-machine
@@ -723,6 +737,72 @@ uncore RAPL draw vs. the residual going to screen/disk/radios) appears
 automatically — the module already degrades gracefully to just the top-level
 draw number when `energy_uj` isn't readable, so a fresh checkout works before
 this script has ever run.
+
+## Power modes (`system/powermode/`)
+
+Two modes, left click on the battery pill to cycle, followed automatically by
+the AC cable:
+
+- **full** — CPU EPP/turbo/platform-profile at maximum, PCI/NVMe runtime PM
+  left alone, waybar polls at its normal (config.jsonc) rate, tooltips rebuild
+  on every poll.
+- **eco** 🌿 — CPU EPP/turbo/platform-profile at minimum, PCI/NVMe devices
+  allowed to runtime-suspend, `vm.laptop_mode` and writeback batched, WiFi
+  power save on, backlight dropped (remembered and restored), waybar polls
+  slower and its tooltips only rebuild when the underlying state actually
+  changes. `docker`/frappe-bench containers get one of three outcomes rather
+  than a blanket stop: a container with a live `docker exec`/`build` attached
+  is **left running** (stopping it would kill whatever's mid-flight), one with
+  no live docker command but a `PM_ECO_BUSY_PROCS` process running (`claude`
+  by default) is **paused** (freezes the CPU cost, resumes instantly), and an
+  idle one is **stopped**, same as before. Going back to full unpauses
+  anything paused; stopped containers stay stopped, by design — start a bench
+  on demand with `frappe-dev <env> up`.
+
+A click sets a manual override that survives until the cable state changes
+(unplugging or plugging back in always re-decides). Independently,
+`battery-guard.sh`'s existing 30s poll also watches for a **weak charger** —
+AC reports online but the battery is still discharging, or a USB-C source
+negotiates less than `PM_WEAK_MIN_W` — and forces eco with a critical
+notification until the charger recovers, overriding even a manual full.
+
+Every value — EPP, turbo, the profile, PCI PM, brightness, the docker prefix,
+which processes count as "work in flight", the weak-charger threshold,
+waybar's eco poll intervals — lives in one file, `mango/powermode.conf`,
+tracked and symlinked like everything else, with a comment over each key.
+Editing it needs no reinstall; switching modes picks the new value up
+immediately.
+
+```
+~/.config/mango/scripts/powermode.sh status   # current mode + why
+~/.config/mango/scripts/powermode.sh eco      # force eco (sets the manual override)
+~/.config/mango/scripts/powermode.sh full     # force full
+~/.config/mango/scripts/powermode.sh test     # decision-table self-check, no hardware touched
+```
+
+CPU EPP, turbo, the ACPI platform profile, PCI/NVMe runtime PM, snd_hda power
+save and `vm.laptop_mode`/writeback are all root-owned sysfs, applied by
+`/usr/local/bin/mango-powermode` — the only thing in this repo that writes any
+of them. `powermode.conf` is user-writable, so that helper never sources it or
+takes a path from it: `powermode.sh` resolves the config into `KEY=value`
+lines for one target mode and pipes them in on stdin, and the helper
+re-validates every value against a closed set before touching sysfs. Install
+once:
+
+```
+sudo system/powermode/install.sh
+```
+
+Same shape as `system/rapl/`: sudo-gated, not symlinked, one fixed
+`NOPASSWD` verb (`mango-powermode apply`, no free arguments — the payload
+travels on stdin, which sudoers can't see, so the helper is the actual
+boundary). `mango-powermode test` runs its own self-check against a fixture
+`/sys` tree first and refuses to install the sudoers rule if it fails.
+
+Before this is installed, mode switches still work — brightness, docker, and
+waybar's poll intervals are all userspace — they just leave the CPU/PCI knobs
+untouched, the same graceful-degradation shape as `battery.sh`'s RAPL section
+before `system/rapl/install.sh` has run.
 
 ## Security note
 
