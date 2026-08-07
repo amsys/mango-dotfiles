@@ -1,0 +1,17 @@
+# Installed to /etc/udev/rules.d/mango-rapl.rules by system/rapl/install.sh.
+#
+# Intel RAPL energy counters (/sys/class/powercap/intel-rapl*/energy_uj) are
+# root-only by default because of the PLATYPUS side-channel (CVE-2020-8694) —
+# a local attacker can infer AES keys from package energy readings. This is a
+# single-user laptop, so that risk doesn't apply here, and RAPL is the only
+# root-free source of "which part of this machine is drawing the watts".
+# Group-read for wheel, not world.
+#
+# A tmpfiles.d z-line was the first thing tried (it is the more obvious tool
+# for "fix permissions on an existing path"), but systemd-tmpfiles-setup.service
+# can run before the intel_rapl module has created these sysfs nodes — it is a
+# loadable module, not built in, on this kernel — so a z-glob rule matches
+# nothing on some boots and the fix silently doesn't apply. udev's ACTION=="add"
+# fires exactly when the powercap device is created, every time: module load,
+# or boot with it built in.
+SUBSYSTEM=="powercap", ACTION=="add", RUN+="/usr/bin/chgrp -R wheel /sys%p", RUN+="/usr/bin/chmod -R g+r /sys%p"

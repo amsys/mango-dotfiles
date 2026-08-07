@@ -80,6 +80,10 @@ in the README checklist if it can't be tracked as a file:
   tracked in `system/sddm/` — `sudo system/sddm/install.sh` is what pushes them
   out. Editing the installed copies directly is the same mistake as editing
   matugen output
+- battery power attribution: `/etc/udev/rules.d/mango-rapl.rules` (group-reads
+  RAPL's `energy_uj` for `wheel`) and `/etc/sudoers.d/mango-powertop`
+  (NOPASSWD, arg-less `powertop`). Sources tracked in `system/rapl/` —
+  `sudo system/rapl/install.sh` pushes them out
 - KeePassXC entry attributes — `rofi/ai.sh` looks up `application=mango`
 
 ## Conventions

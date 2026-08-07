@@ -272,6 +272,7 @@ To restyle: edit `matugen/templates/swaylock/config`, run
 | Charger chime | `mango/scripts/ac-watch.sh` | `MANGO_AC_DIR`/`MANGO_BAT_DIR`, the same pair `battery.sh` and `battery-guard.sh` use — all three glob `A[CD]*`/`BAT*` if unset |
 | Power menu size | `mango/scripts/powermenu.sh` | set `MANGO_POWERMENU_SIZE` to `WIDTHxHEIGHT` in pixels (default `760x430`); the margins that centre it are derived from the active monitor, not hardcoded |
 | What counts as "busy" | `mango/scripts/busy.sh` | set `MANGO_DOWNLOAD_DIR` (default `~/Downloads`), `MANGO_DOWNLOAD_FRESH_MIN` (default `5`, so an abandoned `.part` stops blocking suspend), `MANGO_PACMAN_LCK` |
+| First-hover tooltip delay | `waybar/fast-tooltips.c` | set `MANGO_TOOLTIP_DELAY_MS` (default `80`); only takes effect if the LD_PRELOAD shim built, see "The system indicators" below |
 
 `mango/config.conf` ends with `source=./local.conf`, installed once from
 `mango/local.conf.example` and never overwritten — put per-machine
@@ -419,6 +420,20 @@ to be widest sits flush against the right edge. `cpu.sh` and `memory.sh` pass
 `rule 44` for that reason; the rest stay variable-width. There is no "Updated
 HH:MM" footer: on a module that refreshes every 3-15s it said nothing. claudebar
 keeps its own, where a 300s interval makes it real.
+
+GTK3's first-hover tooltip delay is a **compile-time constant** —
+`gtk_tooltip_start_delay()` in `gtktooltip.c` hardcodes 500ms (`HOVER_TIMEOUT`)
+and the `gtk-tooltip-timeout` GtkSettings property has been dead code since
+3.10, so no settings.ini, gsettings or CSS knob reaches it. `waybar/fast-tooltips.c`
+works around it with an LD_PRELOAD shim that intercepts the exported
+`gdk_threads_add_timeout_full()` symbol from `libgdk-3.so.0` and shortens only
+the `(priority 0, 500ms)` case, leaving the 60ms browse-mode timer (and
+everything else) untouched. `install-config.sh` compiles it into
+`~/.local/lib/mango/fast-tooltips.so`, and `waybar/scripts/bars.sh` adds it to
+every waybar launch via `LD_PRELOAD`, falling back to unmodified GTK behaviour
+if the `.so` hasn't been built yet. The `.c` source is tracked; the compiled
+`.so` is machine-local build output, same split as the DIMM cache mentioned
+above. `MANGO_TOOLTIP_DELAY_MS` overrides the 80ms default.
 
 The left pill carries `cpu`, `memory`, `battery`, `claudebar` and `mpris`; the
 right one the clock, the util buttons and keep-awake. Battery and claudebar sit
@@ -673,6 +688,41 @@ Two things to know when editing:
 
 Not tracked, because they are generated: `Colors.qml` and `background.*` inside
 the installed theme. Both are rewritten on every wallpaper switch.
+
+## Battery power attribution (`system/rapl/`)
+
+`waybar/scripts/battery.sh`'s tooltip can only show total draw without help:
+the two sources that know *where* the watts go — RAPL and powertop — are both
+root-gated by default.
+
+```
+sudo system/rapl/install.sh
+```
+
+Like `system/sddm/`, this is installed by a root script, never symlinked.
+It does two things:
+
+- A udev rule (`/etc/udev/rules.d/mango-rapl.rules`) group-reads
+  `/sys/class/powercap/intel-rapl*/energy_uj` for `wheel`. RAPL is root-only
+  by default because of the PLATYPUS side-channel (CVE-2020-8694 — a local
+  attacker can infer AES keys from package energy readings); on a single-user
+  laptop that risk doesn't apply, and RAPL is the only root-free source of
+  per-domain power. A tmpfiles.d `z` line looks like the more obvious tool for
+  this, but `intel_rapl_common`/`intel_rapl_msr` are loadable modules on this
+  kernel (`CONFIG_INTEL_RAPL=m`), and `systemd-tmpfiles-setup.service` can run
+  before they've created the sysfs nodes — a udev `ACTION=="add"` rule fires
+  exactly when the node appears instead, every boot.
+- `/etc/sudoers.d/mango-powertop`: `%wheel ALL=(root) NOPASSWD: /usr/bin/powertop ""`.
+  The trailing `""` forbids arguments, so this grants exactly "run the
+  interactive powertop TUI", not root — same reasoning as
+  `sudoers.d-sddm-theme-sync`. `custom/battery`'s `on-click` runs it in a
+  `mango-monitor`-class kitty window.
+
+Once installed, `battery.sh`'s "Where it goes" tooltip section (package /
+uncore RAPL draw vs. the residual going to screen/disk/radios) appears
+automatically — the module already degrades gracefully to just the top-level
+draw number when `energy_uj` isn't readable, so a fresh checkout works before
+this script has ever run.
 
 ## Security note
 

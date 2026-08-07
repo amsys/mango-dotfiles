@@ -36,6 +36,14 @@ mono() { printf '<span font_family="%s">%s</span>' "$F_MONO" "$1"; }
 
 esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 
+# U+00A0, not a literal space: Pango's width request can drop trailing plain
+# spaces, which would silently undo the right-margin fix below on whichever
+# row happens to be last. NBSP survives that and renders identically to a
+# space in every font this config uses.
+NBSP=$(printf '\xc2\xa0')
+IND2="$NBSP$NBSP"
+IND3="$NBSP$NBSP$NBSP"
+
 # Tooltip markup is written with double quotes; escaping them (and folding the
 # newlines) happens once here, on the way into JSON.
 emit() { # class, full bar markup, tooltip markup
@@ -54,11 +62,10 @@ title() { printf '<span font_weight="bold" foreground="%s">%s</span>\n' "$C_TITL
 # resolves to Noto Sans Mono and :charset=2500 to Verdana, so naming one would
 # introduce a fallback that does not exist today.
 #
-# Pass a width to make the rule the widest line in the tooltip. That is what
-# pins the tooltip to a constant width, and it is also what makes the left and
-# right margins match: row()/dim() inset 3 spaces on the left and nothing on the
-# right, so whenever a *row* is the widest line it sits flush against the right
-# padding while everything else is indented.
+# Pass a width to make the rule at least as wide as the widest row — it does
+# not have to be the widest line any more (row()/dim()/sect() below carry their
+# own matching margin on both sides now), but a rule shorter than its rows
+# still looks wrong, so callers keep sizing it to their content.
 rule() { # [cells=30]
 	_ri=${1:-30} _rs=''
 	while [ "$_ri" -gt 0 ]; do
@@ -67,9 +74,12 @@ rule() { # [cells=30]
 	done
 	printf '<span foreground="%s">%s</span>\n' "$C_RULE" "$_rs"
 }
-sect() { printf '\n<span foreground="%s">  %s  %s</span>\n' "$C_LABEL" "$1" "$2"; }
-row() { printf '   %s\n' "$1"; }
-dim() { printf '   <span foreground="%s">%s</span>\n' "$C_DIM" "$1"; }
+# Left and right insets match — see NBSP above for why they are not plain
+# spaces. The margin sits outside the coloured span, same as row()/dim(), so
+# the icon-label gap stays a real space and only the outer margin is NBSP.
+sect() { printf '\n%s<span foreground="%s">%s  %s</span>%s\n' "$IND2" "$C_LABEL" "$1" "$2" "$IND2"; }
+row() { printf '%s%s%s\n' "$IND3" "$1" "$IND3"; }
+dim() { printf '%s<span foreground="%s">%s</span>%s\n' "$IND3" "$C_DIM" "$1" "$IND3"; }
 good() { printf '<span foreground="%s">%s</span>' "$C_GOOD" "$1"; }
 warn() { printf '<span foreground="%s">%s</span>' "$C_WARN" "$1"; }
 bad() { printf '<span foreground="%s">%s</span>' "$C_BAD" "$1"; }
@@ -160,6 +170,12 @@ if [ "${1:-}" = "tooltip-selftest" ]; then
 	# 3 bytes per ─, so 5 cells is 15 bytes. This is what pins tooltip width.
 	[ "$(rule 5 | tr -cd '─' | wc -c)" -eq 15 ] || { echo "rule width wrong"; exit 1; }
 	[ "$(rule | tr -cd '─' | wc -c)" -eq 90 ] || { echo "rule default width wrong"; exit 1; }
+	# left and right margins must match — same NBSP run on both ends
+	[ "$(dim x | grep -o "$NBSP*" | head -1)" = "$IND3" ] || { echo "dim left margin wrong"; exit 1; }
+	[ "$(dim x | grep -o "$NBSP*\$")" = "$IND3" ] || { echo "dim right margin wrong"; exit 1; }
+	[ "$(row x | grep -o "$NBSP*" | head -1)" = "$IND3" ] || { echo "row left margin wrong"; exit 1; }
+	[ "$(row x | grep -o "$NBSP*\$")" = "$IND3" ] || { echo "row right margin wrong"; exit 1; }
+	[ "$(sect i l | grep -o "$NBSP*\$")" = "$IND2" ] || { echo "sect right margin wrong"; exit 1; }
 	[ "$(grade 10 70 90)" = "$C_GOOD" ] && [ "$(grade 75 70 90)" = "$C_WARN" ] && [ "$(grade 95 70 90)" = "$C_BAD" ] || { echo "grade wrong"; exit 1; }
 	[ "$(hkib 1048576)" = "1.0 GiB" ] || { echo "hkib wrong: $(hkib 1048576)"; exit 1; }
 	[ "$(hkib 0)" = "none" ] || { echo "hkib 0 should read as none, not 0.0 KiB"; exit 1; }

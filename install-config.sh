@@ -139,6 +139,34 @@ else
 fi
 log
 
+# GTK3 hardcodes its first-hover tooltip delay to 500ms at compile time
+# (gtktooltip.c HOVER_TIMEOUT) — no setting, gsettings key or CSS reaches it.
+# waybar/fast-tooltips.c is an LD_PRELOAD shim that intercepts the exported
+# gdk_threads_add_timeout_full() symbol and shortens just that one case.
+# Source is tracked; the compiled .so is machine-local build output, so it is
+# rebuilt here rather than shipped.
+SHIM_SRC="$REPO/waybar/fast-tooltips.c"
+SHIM_SO="$HOME/.local/lib/mango/fast-tooltips.so"
+log "-- fast-tooltips LD_PRELOAD shim --"
+if ! command -v cc >/dev/null 2>&1; then
+	log "  skip:   cc not installed"
+elif ! pkg-config --exists glib-2.0 2>/dev/null; then
+	log "  skip:   glib-2.0 dev headers not installed"
+elif [[ -f "$SHIM_SO" && "$SHIM_SO" -nt "$SHIM_SRC" ]]; then
+	log "  keep:   $SHIM_SO (up to date)"
+elif ((DRY_RUN)); then
+	log "  (dry run) would run: cc -shared -fPIC -O2 \$(pkg-config --cflags --libs glib-2.0) -o $SHIM_SO $SHIM_SRC"
+else
+	mkdir -p "$(dirname "$SHIM_SO")"
+	if cc -shared -fPIC -O2 $(pkg-config --cflags glib-2.0) $(pkg-config --libs glib-2.0) -o "$SHIM_SO" "$SHIM_SRC"; then
+		log "  build:  $SHIM_SO"
+	else
+		rm -f "$SHIM_SO"
+		log "  skip:   compile failed"
+	fi
+fi
+log
+
 log "-- materializing matugen output --"
 if ((DRY_RUN)); then
 	log "  (dry run) would run: mango/scripts/switchwall.sh --noswitch"

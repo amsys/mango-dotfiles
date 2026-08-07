@@ -133,7 +133,7 @@ core_labels() { # ncore
 # Column-major, so the P-cores stay together at the top of the left column
 # instead of being split across both. Prints its own row indent to match row().
 coregrid() { # "p0 p1 ...", "l0 l1 ..."
-	awk -v e="$C_EMPTY" -v g="$C_GOOD" -v y="$C_WARN" -v r="$C_BAD" -v d="$C_DIM" -v mf="$F_MONO" '
+	awk -v e="$C_EMPTY" -v g="$C_GOOD" -v y="$C_WARN" -v r="$C_BAD" -v d="$C_DIM" -v mf="$F_MONO" -v i3="$IND3" '
 	function cell(i,   c, k, q, f, m) {
 		c = (p[i] >= 90 ? r : p[i] >= 70 ? y : g)
 		k = int(p[i] / 10 + 0.5); if (k > 10) k = 10; if (k < 0) k = 0
@@ -148,8 +148,8 @@ coregrid() { # "p0 p1 ...", "l0 l1 ..."
 		# the whole row, joiner included, has to sit in one fixed-width run —
 		# a proportional space between the columns drifts just like the digits do
 		for (i = 1; i <= rows; i++)
-			printf "   <span font_family=\"%s\">%s%s</span>\n", mf, cell(i),
-				(i + rows <= n ? "   " cell(i + rows) : "")
+			printf "%s<span font_family=\"%s\">%s%s</span>%s\n", i3, mf, cell(i),
+				(i + rows <= n ? "   " cell(i + rows) : ""), i3
 	}' "$1" "$2"
 }
 

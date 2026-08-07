@@ -428,7 +428,7 @@ sec_emit() {
 				else
 					CARRIES=""
 				fi
-				printf '   %s · %s · %s%s\n' "$(printf '%s' "${nm:-unmanaged}" | esc)" "$dv" "$TY" "$CARRIES"
+				row "$(printf '%s · %s · %s%s' "$(printf '%s' "${nm:-unmanaged}" | esc)" "$dv" "$TY" "$CARRIES")"
 			done
 			CARRY=0
 			for d in $V4 $V6; do is_tun_dev "$d" && CARRY=1; done
@@ -442,8 +442,11 @@ sec_emit() {
 			for ns in $DNS; do
 				d=$(resolver_dev "$ns")
 				# <tt> for the address column: Google Sans Flex pads
-				# proportionally, so %-30s alone does not line anything up
-				NSP="<tt>$(printf '%-32s' "$ns")</tt>"
+				# proportionally, so %-20s alone does not line anything up.
+				# 20 cells covers all but the longest uncompressed IPv6
+				# literals; the old 32 pushed the "plaintext to the local
+				# network" row past the tooltip's wrap width.
+				NSP="<tt>$(printf '%-20s' "$ns")</tt>"
 				if [ "$d" = local ]; then
 					row "$(warn ~)  $NSP local stub"
 				elif is_tun_dev "$d"; then

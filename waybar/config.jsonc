@@ -237,7 +237,8 @@
         "exec": "~/.config/waybar/scripts/battery.sh",
         "return-type": "json",
         "interval": 15,
-        "escape": false
+        "escape": false,
+        "on-click": "kitty --class mango-monitor -e sudo -n powertop"
     },
     "custom/claudebar": {
         "exec": "sh ~/.config/waybar/scripts/claudebar.sh",

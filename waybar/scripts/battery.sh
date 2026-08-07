@@ -14,6 +14,11 @@ set -u
 
 BAT="${MANGO_BAT_DIR:-}"
 AC="${MANGO_AC_DIR:-}"
+RAPL_PKG="${MANGO_RAPL_PKG_DIR:-/sys/class/powercap/intel-rapl:0}"
+RAPL_UNC="${MANGO_RAPL_UNC_DIR:-/sys/class/powercap/intel-rapl:0:1}"
+UPOWER_DIR="${MANGO_UPOWER_DIR:-/var/lib/upower}"
+BACKLIGHT_DIR="${MANGO_BACKLIGHT_DIR:-}"
+RAPL_STATE="${XDG_RUNTIME_DIR:-/tmp}/waybar-battery-rapl"
 
 # Material Symbols Rounded, same 115%/-1200 wrapper as every other bar icon.
 # battery_0_bar .. battery_6_bar are not contiguous, hence the table.
@@ -34,6 +39,7 @@ ic_bat() { # capacity -> the matching fill level
 IC_CHARGE='󰁹'  # md-battery      U+F0079
 IC_HEALTH='󰗶'  # md-heart_pulse  U+F05F6
 IC_POWER='󰉁'   # md-flash        U+F0241
+IC_SHARE='󰞯'   # md-chart_donut  U+F07AF
 
 # ---------------------------------------------------------------- primitives
 
@@ -63,10 +69,90 @@ pct() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%d", (b > 0 ? a * 100 / b + 0.5
 uh() { awk -v v="$1" -v u="$2" 'BEGIN { printf "%.2f %s", v / 1000000, u }'; }
 
 # µA × µV -> W, or µW -> W when the battery already reports energy
-watts() { # rate, voltage, unit
+watts_num() { # rate, voltage, unit -> bare number, no unit suffix
 	awk -v r="$1" -v v="$2" -v u="$3" 'BEGIN {
-		printf "%.1f W", (u == "Ah" ? r * v / 1e12 : r / 1e6)
+		printf "%.1f", (u == "Ah" ? r * v / 1e12 : r / 1e6)
 	}'
+}
+watts() { printf '%s W' "$(watts_num "$1" "$2" "$3")"; }
+
+# ------------------------------------------------------- RAPL power attribution
+
+readf_path() { [ -r "$1" ] && cat "$1" 2>/dev/null || true; }
+rapl_readable() { [ -r "$RAPL_PKG/energy_uj" ] && [ -r "$RAPL_UNC/energy_uj" ]; }
+
+# energy_uj deltas wrap around max_energy_range_uj rather than going negative
+# forever, same idea as cpu.sh's deltas() clamping across a suspend/resume
+# counter reset — a wrap here must read as a small positive draw, not a
+# negative or huge nonsense wattage.
+rapl_watts() { # prev_uj, prev_epoch_ns, cur_uj, cur_epoch_ns, max_range_uj -> W
+	awk -v pu="$1" -v pn="$2" -v cu="$3" -v cn="$4" -v mr="$5" 'BEGIN {
+		d = cu - pu
+		if (d < 0) { if (mr > 0) d += mr; else d = 0 }
+		if (d < 0) d = 0
+		dt = (cn - pn) / 1000000000
+		printf "%.1f", (dt > 0 ? d / dt / 1000000 : 0)
+	}'
+}
+
+# part's share of whole, as a 0-100 percentage for bar()
+sharepct() { # part, whole
+	awk -v p="$1" -v w="$2" 'BEGIN {
+		v = (w > 0 ? p * 100 / w : 0); if (v > 100) v = 100; if (v < 0) v = 0
+		printf "%.0f", v
+	}'
+}
+
+# upower logs one history-rate-<model>-<serial>.dat per power-supply device
+# (battery, mouse, keyboard, ...); matching on the model name (spaces ->
+# underscores, same as upower's own filenames) picks the battery's out of the
+# pile without needing the serial.
+power_hist_file() {
+	_m=$(printf '%s' "$MODEL" | tr ' ' '_')
+	set -- "$UPOWER_DIR/history-rate-$_m"-*.dat
+	[ -e "$1" ] && printf '%s' "$1"
+}
+
+# tab-separated "epoch watts state" lines -> "min max avg  b1 b2 ... bN",
+# bucketed oldest-to-newest for heatbar(). Only "discharging" samples inside
+# the window count — on AC the file still fills with "charging"/"unknown"
+# rows, and mixing those in would understate the real draw. Empty buckets
+# carry the previous bucket's value forward rather than reading as 0 W, or
+# a quiet stretch would look like an idle trough that never happened.
+power_stats() { # file, now, window=3600, buckets=24
+	awk -v now="$2" -v win="${3:-3600}" -v nb="${4:-24}" -F'\t' '
+		$3 == "discharging" && $1 >= now - win {
+			n++; s += $2
+			if (n == 1 || $2 < mn) mn = $2
+			if (n == 1 || $2 > mx) mx = $2
+			b = int((now - $1) * nb / win); if (b >= nb) b = nb - 1; if (b < 0) b = 0
+			bs[b] += $2; bn[b]++
+		}
+		END {
+			if (!n) exit 1
+			printf "%.1f %.1f %.1f", mn, mx, s / n
+			# buckets come out normalized 0-100 within this window own range,
+			# not raw watts — heatbar glyph/colour picks assume that scale,
+			# same as every other module per-cell series.
+			span = mx - mn
+			last = 50
+			for (i = nb - 1; i >= 0; i--) {
+				if (bn[i]) { v = bs[i] / bn[i]; last = (span > 0 ? (v - mn) * 100 / span : 50) }
+				printf " %.0f", last
+			}
+			printf "\n"
+		}' "$1"
+}
+
+# backlight brightness as a percentage, or nothing on a machine with no panel
+# (desktop, external-monitor-only laptop lid closed permanently, etc.)
+backlight_pct() {
+	_bl="$BACKLIGHT_DIR"
+	[ -n "$_bl" ] || _bl=$(set -- /sys/class/backlight/*; [ -d "$1" ] && printf '%s' "$1")
+	[ -n "$_bl" ] || return 1
+	_br=$(readf_path "$_bl/brightness") _mx=$(readf_path "$_bl/max_brightness")
+	[ -n "$_br" ] && [ -n "$_mx" ] && [ "$_mx" -gt 0 ] || return 1
+	pct "$_br" "$_mx"
 }
 
 # how long until empty (discharging) or full (charging), in seconds
@@ -115,6 +201,64 @@ if [ "${1:-}" = "test" ]; then
 	[ "$1 $2 $3 $4 $5" = "30000000 50000000 50000000 8000000 Wh" ] || { echo "energy levels wrong: $*"; exit 1; }
 	[ "$(watts "$4" 0 Wh)" = "8.0 W" ] || { echo "energy watts wrong"; exit 1; }
 
+	# --- RAPL delta arithmetic, including a counter wrap ---
+	# 100000 uj over 1s (1e9 ns) with plenty of headroom below max_range -> 0.1 W
+	[ "$(rapl_watts 100000 0 200000 1000000000 999999999)" = "0.1" ] \
+		|| { echo "rapl_watts wrong: $(rapl_watts 100000 0 200000 1000000000 999999999)"; exit 1; }
+	# counter passed max_energy_range_uj and wrapped back near 0: 900000 -> 100000
+	# with a 1000000 range is really +200000 uj, not -800000
+	[ "$(rapl_watts 900000 0 100000 1000000000 1000000)" = "0.2" ] \
+		|| { echo "rapl_watts wrap wrong: $(rapl_watts 900000 0 100000 1000000000 1000000)"; exit 1; }
+	# counter went backwards and the range is unknown (0) -> clamp to 0, never negative
+	[ "$(rapl_watts 900000 0 100000 1000000000 0)" = "0.0" ] \
+		|| { echo "rapl_watts unknown-range clamp wrong: $(rapl_watts 900000 0 100000 1000000000 0)"; exit 1; }
+
+	[ "$(sharepct 5 20)" = "25" ] || { echo "sharepct wrong: $(sharepct 5 20)"; exit 1; }
+	[ "$(sharepct 30 20)" = "100" ] || { echo "sharepct should clamp above 100%"; exit 1; }
+	[ "$(sharepct 5 0)" = "0" ] || { echo "sharepct with no total should read 0, not divide by zero"; exit 1; }
+
+	# --- upower history file selection + parsing ---
+	mkdir -p "$T/upower"
+	: > "$T/upower/history-rate-generic_id.dat"              # peripheral noise
+	: > "$T/upower/history-rate-ThinkPad_Keyboard-aa:bb.dat" # peripheral noise
+	UPOWER_DIR="$T/upower" MODEL="X421-35"
+	HF="$T/upower/history-rate-X421-35-42-123456789.dat"
+	: > "$HF"
+	[ "$(power_hist_file)" = "$HF" ] || { echo "power_hist_file picked the wrong file: $(power_hist_file)"; exit 1; }
+
+	NOWT=1700000000
+	{
+		printf '%s\t%s\t%s\n' "$((NOWT - 3500))" 10 discharging
+		printf '%s\t%s\t%s\n' "$((NOWT - 3000))" 15 discharging
+		printf '%s\t%s\t%s\n' "$((NOWT - 1800))" 5 charging     # wrong state, excluded
+		printf '%s\t%s\t%s\n' "$((NOWT - 1200))" 20 discharging
+		printf '%s\t%s\t%s\n' "$((NOWT - 100))" 50 unknown      # wrong state, excluded
+		printf '%s\t%s\t%s\n' "$((NOWT - 7200))" 999 discharging # outside the 1h window, excluded
+	} > "$HF"
+	PS=$(power_stats "$HF" "$NOWT" 3600 24)
+	set -- $PS
+	# hand-calculated over the three in-window discharging samples: 10, 15, 20
+	[ "$1 $2 $3" = "10.0 20.0 15.0" ] || { echo "power_stats min/max/avg wrong: $1 $2 $3"; exit 1; }
+
+	: > "$T/empty.dat"
+	power_stats "$T/empty.dat" "$NOWT" 3600 24 > /dev/null 2>&1 \
+		&& { echo "power_stats should fail (nothing to show) on an empty/all-filtered file"; exit 1; }
+
+	# --- on-AC branch: "Where it goes" gates on Discharging, not just RAPL being readable ---
+	mkdir -p "$T/rapl0" "$T/rapl1"
+	printf '1000\n' > "$T/rapl0/energy_uj"
+	printf '500\n' > "$T/rapl1/energy_uj"
+	RAPL_PKG="$T/rapl0" RAPL_UNC="$T/rapl1"
+	rapl_readable || { echo "rapl_readable should be true when both energy_uj files exist"; exit 1; }
+	# the module only draws "Where it goes" when STATUS = Discharging, even though
+	# RAPL itself is readable the whole time on AC too
+	STATUS_FOR_TEST=Charging
+	[ "$STATUS_FOR_TEST" = Discharging ] && rapl_readable \
+		&& { echo "Where it goes must not show while Charging"; exit 1; }
+	STATUS_FOR_TEST=Discharging
+	{ [ "$STATUS_FOR_TEST" = Discharging ] && rapl_readable; } \
+		|| { echo "Where it goes should show when Discharging and RAPL is readable"; exit 1; }
+
 	echo "ok"
 	exit 0
 fi
@@ -156,6 +300,32 @@ TEXT="$(barico "$ICON") ${CHARGE}%"
 
 SECS=$(remaining "$NOW" "$FULL" "$RATE" "$STATUS")
 
+# --- RAPL power attribution ---
+# Only meaningful while discharging (nothing to subtract a package watt from
+# on AC), and only once system/rapl/install.sh has unlocked energy_uj — before
+# that this whole block is a no-op and the tooltip just doesn't gain the
+# "Where it goes" section, no error anywhere.
+PKG_W="" UNC_W="" RESID_W="" BL="" TOTAL_W=""
+if [ "$STATUS" = Discharging ] && rapl_readable; then
+	PKG_UJ=$(readf_path "$RAPL_PKG/energy_uj")
+	UNC_UJ=$(readf_path "$RAPL_UNC/energy_uj")
+	NOW_NS=$(date +%s%N)
+	if [ -n "$PKG_UJ" ] && [ -n "$UNC_UJ" ]; then
+		if [ -f "$RAPL_STATE" ] && read -r P_NS P_PKG P_UNC < "$RAPL_STATE"; then
+			MRP=$(readf_path "$RAPL_PKG/max_energy_range_uj"); MRP=${MRP:-0}
+			MRU=$(readf_path "$RAPL_UNC/max_energy_range_uj"); MRU=${MRU:-0}
+			PKG_W=$(rapl_watts "$P_PKG" "$P_NS" "$PKG_UJ" "$NOW_NS" "$MRP")
+			UNC_W=$(rapl_watts "$P_UNC" "$P_NS" "$UNC_UJ" "$NOW_NS" "$MRU")
+			TOTAL_W=$(watts_num "$RATE" "${VOLT:-0}" "$UNIT")
+			RESID_W=$(awk -v t="$TOTAL_W" -v p="$PKG_W" 'BEGIN { r = t - p; printf "%.1f", (r < 0 ? 0 : r) }')
+			BL=$(backlight_pct)
+		fi
+		# always refresh the sample, even on the first run with nothing to diff
+		# against yet — otherwise the section stays empty forever, not just once
+		printf '%s %s %s\n' "$NOW_NS" "$PKG_UJ" "$UNC_UJ" > "$RAPL_STATE"
+	fi
+fi
+
 TIP=$(
 	title "Battery${MODEL:+ · $MODEL}"
 	rule
@@ -187,6 +357,31 @@ TIP=$(
 		row "idle"
 	fi
 	[ -n "$VOLT" ] && dim "$(awk -v v="$VOLT" 'BEGIN { printf "%.2f V", v / 1000000 }')$([ "$UNIT" = Ah ] && awk -v r="$RATE" 'BEGIN { printf "  ·  %.2f A", r / 1000000 }')"
+	# world-readable upower history — no RAPL/system/rapl/install.sh needed for
+	# this part. Silently omitted on AC (nothing "discharging" to filter to) or
+	# if the file is missing/unparseable; the draw-now row above still stands.
+	HF=$(power_hist_file)
+	if [ -n "$HF" ]; then
+		PS=$(power_stats "$HF" "$(date +%s)" 3600 24 2> /dev/null)
+		if [ -n "$PS" ]; then
+			set -- $PS
+			PMIN=$1 PMAX=$2 PAVG=$3
+			shift 3
+			row "$(heatbar "$*" 70 90)  ${PMIN}–${PMAX} W over 1h"
+			dim "${PAVG} W avg over the last hour"
+		fi
+	fi
+
+	# Needs system/rapl/install.sh to have unlocked energy_uj, a Discharging
+	# status (nothing to subtract a package watt from on AC), and a second
+	# sample to diff against — all three fold into PKG_W being non-empty.
+	if [ -n "$PKG_W" ]; then
+		sect "$IC_SHARE" "Where it goes"
+		row "$(bar "$(sharepct "$PKG_W" "$TOTAL_W")" "$C_GOOD" 14)  ${PKG_W} W  CPU package"
+		row "$(bar "$(sharepct "$UNC_W" "$TOTAL_W")" "$C_GOOD" 14)  ${UNC_W} W  GPU (uncore)"
+		row "$(bar "$(sharepct "$RESID_W" "$TOTAL_W")" "$C_GOOD" 14)  ${RESID_W} W  screen, disk, radios$([ -n "$BL" ] && printf '  (backlight %s%%)' "$BL")"
+		dim "click for a powertop report"
+	fi
 )
 
 emit "$CLASS" "$TEXT" "$TIP"

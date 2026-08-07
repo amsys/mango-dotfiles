@@ -1,0 +1,7 @@
+# Installed to /etc/sudoers.d/mango-powertop (0440) by system/rapl/install.sh.
+#
+# Lets waybar's battery module open the powertop TUI (custom/battery's
+# on-click) without a password prompt. The trailing "" forbids arguments, so
+# this grants exactly one fixed action — the interactive report — not root.
+# Same reasoning as sudoers.d-sddm-theme-sync.
+%wheel ALL=(root) NOPASSWD: /usr/bin/powertop ""

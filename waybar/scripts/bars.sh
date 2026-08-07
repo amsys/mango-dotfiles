@@ -59,6 +59,17 @@ gen() {
 	printf '%s\n' "$out" > "$CFG.tmp" && mv -f "$CFG.tmp" "$CFG"
 }
 
+# GTK3's tooltip hover delay is a hardcoded 500ms with no setting to shorten
+# it (see README) — install-config.sh compiles an LD_PRELOAD shim for this.
+# Empty SHIM if it hasn't been built yet, so a fresh checkout still starts
+# waybar normally.
+SHIM="$HOME/.local/lib/mango/fast-tooltips.so"
+[ -f "$SHIM" ] || SHIM=""
+# exec, not a plain call: backgrounding a function forks a subshell around it,
+# and without exec that subshell just sits as waybar's parent — $! then names
+# the subshell, and kill/wait downstream stop hitting waybar at all.
+bar() { exec env LD_PRELOAD="$SHIM" waybar "$@"; }
+
 # ---------------------------------------------------------------- selftest
 
 if [ "${1:-}" = test ]; then
@@ -102,14 +113,14 @@ done
 
 # No IPC, no generated config: the plain bar. That costs the tag row its
 # per-monitor accuracy, not the whole bar.
-[ -s "$CFG" ] || exec waybar
+[ -s "$CFG" ] || bar
 
 # This script owns waybar from here on: the trap takes it, and the watch
 # producers, down with us rather than orphaning them on every restart — a
 # `mmsg watch` left in a pipeline is exactly the leak watch.sh exists to avoid.
 trap 'pkill -P $$ > /dev/null 2>&1' EXIT INT TERM
 
-waybar -c "$CFG" &
+bar -c "$CFG" &
 BAR=$!
 
 # Hotplug: regenerate, then RESTART waybar. Not SIGUSR2 — waybar's reload
@@ -132,7 +143,7 @@ while IFS= read -r cur; do
 	gen || continue
 	kill "$BAR" 2> /dev/null
 	wait "$BAR" 2> /dev/null
-	waybar -c "$CFG" &
+	bar -c "$CFG" &
 	BAR=$!
 done < <(mmsg watch all-monitors 2> /dev/null |
 	jq -r --unbuffered '[.monitors[].name] | sort | join(" ")' 2> /dev/null)
