@@ -54,7 +54,8 @@ cat <<EOF
 Installed. Next:
 
   waybar/scripts/battery.sh | jq -r .tooltip   # "Where it goes" section should now appear
-  sudo -n powertop --version                   # must not prompt for a password
+  sudo -n -l /usr/bin/powertop                 # must print the path with no password prompt
+  sudo powertop --calibrate                    # once, on battery — teaches powertop the per-device power model
 
 Rollback:
   sudo rm /etc/udev/rules.d/mango-rapl.rules /etc/sudoers.d/mango-powertop

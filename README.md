@@ -732,6 +732,15 @@ It does two things:
   `sudoers.d-sddm-theme-sync`. `custom/battery`'s `on-click` runs it in a
   `mango-monitor`-class kitty window.
 
+powertop's Overview tab ranks devices by estimated power, which needs
+`/var/cache/powertop/saved_parameters.powertop`. Until that file exists it has
+no power model to rank by, so it falls back to raw activity — software
+netdevs (docker veths) outrank real hardware, and the summary line reads
+`-nan wakeups/second`. A one-off `sudo powertop --calibrate`, on battery,
+builds it. The arg-less `NOPASSWD` rule above deliberately does not cover
+`--calibrate` — it prompts for a password, which is correct for a
+once-ever command and not a reason to widen the rule.
+
 Once installed, `battery.sh`'s "Where it goes" tooltip section (package /
 uncore RAPL draw vs. the residual going to screen/disk/radios) appears
 automatically — the module already degrades gracefully to just the top-level
@@ -758,6 +767,16 @@ the AC cable:
   idle one is **stopped**, same as before. Going back to full unpauses
   anything paused; stopped containers stay stopped, by design — start a bench
   on demand with `frappe-dev <env> up`.
+
+**Paused** freezes userspace only — the container's kernel keeps servicing TCP
+keepalives on every socket still open, so a paused bench and its redis go on
+trading a few packets a second, and their veths show up as "busy" in powertop
+(see the calibration note above; without a power model powertop ranks by raw
+activity, and a veth floats to the top for that reason alone). Measured with
+all containers paused: ~30 pkts/s total across six veths, `RetransSegs` flat
+(keepalive traffic, not retransmits), against a system-wide NET_RX softirq
+rate of 54.8/s — sub-milliwatt. **Stopped** containers don't do this, because
+stopping tears the netns down.
 
 A click sets a manual override that survives until the cable state changes
 (unplugging or plugging back in always re-decides). Independently,
