@@ -749,24 +749,33 @@ this script has ever run.
 
 ## Power modes (`system/powermode/`)
 
-Two modes, left click on the battery pill to cycle, followed automatically by
-the AC cable:
+Three modes. Left click on the battery pill still cycles just **full ↔ eco**;
+**battery** is entered automatically by the AC cable and only ever left
+automatically (plug back in, or the charge drops too low):
 
 - **full** — CPU EPP/turbo/platform-profile at maximum, PCI/NVMe runtime PM
   left alone, waybar polls at its normal (config.jsonc) rate, tooltips rebuild
   on every poll.
-- **eco** 🌿 — CPU EPP/turbo/platform-profile at minimum, PCI/NVMe devices
-  allowed to runtime-suspend, `vm.laptop_mode` and writeback batched, WiFi
-  power save on, backlight dropped (remembered and restored), waybar polls
-  slower and its tooltips only rebuild when the underlying state actually
-  changes. `docker`/frappe-bench containers get one of three outcomes rather
-  than a blanket stop: a container with a live `docker exec`/`build` attached
-  is **left running** (stopping it would kill whatever's mid-flight), one with
-  no live docker command but a `PM_ECO_BUSY_PROCS` process running (`claude`
-  by default) is **paused** (freezes the CPU cost, resumes instantly), and an
-  idle one is **stopped**, same as before. Going back to full unpauses
-  anything paused; stopped containers stay stopped, by design — start a bench
-  on demand with `frappe-dev <env> up`.
+- **battery** 🔋 — the cable comes out and nothing is asked to stop. CPU stays
+  responsive (EPP `balance_power`, turbo on, ACPI profile one notch down —
+  `PM_BAT_*`), but takes every I/O-side eco saving for free: PCI/NVMe runtime
+  PM, `vm.laptop_mode`/writeback, WiFi power save, waybar's slower polling and
+  cached tooltips. Backlight drops to `PM_BAT_BRIGHT` (70% by default).
+  Nothing is paused, stopped, or unloaded. If the charge falls under
+  `PM_BAT_ECO_PCT` (40% by default) — checked by battery-guard.sh's existing
+  30s poll — it escalates itself to eco.
+- **eco** 🌿 — CPU EPP/turbo/platform-profile at minimum, the same I/O-side
+  savings as battery, backlight dropped further to `PM_ECO_BRIGHT` (40%
+  default; restoring on the way back to full always returns the level from
+  *before* the first dim, battery's included). This is the mode that actually
+  frees things up. `docker`/frappe-bench containers get one of three outcomes
+  rather than a blanket stop: a container with a live `docker exec`/`build`
+  attached is **left running** (stopping it would kill whatever's mid-flight),
+  one with no live docker command but a `PM_ECO_BUSY_PROCS` process running
+  (`claude` by default) is **paused** (freezes the CPU cost, resumes
+  instantly), and an idle one is **stopped**, same as before. Going back to
+  full unpauses anything paused; stopped containers stay stopped, by design —
+  start a bench on demand with `frappe-dev <env> up`.
 
 **Eco drain sequence.** Entering eco pauses `hermes` at once (`SIGTSTP`, a
 catchable stop signal — `SIGCONT` on the way back to full), then waits before
@@ -799,16 +808,19 @@ rate of 54.8/s — sub-milliwatt. **Stopped** containers don't do this, because
 stopping tears the netns down.
 
 A click sets a manual override that survives until the cable state changes
-(unplugging or plugging back in always re-decides). Independently,
-`battery-guard.sh`'s existing 30s poll also watches for a **weak charger** —
-AC reports online but the battery is still discharging, or a USB-C source
-negotiates less than `PM_WEAK_MIN_W` — and forces eco with a critical
-notification until the charger recovers, overriding even a manual full.
+(unplugging or plugging back in always re-decides). The battery→eco
+escalation also sets that override — once eco is reached on a draining
+battery it stays there rather than flapping back to battery a percent later.
+Independently, `battery-guard.sh`'s existing 30s poll also watches for a
+**weak charger** — AC reports online but the battery is still discharging, or
+a USB-C source negotiates less than `PM_WEAK_MIN_W` — and forces eco with a
+critical notification until the charger recovers, overriding even a manual
+full.
 
-Every value — EPP, turbo, the profile, PCI PM, brightness, the docker prefix,
-which processes count as "work in flight", the eco drain sequence's matching
-patterns and thresholds, the weak-charger threshold, waybar's eco poll
-intervals — lives in one file, `mango/powermode.conf`,
+Every value — EPP, turbo, the profile, PCI PM, brightness, the battery→eco
+threshold, the docker prefix, which processes count as "work in flight", the
+eco drain sequence's matching patterns and thresholds, the weak-charger
+threshold, waybar's poll intervals — lives in one file, `mango/powermode.conf`,
 tracked and symlinked like everything else, with a comment over each key.
 Editing it needs no reinstall; switching modes picks the new value up
 immediately.
@@ -817,6 +829,8 @@ immediately.
 ~/.config/mango/scripts/powermode.sh status   # current mode + why
 ~/.config/mango/scripts/powermode.sh eco      # force eco (sets the manual override)
 ~/.config/mango/scripts/powermode.sh full     # force full
+~/.config/mango/scripts/powermode.sh battery  # force battery
+~/.config/mango/scripts/powermode.sh low      # internal: battery -> eco escalation, sets the manual override
 ~/.config/mango/scripts/powermode.sh drain    # internal: the eco wait/pause loop, not for manual use
 ~/.config/mango/scripts/powermode.sh test     # decision-table self-check, no hardware touched
 ```

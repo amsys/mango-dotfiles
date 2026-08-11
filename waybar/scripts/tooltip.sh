@@ -210,14 +210,15 @@ power_mode() {
 	printf '%s' "${_pm:-full}"
 }
 
-# Widen a tip_stale() TTL bucket in eco, collapse it to effectively no cache
-# in full — "eco: refresh only when the state actually changes" vs.
-# "full: refresh every poll" from the power-modes spec. full's bucket is 1s,
-# not 0: every caller polls slower than that, so a new key every second reads
-# as "always rebuild" without a division by zero.
+# Widen a tip_stale() TTL bucket whenever we're not full (battery or eco),
+# collapse it to effectively no cache in full — "battery/eco: refresh only
+# when the state actually changes" vs. "full: refresh every poll" from the
+# power-modes spec. full's bucket is 1s, not 0: every caller polls slower
+# than that, so a new key every second reads as "always rebuild" without a
+# division by zero.
 tip_bucket() { # eco-ttl-seconds -> cache-key fragment
 	_tb=1
-	[ "$(power_mode)" = eco ] && _tb=${1:-60}
+	[ "$(power_mode)" != full ] && _tb=${1:-60}
 	printf '%s' "$(( $(date +%s) / _tb ))"
 }
 
@@ -275,6 +276,9 @@ if [ "${1:-}" = "tooltip-selftest" ]; then
 	printf 'full' > "$XDG_RUNTIME_DIR/mango-powermode"
 	B2=$(tip_bucket 3600)
 	[ "$B1" != "$B2" ] || { echo "full mode should not share eco's wide bucket"; exit 1; }
+	printf 'battery' > "$XDG_RUNTIME_DIR/mango-powermode"
+	B3=$(tip_bucket 3600)
+	[ "$B3" = "$B1" ] || { echo "battery should share eco's wide bucket, not full's"; exit 1; }
 	rm -rf "$XDG_RUNTIME_DIR"
 
 	echo "ok"

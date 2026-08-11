@@ -485,10 +485,11 @@ sec_emit() {
 	# TIP_KEY and the offline/portal/... case above must stay keyed on the
 	# real state, not on which power mode drew it. style.css uses the pair
 	# (.eco.open, .eco.portal) to hold this lock statically red instead of
-	# pulsing: an infinite repaint loop is exactly what eco exists to cut, and
-	# this is the one pill where "stay red" matters more than "look alive".
+	# pulsing: an infinite repaint loop is exactly what eco (and battery,
+	# which gets the same class) exists to cut, and this is the one pill
+	# where "stay red" matters more than "look alive".
 	EMIT_CLASS=$CLASS
-	[ "$(power_mode)" = eco ] && EMIT_CLASS="$CLASS eco"
+	[ "$(power_mode)" != full ] && EMIT_CLASS="$CLASS eco"
 	emit "$EMIT_CLASS" "$(barico "$ICO")" "$TIP"
 }
 

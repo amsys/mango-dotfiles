@@ -5,19 +5,25 @@
 # system/powermode/mango-powermode, which re-validates every value itself —
 # this script is not the trust boundary, that one is.
 #
+# Three modes: full (AC), battery (unplugged, work continues), eco (battery
+# low, weak charger, or a click — free RAM, freeze the busy work). battery is
+# a mild hardware-only saving; only eco pauses/stops/unloads anything.
+#
 # State lives in $XDG_RUNTIME_DIR so it resets on reboot rather than
 # outliving a config change:
-#   mango-powermode           current mode: eco|full
-#   mango-powermode.manual    present -> a click overrode the cable
-#   mango-powermode.bright    backlight %, remembered on eco entry
+#   mango-powermode           current mode: eco|full|battery
+#   mango-powermode.manual    present -> a click or a low-battery escalation
+#                              overrode the cable
+#   mango-powermode.bright    backlight %, remembered on first dim (battery or eco)
 #   mango-powermode.weak      weak-charger latch, set by battery-guard.sh
 #   mango-powermode.drain     pid of the running drain loop (see below)
 #   mango-powermode.ollama    model names unloaded on eco entry
 #
-#   powermode.sh auto      recompute mode from AC + markers (no-op if manual)
+#   powermode.sh auto      recompute mode from AC + battery % (no-op if manual)
 #   powermode.sh cable     AC plug/unplug edge — clear markers, then auto
-#   powermode.sh toggle    flip mode, set the manual marker   (battery pill click)
-#   powermode.sh eco|full  force a mode directly, set the manual marker
+#   powermode.sh toggle    flip full<->eco, set the manual marker (battery pill click)
+#   powermode.sh eco|full|battery  force a mode directly, set the manual marker
+#   powermode.sh low       force eco, e.g. battery fell under PM_BAT_ECO_PCT
 #   powermode.sh weak      force eco, latch weak (idempotent)
 #   powermode.sh unweak    clear the weak latch, then auto     (recovery)
 #   powermode.sh drain     internal: the eco wait/pause loop, see set_mode()
@@ -26,7 +32,8 @@
 #
 # Eco entry pauses hermes right away, then waits for any open omp/pi
 # coding-agent session to go idle before touching docker/paseo/ollama — see
-# drain() below. Full entry cancels a wait in flight and undoes all of it.
+# drain() below. Full or battery entry cancels a wait in flight and undoes
+# all of it.
 set -u
 
 RUN="${XDG_RUNTIME_DIR:-/tmp}"
@@ -62,6 +69,14 @@ PM_FULL_VM_DIRTY_WB=${PM_FULL_VM_DIRTY_WB:-500}
 PM_ECO_VM_DIRTY_WB=${PM_ECO_VM_DIRTY_WB:-1500}
 PM_FULL_WIFI_POWERSAVE=${PM_FULL_WIFI_POWERSAVE:-off}
 PM_ECO_WIFI_POWERSAVE=${PM_ECO_WIFI_POWERSAVE:-on}
+# battery keeps the CPU responsive (default EPP/turbo/profile) and only takes
+# eco's I/O-side savings (PCI/NVMe PM, snd_hda, vm.laptop_mode, wifi) — those
+# cost nothing in responsiveness, so there is no separate PM_BAT_PCI_PM etc.
+PM_BAT_EPP=${PM_BAT_EPP:-balance_power}
+PM_BAT_PROFILE=${PM_BAT_PROFILE:-balanced}
+PM_BAT_NO_TURBO=${PM_BAT_NO_TURBO:-0}
+PM_BAT_BRIGHT=${PM_BAT_BRIGHT-70}
+PM_BAT_ECO_PCT=${PM_BAT_ECO_PCT:-40}
 PM_ECO_BRIGHT=${PM_ECO_BRIGHT-40}
 PM_ECO_DOCKER_PREFIX=${PM_ECO_DOCKER_PREFIX-frappe-}
 PM_ECO_BUSY_PROCS=${PM_ECO_BUSY_PROCS-claude}
@@ -78,46 +93,54 @@ PM_ECO_OLLAMA_RESTORE=${PM_ECO_OLLAMA_RESTORE:-0}
 current_mode() { [ -r "$MODE_FILE" ] && cat "$MODE_FILE" 2> /dev/null || printf full; }
 
 payload() { # mode -> KEY=value lines for mango-powermode apply
-	if [ "$1" = eco ]; then
-		cat << EOF
-MODE=eco
-EPP=$PM_ECO_EPP
-PROFILE=$PM_ECO_PROFILE
-NO_TURBO=$PM_ECO_NO_TURBO
-PCI_PM=$PM_ECO_PCI_PM
-SND_HDA_POWERSAVE=$PM_ECO_SND_HDA_POWERSAVE
-VM_LAPTOP_MODE=$PM_ECO_VM_LAPTOP_MODE
-VM_DIRTY_WB=$PM_ECO_VM_DIRTY_WB
-WIFI_POWERSAVE=$PM_ECO_WIFI_POWERSAVE
+	case "$1" in
+	full)
+		epp=$PM_FULL_EPP prof=$PM_FULL_PROFILE turbo=$PM_FULL_NO_TURBO
+		pci=$PM_FULL_PCI_PM snd=$PM_FULL_SND_HDA_POWERSAVE
+		lm=$PM_FULL_VM_LAPTOP_MODE wb=$PM_FULL_VM_DIRTY_WB wifi=$PM_FULL_WIFI_POWERSAVE
+		;;
+	battery)
+		epp=$PM_BAT_EPP prof=$PM_BAT_PROFILE turbo=$PM_BAT_NO_TURBO
+		pci=$PM_ECO_PCI_PM snd=$PM_ECO_SND_HDA_POWERSAVE
+		lm=$PM_ECO_VM_LAPTOP_MODE wb=$PM_ECO_VM_DIRTY_WB wifi=$PM_ECO_WIFI_POWERSAVE
+		;;
+	*)
+		epp=$PM_ECO_EPP prof=$PM_ECO_PROFILE turbo=$PM_ECO_NO_TURBO
+		pci=$PM_ECO_PCI_PM snd=$PM_ECO_SND_HDA_POWERSAVE
+		lm=$PM_ECO_VM_LAPTOP_MODE wb=$PM_ECO_VM_DIRTY_WB wifi=$PM_ECO_WIFI_POWERSAVE
+		;;
+	esac
+	cat << EOF
+MODE=$1
+EPP=$epp
+PROFILE=$prof
+NO_TURBO=$turbo
+PCI_PM=$pci
+SND_HDA_POWERSAVE=$snd
+VM_LAPTOP_MODE=$lm
+VM_DIRTY_WB=$wb
+WIFI_POWERSAVE=$wifi
 EOF
-	else
-		cat << EOF
-MODE=full
-EPP=$PM_FULL_EPP
-PROFILE=$PM_FULL_PROFILE
-NO_TURBO=$PM_FULL_NO_TURBO
-PCI_PM=$PM_FULL_PCI_PM
-SND_HDA_POWERSAVE=$PM_FULL_SND_HDA_POWERSAVE
-VM_LAPTOP_MODE=$PM_FULL_VM_LAPTOP_MODE
-VM_DIRTY_WB=$PM_FULL_VM_DIRTY_WB
-WIFI_POWERSAVE=$PM_FULL_WIFI_POWERSAVE
-EOF
-	fi
 }
 
 # Every real side effect funnels through these four, so `test` can stub them
 # all out with one flag instead of faking sudo, brightnessctl and docker.
 apply_root() { [ -n "${MANGO_PM_TEST:-}" ] || payload "$1" | sudo -n /usr/local/bin/mango-powermode apply > /dev/null 2>&1; }
 
-enter_eco_bright() {
+# First-touch-wins on $BRIGHT_FILE: full -> battery(70%) -> eco(40%) must
+# restore the *pre-battery* level, not overwrite it with 70 on the way down —
+# same idiom as mango-powermode's baseline_put(), same reason.
+enter_dim() { # target-percent
 	[ -n "${MANGO_PM_TEST:-}" ] && return 0
-	[ -n "$PM_ECO_BRIGHT" ] || return 0
+	[ -n "$1" ] || return 0
 	command -v brightnessctl > /dev/null 2>&1 || return 0
-	cur=$(brightnessctl -m 2> /dev/null | awk -F, '{ gsub("%", "", $4); print $4 }')
-	[ -n "$cur" ] && printf '%s\n' "$cur" > "$BRIGHT_FILE"
-	brightnessctl set "${PM_ECO_BRIGHT}%" > /dev/null 2>&1
+	if [ ! -f "$BRIGHT_FILE" ]; then
+		cur=$(brightnessctl -m 2> /dev/null | awk -F, '{ gsub("%", "", $4); print $4 }')
+		[ -n "$cur" ] && printf '%s\n' "$cur" > "$BRIGHT_FILE"
+	fi
+	brightnessctl set "${1}%" > /dev/null 2>&1
 }
-exit_eco_bright() {
+exit_dim() {
 	[ -n "${MANGO_PM_TEST:-}" ] && return 0
 	[ -f "$BRIGHT_FILE" ] || return 0
 	prev=$(cat "$BRIGHT_FILE" 2> /dev/null)
@@ -394,7 +417,9 @@ bars_restart() {
 notify_mode() { # mode, detail
 	[ -n "${MANGO_PM_TEST:-}" ] && return 0
 	command -v notify-send > /dev/null 2>&1 || return 0
-	icon=$([ "$1" = eco ] && printf '🌿' || printf '⚡')
+	icon='⚡'
+	[ "$1" = eco ] && icon='🌿'
+	[ "$1" = battery ] && icon='🔋'
 	notify-send -a powermode -u low \
 		-h string:x-canonical-private-synchronous:powermode \
 		"$icon $1 mode" "${2:-}"
@@ -406,12 +431,15 @@ set_mode() { # mode
 	m=$1
 	printf '%s' "$m" > "$MODE_FILE"
 	apply_root "$m"
+	case "$m" in
+	eco) enter_dim "$PM_ECO_BRIGHT" ;;
+	battery) enter_dim "$PM_BAT_BRIGHT" ;;
+	*) exit_dim ;;
+	esac
 	if [ "$m" = eco ]; then
-		enter_eco_bright
 		hermes_pause
 		drain_start
 	else
-		exit_eco_bright
 		drain_stop
 		hermes_resume
 		docker_unpause
@@ -426,10 +454,19 @@ online() {
 	[ -r "$AC/online" ] && cat "$AC/online" 2> /dev/null || printf 0
 }
 
+# Pure, so the self-check can assert the table directly — same shape as
+# drain_decision()/docker_action() above.
+mode_for() { # online pct eco_pct -> full|eco|battery
+	if [ "$1" = 1 ]; then printf full
+	elif [ "$2" -lt "$3" ]; then printf eco # unplugged already low: skip battery
+	else printf battery
+	fi
+}
+
 auto() {
 	if [ -f "$WEAK_FILE" ]; then set_mode eco; return; fi
 	[ -f "$MANUAL_FILE" ] && return # a click already decided; the cable doesn't override it
-	if [ "$(online)" = 1 ]; then set_mode full; else set_mode eco; fi
+	set_mode "$(mode_for "$(online)" "$(battery_pct)" "$PM_BAT_ECO_PCT")"
 }
 
 cable() { # AC plug/unplug edge: a new cable state is a new decision
@@ -445,10 +482,10 @@ toggle() {
 	notify_mode "$new" manual
 }
 
-force() { # mode
+force() { # mode, detail
 	: > "$MANUAL_FILE"
 	set_mode "$1"
-	notify_mode "$1" manual
+	notify_mode "$1" "${2:-manual}"
 }
 
 weak() {
@@ -479,18 +516,27 @@ if [ "${1:-}" = test ]; then
 	MODE_FILE="$RUN/mode" MANUAL_FILE="$RUN/manual" BRIGHT_FILE="$RUN/bright" WEAK_FILE="$RUN/weak" BARS_PID="$RUN/bars.pid"
 	DRAIN_PID="$RUN/drain.pid" OLLAMA_FILE="$RUN/ollama"
 
-	mkdir -p "$T/ac"
+	mkdir -p "$T/ac" "$T/bat"
 	AC="$T/ac"
+	MANGO_BAT_DIR="$T/bat"
 	echo 1 > "$T/ac/online"
+	echo 90 > "$T/bat/capacity" # healthy charge unless a case below says otherwise
 
 	# AC online, nothing forced -> full
 	auto
 	[ "$(current_mode)" = full ] || { echo "auto on AC should pick full: $(current_mode)"; exit 1; }
 
-	# unplug -> eco
+	# unplug at a healthy charge -> battery, not eco
 	echo 0 > "$T/ac/online"
 	auto
-	[ "$(current_mode)" = eco ] || { echo "auto off AC should pick eco: $(current_mode)"; exit 1; }
+	[ "$(current_mode)" = battery ] || { echo "auto off AC at 90% should pick battery: $(current_mode)"; exit 1; }
+
+	# unplug already low -> straight to eco, skipping battery
+	echo 30 > "$T/bat/capacity"
+	rm -f "$MANUAL_FILE"
+	auto
+	[ "$(current_mode)" = eco ] || { echo "auto off AC at 30% should pick eco: $(current_mode)"; exit 1; }
+	echo 90 > "$T/bat/capacity"
 
 	# a manual override survives a repeated auto() with the cable unchanged
 	toggle # eco -> full, sets manual
@@ -501,8 +547,21 @@ if [ "${1:-}" = test ]; then
 
 	# a cable edge clears manual and re-decides
 	cable
-	[ "$(current_mode)" = eco ] || { echo "cable edge should clear manual and re-decide from AC state: $(current_mode)"; exit 1; }
+	[ "$(current_mode)" = battery ] || { echo "cable edge should clear manual and re-decide from AC state: $(current_mode)"; exit 1; }
 	[ -f "$MANUAL_FILE" ] && { echo "cable edge should have cleared the manual marker"; exit 1; }
+
+	# mode_for table, directly
+	[ "$(mode_for 1 90 40)" = full ] || { echo "mode_for online should be full regardless of charge"; exit 1; }
+	[ "$(mode_for 0 90 40)" = battery ] || { echo "mode_for offline, above the floor, should be battery"; exit 1; }
+	[ "$(mode_for 0 39 40)" = eco ] || { echo "mode_for offline, under the floor, should be eco"; exit 1; }
+	[ "$(mode_for 0 40 40)" = battery ] || { echo "mode_for exactly at the floor should still be battery"; exit 1; }
+
+	# low: forces eco and sticks, same as a manual click
+	force battery
+	[ "$(current_mode)" = battery ] || { echo "force battery failed"; exit 1; }
+	force eco 'battery low'
+	[ "$(current_mode)" = eco ] || { echo "force eco (low) failed"; exit 1; }
+	[ -f "$MANUAL_FILE" ] || { echo "low should set the manual marker so it doesn't flap back to battery"; exit 1; }
 
 	# weak charger forces eco even on AC, and outranks a manual full
 	echo 1 > "$T/ac/online"
@@ -525,6 +584,11 @@ if [ "${1:-}" = test ]; then
 	printf '%s\n' "$P" | grep -qx "EPP=$PM_ECO_EPP" || { echo "eco payload missing EPP"; exit 1; }
 	P=$(payload full)
 	printf '%s\n' "$P" | grep -qx 'MODE=full' || { echo "full payload missing MODE"; exit 1; }
+	P=$(payload battery)
+	printf '%s\n' "$P" | grep -qx 'MODE=battery' || { echo "battery payload missing MODE"; exit 1; }
+	printf '%s\n' "$P" | grep -qx "EPP=$PM_BAT_EPP" || { echo "battery payload should use PM_BAT_EPP, not eco's"; exit 1; }
+	printf '%s\n' "$P" | grep -qx "NO_TURBO=$PM_BAT_NO_TURBO" || { echo "battery payload should use PM_BAT_NO_TURBO"; exit 1; }
+	printf '%s\n' "$P" | grep -qx "PCI_PM=$PM_ECO_PCI_PM" || { echo "battery payload should reuse eco's I/O-side PCI_PM"; exit 1; }
 
 	# agent_busy_filter: claude's own daemon/bg-pty-host/bg-spare infra must not
 	# read as a session, a real --session-id process must
@@ -580,12 +644,14 @@ cable) cable ;;
 toggle) toggle ;;
 eco) force eco ;;
 full) force full ;;
+battery) force battery ;;
+low) force eco 'battery low' ;;
 weak) weak ;;
 unweak) unweak ;;
 drain) drain ;;
 status) status ;;
 *)
-	echo "usage: powermode.sh auto|cable|toggle|eco|full|weak|unweak|drain|status|test" >&2
+	echo "usage: powermode.sh auto|cable|toggle|eco|full|battery|low|weak|unweak|drain|status|test" >&2
 	exit 1
 	;;
 esac

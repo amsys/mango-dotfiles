@@ -28,11 +28,15 @@ POWERMODE="$(dirname "$0")/powermode.sh"
 # tell whether it's already latched, so a sustained weak charger doesn't
 # re-notify every 30s poll. powermode.sh remains the sole writer.
 WEAK_MARK="${XDG_RUNTIME_DIR:-/tmp}/mango-powermode.weak"
+# powermode.sh's mode file — read-only here too, same rule: it stays the sole
+# writer. Used only to fire the battery->eco escalation once, below.
+MODE_MARK="${XDG_RUNTIME_DIR:-/tmp}/mango-powermode"
 CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
 # shellcheck disable=SC1090  # user-owned config file
 [ -r "$CONF" ] && . "$CONF"
 PM_WEAK_MIN_W=${PM_WEAK_MIN_W:-45}
 PM_WEAK_POLLS=${PM_WEAK_POLLS:-2}
+PM_BAT_ECO_PCT=${PM_BAT_ECO_PCT:-40}
 
 POLL=30    # seconds between reads; 30s is well inside the time 1% takes to burn
 GRACE=60   # countdown before the suspend actually fires
@@ -256,6 +260,16 @@ while :; do
 				RECN=0
 			fi
 		fi
+	fi
+
+	# battery mode holds every container and agent running. Under PM_BAT_ECO_PCT
+	# the wait is over — powermode.sh owns the mode file, so hand it the
+	# decision rather than duplicate it. Reading $MODE_MARK here (not calling
+	# "$POWERMODE" status) makes this fire exactly once: after "low" runs, the
+	# mode is eco and this check no longer matches.
+	if [ "$(cat "$MODE_MARK" 2> /dev/null)" = battery ] && [ "$PCT" -lt "$PM_BAT_ECO_PCT" ]; then
+		notify normal "Battery ${PCT}% — eco mode" "Containers and agents will be paused."
+		"$POWERMODE" low
 	fi
 
 	case "$STATUS" in

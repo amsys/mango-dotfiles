@@ -238,8 +238,9 @@
         "tooltip-format-activated": "Keep awake: on — sleep and screen blanking inhibited",
         "tooltip-format-deactivated": "Keep awake: off"
     },
-    // Left click cycles the two power modes (mango/scripts/powermode.sh),
-    // shown as a green leaf on the icon in eco — see battery.sh. Right click
+    // Left click cycles full<->eco (mango/scripts/powermode.sh), shown as a
+    // green leaf on the icon in eco — see battery.sh. The third mode,
+    // battery, is entered by the cable alone, never by a click. Right click
     // keeps the powertop report that used to be the left click.
     "custom/battery": {
         "exec": "~/.config/waybar/scripts/battery.sh",

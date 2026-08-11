@@ -32,7 +32,7 @@ CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
 RUN="${XDG_RUNTIME_DIR:-/tmp}"
 
 MODE=full     # re-resolved by resolve_pm() before every gen(); full is the safe default
-ECO_JSON='{}' # per-module interval overrides, applied only when MODE=eco
+ECO_JSON='{}' # per-module interval overrides, applied whenever MODE isn't full (battery or eco)
 
 # Reads mango/scripts/powermode.sh's current mode and mango/powermode.conf's
 # PM_ECO_INTERVAL_* — called fresh at the top of every gen(), not just once at
@@ -76,7 +76,7 @@ resolve_pm() {
 # at full speed until the next regen is a smaller cost than the added branch.
 bars() { # all-monitors JSON on stdin -> waybar bar array on stdout
 	jq --arg cfg "$SHARED" --arg ws "$WS" --arg mode "${MODE:-full}" --argjson eco "${ECO_JSON:-\{\}}" '
-		(if $mode == "eco" then $eco else {} end) as $ov |
+		(if $mode != "full" then $eco else {} end) as $ov |
 		[ .monitors[].name ] as $names |
 		[ $names[] | . as $m |
 			({ output: $m, include: [$cfg] } +
@@ -157,6 +157,15 @@ if [ "${1:-}" = test ]; then
 	[ "$(q '.[0]["custom/ws#3"].exec')" = "$WS 3 eDP-1" ] || { echo "eco override must not disturb unrelated pills"; exit 1; }
 	# the catch-all is deliberately never eco-overridden
 	[ "$(q '.[2] | keys | join(",")')" = include,output ] || { echo "catch-all must stay override-free even in eco"; exit 1; }
+	MODE=full
+	ECO_JSON='{}'
+
+	# --- battery mode also gets the override; it's "not full", same as eco ---
+	MODE=battery
+	ECO_JSON=$(jq -n '{"custom/cpu": {interval: 15}}')
+	OUT=$(printf '%s\n' "$MONS" | bars) || { echo "bars failed in battery mode"; exit 1; }
+	q() { printf '%s' "$OUT" | jq -r "$1"; }
+	[ "$(q '.[0]["custom/cpu"].interval')" = 15 ] || { echo "battery should also get the interval override"; exit 1; }
 	MODE=full
 	ECO_JSON='{}'
 
