@@ -1,3 +1,23 @@
+# XDG base directory specification
+set -x XDG_CONFIG_HOME "$HOME/.config"
+set -x XDG_CACHE_HOME "$HOME/.cache"
+set -x XDG_DATA_HOME "$HOME/.local/share"
+set -x XDG_STATE_HOME "$HOME/.local/state"
+
+# XDG declutter: push tool state out of $HOME
+set -x WGET_HSTS "$XDG_CACHE_HOME/wget-hsts"
+set -x PYTHON_HISTORY "$XDG_STATE_HOME/python/history"
+set -x IPYTHONDIR "$XDG_CONFIG_HOME/ipython"
+set -x CARGO_HOME "$XDG_DATA_HOME/cargo"
+set -x RUSTUP_HOME "$XDG_DATA_HOME/rustup"
+set -x NPM_CONFIG_CACHE "$XDG_CACHE_HOME/npm"
+set -x OLLAMA_MODELS "$XDG_DATA_HOME/ollama/models"
+set -x SEMGREP_SETTINGS_FILE "$XDG_CONFIG_HOME/semgrep/settings.yaml"
+set -x SVN_CONFIG_DIR "$XDG_CONFIG_HOME/subversion"
+set -x GOOGLE_GEMINI_CONFIG_DIR "$XDG_CONFIG_HOME/gemini"
+set -x DOCKER_CONFIG "$XDG_CONFIG_HOME/docker"
+set -x GNUPGHOME "$XDG_DATA_HOME/gnupg"
+
 # Commands to run in interactive sessions can go here
 if status is-interactive
     # No greeting
@@ -49,6 +69,14 @@ if status is-interactive
         rm -f -- "$tmp"
     end
 
+    # Orchestein tooling
+    fish_add_path "$HOME/.local/bin"
+    fish_add_path "$HOME/src/maestro"
+    fish_add_path "$XDG_DATA_HOME/npm/bin"
+    abbr --add p paseo
+    abbr --add m maestro
+    #abbr --add pi "$HOME/node_modules/.bin/pi"
+
     # Aliases
     # kitty doesn't clear properly so we need to do this weird printing
     alias clear "printf '\033[2J\033[3J\033[1;1H'"
@@ -65,7 +93,7 @@ if status is-interactive
     # Chosen from what this machine's history actually shows, most-used first.
 
     # packages
-    abbr --add pi sudo pacman -S
+    #abbr --add pi sudo pacman -S
     abbr --add pu sudo pacman -Syu
     abbr --add prm sudo pacman -Rns
     abbr --add pss pacman -Ss

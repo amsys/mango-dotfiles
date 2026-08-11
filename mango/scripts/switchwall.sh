@@ -65,13 +65,14 @@ main() {
 
 	[[ -z "$type_flag" ]] && type_flag="$(cfg '.appearance.palette.type')"
 	[[ -z "$type_flag" || "$type_flag" == "null" ]] && type_flag="auto"
+	# shellcheck disable=SC2076  # literal match, not regex
 	if [[ ! " ${allowed_types[*]} " =~ " $type_flag " ]]; then
 		echo "[switchwall] Warning: invalid type '$type_flag', defaulting to 'auto'" >&2
 		type_flag="auto"
 	fi
 
 	if [[ -z "$imgpath" && -z "$color_flag" ]]; then
-		cd "$(xdg-user-dir PICTURES)/Wallpapers/showcase" 2>/dev/null || cd "$(xdg-user-dir PICTURES)/Wallpapers" 2>/dev/null || cd "$(xdg-user-dir PICTURES)"
+		cd "$(xdg-user-dir PICTURES)/Wallpapers/showcase" 2>/dev/null || cd "$(xdg-user-dir PICTURES)/Wallpapers" 2>/dev/null || cd "$(xdg-user-dir PICTURES)" || exit
 		imgpath="$(kdialog --getopenfilename . --title 'Choose wallpaper')"
 	fi
 

@@ -179,6 +179,7 @@ if [ "${1:-}" = "test" ]; then
 	done
 	BAT="$T/BAT0"
 
+	# shellcheck disable=SC2046  # deliberate word-split of levels() fields
 	set -- $(levels)
 	[ "$1 $2 $3 $4 $5" = "1254000 2944000 3550000 1067000 Ah" ] || { echo "levels wrong: $*"; exit 1; }
 	[ "$(pct "$1" "$2")" = "43" ] || { echo "charge pct wrong: $(pct "$1" "$2")"; exit 1; }
@@ -200,6 +201,7 @@ if [ "${1:-}" = "test" ]; then
 	printf '%s\n' 30000000 > "$T/BAT0/energy_now"
 	printf '%s\n' 50000000 > "$T/BAT0/energy_full"
 	printf '%s\n' 8000000 > "$T/BAT0/power_now"
+	# shellcheck disable=SC2046  # deliberate word-split of levels() fields
 	set -- $(levels)
 	[ "$1 $2 $3 $4 $5" = "30000000 50000000 50000000 8000000 Wh" ] || { echo "energy levels wrong: $*"; exit 1; }
 	[ "$(watts "$4" 0 Wh)" = "8.0 W" ] || { echo "energy watts wrong"; exit 1; }
@@ -239,6 +241,7 @@ if [ "${1:-}" = "test" ]; then
 		printf '%s\t%s\t%s\n' "$((NOWT - 7200))" 999 discharging # outside the 1h window, excluded
 	} > "$HF"
 	PS=$(power_stats "$HF" "$NOWT" 3600 24)
+	# shellcheck disable=SC2086  # deliberate word-split of power stats fields
 	set -- $PS
 	# hand-calculated over the three in-window discharging samples: 10, 15, 20
 	[ "$1 $2 $3" = "10.0 20.0 15.0" ] || { echo "power_stats min/max/avg wrong: $1 $2 $3"; exit 1; }
@@ -276,6 +279,7 @@ if [ ! -d "$BAT" ] || [ -z "$(levels)" ]; then
 	exit 0
 fi
 
+# shellcheck disable=SC2046  # deliberate word-split of levels() fields
 set -- $(levels)
 NOW=$1 FULL=$2 DESIGN=$3 RATE=$4 UNIT=$5
 STATUS=$(readf status)
@@ -384,6 +388,7 @@ TIP=$(
 	if [ -n "$HF" ]; then
 		PS=$(power_stats "$HF" "$(date +%s)" 3600 24 2> /dev/null)
 		if [ -n "$PS" ]; then
+			# shellcheck disable=SC2086  # deliberate word-split of power stats fields
 			set -- $PS
 			PMIN=$1 PMAX=$2 PAVG=$3
 			shift 3

@@ -11,6 +11,8 @@
 #   mango-powermode.manual    present -> a click overrode the cable
 #   mango-powermode.bright    backlight %, remembered on eco entry
 #   mango-powermode.weak      weak-charger latch, set by battery-guard.sh
+#   mango-powermode.drain     pid of the running drain loop (see below)
+#   mango-powermode.ollama    model names unloaded on eco entry
 #
 #   powermode.sh auto      recompute mode from AC + markers (no-op if manual)
 #   powermode.sh cable     AC plug/unplug edge — clear markers, then auto
@@ -18,8 +20,13 @@
 #   powermode.sh eco|full  force a mode directly, set the manual marker
 #   powermode.sh weak      force eco, latch weak (idempotent)
 #   powermode.sh unweak    clear the weak latch, then auto     (recovery)
+#   powermode.sh drain     internal: the eco wait/pause loop, see set_mode()
 #   powermode.sh status    print the current mode + markers
 #   powermode.sh test      assert the decision table, no hardware touched
+#
+# Eco entry pauses hermes right away, then waits for any open omp/pi
+# coding-agent session to go idle before touching docker/paseo/ollama — see
+# drain() below. Full entry cancels a wait in flight and undoes all of it.
 set -u
 
 RUN="${XDG_RUNTIME_DIR:-/tmp}"
@@ -28,12 +35,15 @@ MANUAL_FILE="$RUN/mango-powermode.manual"
 BRIGHT_FILE="$RUN/mango-powermode.bright"
 WEAK_FILE="$RUN/mango-powermode.weak"
 BARS_PID="$RUN/mango-bars.pid"
+DRAIN_PID="$RUN/mango-powermode.drain"
+OLLAMA_FILE="$RUN/mango-powermode.ollama"
 
 CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
 AC="${MANGO_AC_DIR:-}"
 
 # powermode.conf is the user's own file, sourced the same way mango sources
 # local.conf — this is userspace reading userspace, not the root boundary.
+# shellcheck disable=SC1090  # user-owned config file
 [ -r "$CONF" ] && . "$CONF"
 
 PM_FULL_EPP=${PM_FULL_EPP:-performance}
@@ -55,6 +65,13 @@ PM_ECO_WIFI_POWERSAVE=${PM_ECO_WIFI_POWERSAVE:-on}
 PM_ECO_BRIGHT=${PM_ECO_BRIGHT-40}
 PM_ECO_DOCKER_PREFIX=${PM_ECO_DOCKER_PREFIX-frappe-}
 PM_ECO_BUSY_PROCS=${PM_ECO_BUSY_PROCS-claude}
+PM_ECO_HERMES_MATCH=${PM_ECO_HERMES_MATCH-hermes-agent/hermes}
+PM_ECO_AGENT_MATCH=${PM_ECO_AGENT_MATCH-pi-coding-agent}
+PM_ECO_DRAIN_POLL=${PM_ECO_DRAIN_POLL:-30}
+PM_ECO_DRAIN_IDLE_CPU=${PM_ECO_DRAIN_IDLE_CPU:-1}
+PM_ECO_DRAIN_FORCE_PCT=${PM_ECO_DRAIN_FORCE_PCT:-40}
+PM_ECO_PASEO_ROOM=${PM_ECO_PASEO_ROOM-power}
+PM_ECO_OLLAMA_RESTORE=${PM_ECO_OLLAMA_RESTORE:-0}
 
 # ---------------------------------------------------------------- primitives
 
@@ -208,6 +225,155 @@ docker_unpause() {
 	printf '%s\n' "$names" | xargs -r docker unpause > /dev/null 2>&1
 }
 
+# TSTP not STOP: catchable, so a hermes that traps it for its own graceful
+# pause gets the chance to; if it doesn't trap it the default action is the
+# same freeze either way.
+hermes_pause() {
+	[ -n "${MANGO_PM_TEST:-}" ] && return 0
+	[ -n "$PM_ECO_HERMES_MATCH" ] || return 0
+	pkill -TSTP -f "$PM_ECO_HERMES_MATCH" 2> /dev/null
+}
+hermes_resume() {
+	[ -n "${MANGO_PM_TEST:-}" ] && return 0
+	[ -n "$PM_ECO_HERMES_MATCH" ] || return 0
+	pkill -CONT -f "$PM_ECO_HERMES_MATCH" 2> /dev/null
+}
+
+# omp and pi both run under an interpreter (bun, node) shared with unrelated
+# dev tools, so `ps -eo comm=` (bun, node-MainThread) can't tell them apart —
+# matching has to be on the full command line, same reasoning as
+# PM_ECO_HERMES_MATCH above.
+#
+# /proc/<pid>/stat's comm field (2nd, in parens) can itself contain spaces or
+# parens, so utime/stime are found by scanning from the end for the LAST ')'
+# rather than assuming a fixed field number — the kernel's own advice for
+# parsing this file.
+agent_ticks() { # -> "ticks nprocs", combined utime+stime across matches
+	[ -n "$PM_ECO_AGENT_MATCH" ] || { printf '0 0'; return 0; }
+	total=0
+	n=0
+	for pid in $(pgrep -f "$PM_ECO_AGENT_MATCH" 2> /dev/null); do
+		stat="/proc/$pid/stat"
+		[ -r "$stat" ] || continue
+		ticks=$(awk '{
+			for (i = NF; i > 0; i--) if ($i ~ /\)$/) { p = i; break }
+			print $(p + 12) + $(p + 13)
+		}' "$stat" 2> /dev/null)
+		case "$ticks" in '' | *[!0-9]*) continue ;; esac
+		total=$((total + ticks))
+		n=$((n + 1))
+	done
+	printf '%s %s' "$total" "$n"
+}
+
+# Pure: nprocs, CPU ticks used since the last sample, the idle threshold in
+# the same units, current battery %, and the force-drain floor -> drain|wait.
+# No processes and a low battery both win outright; only "quiet enough since
+# last sample" needs the caller to have actually waited one.
+drain_decision() { # nprocs delta_ticks idle_ticks pct force_pct -> drain|wait
+	n=$1 delta=$2 idle=$3 pct=$4 force=$5
+	if [ "$n" -eq 0 ]; then printf drain
+	elif [ "$pct" -lt "$force" ]; then printf drain
+	elif [ "$delta" -lt "$idle" ]; then printf drain
+	else printf wait
+	fi
+}
+
+battery_pct() {
+	bat="${MANGO_BAT_DIR:-}"
+	[ -n "$bat" ] || bat=$(set -- /sys/class/power_supply/BAT*; printf '%s' "$1")
+	[ -r "$bat/capacity" ] && cat "$bat/capacity" 2> /dev/null || printf 100
+}
+
+paseo_notify() { # message
+	[ -n "${MANGO_PM_TEST:-}" ] && return 0
+	[ -n "$PM_ECO_PASEO_ROOM" ] || return 0
+	command -v paseo > /dev/null 2>&1 || return 0
+	paseo chat post "$PM_ECO_PASEO_ROOM" "$1" > /dev/null 2>&1 && return 0
+	paseo chat create "$PM_ECO_PASEO_ROOM" > /dev/null 2>&1
+	paseo chat post "$PM_ECO_PASEO_ROOM" "$1" > /dev/null 2>&1
+}
+
+# `ollama stop` unloads a model from RAM/VRAM without touching ollama.service
+# itself — the daemon stays up, just idle. Names are recorded so a later
+# ollama_restore (opt-in, see PM_ECO_OLLAMA_RESTORE) knows what to re-warm.
+ollama_unload() {
+	[ -n "${MANGO_PM_TEST:-}" ] && return 0
+	command -v ollama > /dev/null 2>&1 || return 0
+	names=$(ollama ps 2> /dev/null | awk 'NR > 1 { print $1 }')
+	[ -n "$names" ] || return 0
+	printf '%s\n' "$names" > "$OLLAMA_FILE"
+	printf '%s\n' "$names" | while IFS= read -r m; do ollama stop "$m" > /dev/null 2>&1; done
+}
+
+ollama_restore() {
+	[ -n "${MANGO_PM_TEST:-}" ] && return 0
+	[ -f "$OLLAMA_FILE" ] || return 0
+	names=$(cat "$OLLAMA_FILE" 2> /dev/null)
+	rm -f "$OLLAMA_FILE"
+	[ "$PM_ECO_OLLAMA_RESTORE" = 1 ] || return 0
+	command -v ollama > /dev/null 2>&1 || return 0
+	printf '%s\n' "$names" | while IFS= read -r m; do
+		[ -n "$m" ] && (ollama run "$m" hi < /dev/null > /dev/null 2>&1 &)
+	done
+}
+
+# Verified against /proc/<pid>/comm, not just "a pid is in the file" — same
+# stale-pid guard as bars_restart below, for the same reason: a recycled pid
+# must never be signalled.
+drain_stop() {
+	[ -n "${MANGO_PM_TEST:-}" ] && return 0
+	[ -r "$DRAIN_PID" ] || return 0
+	pid=$(cat "$DRAIN_PID" 2> /dev/null)
+	rm -f "$DRAIN_PID"
+	[ -n "$pid" ] || return 0
+	[ "$(cat "/proc/$pid/comm" 2> /dev/null)" = powermode.sh ] || return 0
+	kill "$pid" 2> /dev/null
+}
+
+# Detached: the caller (set_mode, from a short-lived ac-watch.sh/toggle
+# invocation) must not block on however long omp/pi keep working.
+drain_start() {
+	[ -n "${MANGO_PM_TEST:-}" ] && return 0
+	drain_stop
+	(setsid "$0" drain > /dev/null 2>&1 &)
+}
+
+# The eco wait/pause loop itself — see the header comment for the sequence.
+# Runs as its own detached process (drain_start), so every exit path must
+# clean up $DRAIN_PID itself; nothing else will.
+drain() {
+	printf '%s' "$$" > "$DRAIN_PID"
+	trap 'rm -f "$DRAIN_PID"' EXIT
+
+	idle_ticks=$((PM_ECO_DRAIN_IDLE_CPU * 100))
+	# shellcheck disable=SC2046  # deliberate: splitting agent_ticks' "ticks nprocs" into $1 $2
+	set -- $(agent_ticks)
+	prev_ticks=$1
+	n=$2
+
+	# First check passes delta=idle_ticks on purpose: no poll interval has
+	# elapsed yet, so only "nobody running" and "battery already low" can
+	# end the wait before one has — "did they go idle" needs a real
+	# interval, which the loop below measures.
+	verdict=$(drain_decision "$n" "$idle_ticks" "$idle_ticks" "$(battery_pct)" "$PM_ECO_DRAIN_FORCE_PCT")
+	while [ "$verdict" = wait ]; do
+		sleep "$PM_ECO_DRAIN_POLL"
+		[ "$(current_mode)" = eco ] || exit 0
+		# shellcheck disable=SC2046  # deliberate: splitting agent_ticks' "ticks nprocs" into $1 $2
+		set -- $(agent_ticks)
+		delta=$(($1 - prev_ticks))
+		prev_ticks=$1
+		n=$2
+		verdict=$(drain_decision "$n" "$delta" "$idle_ticks" "$(battery_pct)" "$PM_ECO_DRAIN_FORCE_PCT")
+	done
+
+	[ "$(current_mode)" = eco ] || exit 0
+	docker_eco
+	paseo_notify "🔋 on battery — containers paused, ollama unloaded"
+	ollama_unload
+}
+
 # USR1, not HUP: bars.sh traps USR1 rather than HUP because a HUP-preignoring
 # parent (nohup among others) makes HUP permanently untrappable in bash — see
 # the matching comment in bars.sh.
@@ -242,10 +408,14 @@ set_mode() { # mode
 	apply_root "$m"
 	if [ "$m" = eco ]; then
 		enter_eco_bright
-		docker_eco
+		hermes_pause
+		drain_start
 	else
 		exit_eco_bright
+		drain_stop
+		hermes_resume
 		docker_unpause
+		ollama_restore
 	fi
 	bars_restart
 	[ -n "${MANGO_PM_TEST:-}" ] || pkill -RTMIN+11 waybar 2> /dev/null
@@ -307,6 +477,7 @@ if [ "${1:-}" = test ]; then
 	trap 'rm -rf "$T"' EXIT
 	RUN="$T"
 	MODE_FILE="$RUN/mode" MANUAL_FILE="$RUN/manual" BRIGHT_FILE="$RUN/bright" WEAK_FILE="$RUN/weak" BARS_PID="$RUN/bars.pid"
+	DRAIN_PID="$RUN/drain.pid" OLLAMA_FILE="$RUN/ollama"
 
 	mkdir -p "$T/ac"
 	AC="$T/ac"
@@ -390,6 +561,13 @@ docker compose -p frappe-version-16 -f /home/martin/src/workbench/tools/docker-f
 	[ "$(docker_action 1 0)" = run ] || { echo "docker_action agent-idle,docker-busy should be run"; exit 1; }
 	[ "$(docker_action 0 0)" = run ] || { echo "docker_action both-busy should be run (docker wins)"; exit 1; }
 
+	# drain_decision: nprocs, delta_ticks, idle_ticks, pct, force_pct -> drain|wait
+	[ "$(drain_decision 0 999 100 80 40)" = drain ] || { echo "drain_decision should drain with no processes"; exit 1; }
+	[ "$(drain_decision 2 50 100 80 40)" = drain ] || { echo "drain_decision should drain when CPU delta is under idle threshold"; exit 1; }
+	[ "$(drain_decision 2 999 100 80 40)" = wait ] || { echo "drain_decision should wait when busy and battery is healthy"; exit 1; }
+	[ "$(drain_decision 2 999 100 20 40)" = drain ] || { echo "drain_decision should drain when battery is below force_pct, regardless of activity"; exit 1; }
+	[ "$(drain_decision 2 999 100 40 40)" = wait ] || { echo "drain_decision at exactly force_pct should still wait, not drain"; exit 1; }
+
 	echo "ok"
 	exit 0
 fi
@@ -404,9 +582,10 @@ eco) force eco ;;
 full) force full ;;
 weak) weak ;;
 unweak) unweak ;;
+drain) drain ;;
 status) status ;;
 *)
-	echo "usage: powermode.sh auto|cable|toggle|eco|full|weak|unweak|status|test" >&2
+	echo "usage: powermode.sh auto|cable|toggle|eco|full|weak|unweak|drain|status|test" >&2
 	exit 1
 	;;
 esac

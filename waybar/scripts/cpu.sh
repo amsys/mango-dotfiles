@@ -174,6 +174,7 @@ cpu_freq() {
 # energy_performance_preference, and a kernel without intel_pstate has no
 # no_turbo — so each is appended only if its file actually read.
 cpu_policy() {
+	# shellcheck disable=SC1007  # intentional POSIX empty-assignment initialization
 	gov= epp= nt=
 	read -r gov < "$CPU_SYS/cpu0/cpufreq/scaling_governor" 2> /dev/null
 	read -r epp < "$CPU_SYS/cpu0/cpufreq/energy_performance_preference" 2> /dev/null
@@ -201,6 +202,7 @@ atop_refresh() {
 	mkdir "$ATOP_CACHE.lock" 2> /dev/null || return 0   # a refresh is already running
 	BEGIN=$(date -d '-70 min' +%H:%M)
 	# before 01:10 that wraps into yesterday, which today's log does not contain
+	# shellcheck disable=SC3012  # lexicographic compare on zero-padded HH:MM
 	[ "$BEGIN" \> "$(date +%H:%M)" ] && BEGIN=00:00
 	(
 		atop -P PRC -r "$1" -b "$BEGIN" 2> /dev/null |

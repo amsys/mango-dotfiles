@@ -1,6 +1,7 @@
+# shellcheck shell=sh
 # Shared tooltip vocabulary for the waybar modules that emit JSON.
 #
-# Sourced, never executed — no shebang, POSIX only (net.sh is /bin/sh).
+# Sourced, never executed. POSIX only (net.sh is /bin/sh).
 # Extracted from net.sh once cpu/memory/battery/clock needed the same meters;
 # claudebar (a Rust binary) draws the same shapes from its own copy.
 #

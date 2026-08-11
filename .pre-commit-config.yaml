@@ -1,0 +1,25 @@
+# mango-dotfiles pre-commit — shell-check and hygiene.
+# Install per clone: `pre-commit install`
+default_stages: [pre-commit]
+fail_fast: false
+
+repos:
+  # --- always on: hygiene -----------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+
+  # --- shellcheck (system) ----------------------------------------------
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        language: system
+        entry: shellcheck -x --severity=warning
+        types: [shell]
+        exclude: '^matugen/templates/'

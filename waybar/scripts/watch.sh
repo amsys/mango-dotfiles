@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared event-stream -> waybar-signal loop, for the continuous modules that
 # exist only to refresh other modules the moment something changes.
 #

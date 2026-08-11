@@ -73,6 +73,7 @@ counters() {
 throughput() { # iface -> "↓ 1.2 MB/s  ↑ 340 kB/s"
 	_f="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-$1"
 	_now=$(awk '{print $1}' /proc/uptime)
+	# shellcheck disable=SC2046  # deliberate word-split of counter fields
 	set -- $(counters "$1")
 	[ $# -ge 4 ] || { printf '↓ —  ↑ —'; return; }
 	_rx=$1 _tx=$4 _drx=0 _dtx=0
@@ -80,6 +81,7 @@ throughput() { # iface -> "↓ 1.2 MB/s  ↑ 340 kB/s"
 		_pt=""
 		read -r _pt _prx _ptx <"$_f" 2>/dev/null || _pt=""
 		if [ -n "$_pt" ]; then
+			# shellcheck disable=SC2046  # deliberate word-split of awk output
 			set -- $(awk -v t="$_now" -v p="$_pt" -v r="$_rx" -v pr="$_prx" -v x="$_tx" -v px="$_ptx" 'BEGIN {
 				d = t - p
 				# counters reset on reboot or an iface flap -> report 0, not a spike
@@ -761,6 +763,7 @@ eth_emit() {
 		row "$(throughput "$ETH_DEV")"
 
 		sect "󰋼" "Counters"
+		# shellcheck disable=SC2046  # deliberate word-split of counter fields
 		set -- $(counters "$ETH_DEV")
 		if [ $# -ge 6 ]; then
 			dim "rx errors $2 · rx drops $3"

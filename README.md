@@ -768,6 +768,26 @@ the AC cable:
   anything paused; stopped containers stay stopped, by design — start a bench
   on demand with `frappe-dev <env> up`.
 
+**Eco drain sequence.** Entering eco pauses `hermes` at once (`SIGTSTP`, a
+catchable stop signal — `SIGCONT` on the way back to full), then waits before
+touching anything CPU-hungrier: docker's three-way decision above, a
+`paseo chat post` telling you the machine is on battery, and unloading any
+`ollama` model from RAM/VRAM (`ollama stop`, which idles the model without
+stopping `ollama.service`) all happen together, but only once every open
+`omp`/`pi` coding-agent session has gone quiet. "Quiet" is measured by
+combined CPU ticks across matching processes every `PM_ECO_DRAIN_POLL`
+seconds; under `PM_ECO_DRAIN_IDLE_CPU` seconds of CPU time in a window counts
+as idle. A session that keeps working is never cut off — except battery
+drain outranks it: below `PM_ECO_DRAIN_FORCE_PCT`, the wait ends regardless of
+what omp/pi are doing. Matching for hermes and omp/pi is on the full command
+line (`PM_ECO_HERMES_MATCH`, `PM_ECO_AGENT_MATCH`), not the process name —
+omp runs under `bun`, pi under `node`, hermes under its venv's `python`, so
+`ps`'s `comm` column can't tell one agent from any other tool sharing that
+interpreter. Unloaded ollama model names are remembered; re-warming them on
+the way back to full is opt-in (`PM_ECO_OLLAMA_RESTORE=1`, off by default —
+reloading a multi-GB model on every cable plug costs more than one slow first
+prompt after eco). Returning to full also cancels a wait still in progress.
+
 **Paused** freezes userspace only — the container's kernel keeps servicing TCP
 keepalives on every socket still open, so a paused bench and its redis go on
 trading a few packets a second, and their veths show up as "busy" in powertop
@@ -786,8 +806,9 @@ negotiates less than `PM_WEAK_MIN_W` — and forces eco with a critical
 notification until the charger recovers, overriding even a manual full.
 
 Every value — EPP, turbo, the profile, PCI PM, brightness, the docker prefix,
-which processes count as "work in flight", the weak-charger threshold,
-waybar's eco poll intervals — lives in one file, `mango/powermode.conf`,
+which processes count as "work in flight", the eco drain sequence's matching
+patterns and thresholds, the weak-charger threshold, waybar's eco poll
+intervals — lives in one file, `mango/powermode.conf`,
 tracked and symlinked like everything else, with a comment over each key.
 Editing it needs no reinstall; switching modes picks the new value up
 immediately.
@@ -796,6 +817,7 @@ immediately.
 ~/.config/mango/scripts/powermode.sh status   # current mode + why
 ~/.config/mango/scripts/powermode.sh eco      # force eco (sets the manual override)
 ~/.config/mango/scripts/powermode.sh full     # force full
+~/.config/mango/scripts/powermode.sh drain    # internal: the eco wait/pause loop, not for manual use
 ~/.config/mango/scripts/powermode.sh test     # decision-table self-check, no hardware touched
 ```
 

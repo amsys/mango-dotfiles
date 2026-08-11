@@ -14,6 +14,7 @@ set -u
 . "$(dirname "$0")/tooltip.sh"
 . "$(dirname "$0")/watch.sh"
 
+# shellcheck disable=SC2034  # used by sourced watch.sh via pkill -RTMIN+"$SIGNAL"
 SIGNAL=21
 
 IC_OUT='󰓃'   # md-speaker             U+F04C3

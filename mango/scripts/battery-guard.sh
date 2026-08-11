@@ -29,6 +29,7 @@ POWERMODE="$(dirname "$0")/powermode.sh"
 # re-notify every 30s poll. powermode.sh remains the sole writer.
 WEAK_MARK="${XDG_RUNTIME_DIR:-/tmp}/mango-powermode.weak"
 CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
+# shellcheck disable=SC1090  # user-owned config file
 [ -r "$CONF" ] && . "$CONF"
 PM_WEAK_MIN_W=${PM_WEAK_MIN_W:-45}
 PM_WEAK_POLLS=${PM_WEAK_POLLS:-2}

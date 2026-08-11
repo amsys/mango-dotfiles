@@ -18,6 +18,7 @@ set -u
 . "$(dirname "$0")/tooltip.sh"
 . "$(dirname "$0")/watch.sh"
 
+# shellcheck disable=SC2034  # used by sourced watch.sh via pkill -RTMIN+"$SIGNAL"
 SIGNAL=20
 
 # Render both mmsg documents into "class" on the first line and one tab-
