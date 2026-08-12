@@ -101,6 +101,8 @@ elif ! command -v dmidecode >/dev/null 2>&1; then
 	log "  skip:   dmidecode not installed"
 elif sudo -n true 2>/dev/null || sudo -v 2>/dev/null; then
 	mkdir -p "$(dirname "$DMI_CACHE")"
+	# shellcheck disable=SC2024 # the redirect must stay outside sudo — the
+	# cache file needs to end up owned by the invoking user, not root.
 	if sudo dmidecode -t memory >"$DMI_CACHE" 2>/dev/null; then
 		log "  create: $DMI_CACHE"
 	else
@@ -114,13 +116,16 @@ log
 
 # The Nextcloud client publishes bare SNI icon names — state-ok, state-sync,
 # state-error, state-warning, state-offline, state-pause — with an empty
-# IconThemePath *and* an empty IconPixmap, so the tray host has nothing to fall
-# back on but the name. Those names ship only in breeze/breeze-icons; under
-# Adwaita waybar cannot resolve them and draws a generic placeholder instead.
-# Alias them onto the branded icons nextcloud-client already installs. hicolor
-# is the target because every GTK icon theme falls back to it, so this works
-# whatever icon theme is set later. offline/pause have no branded artwork, so
-# they land on the plain cloud alongside ok.
+# IconThemePath *and* an empty IconPixmap (confirmed still true on 34.0.1), so
+# the tray host has nothing to fall back on but the name. Those names ship
+# only in breeze/breeze-icons; under Adwaita waybar cannot resolve them and
+# draws a generic placeholder instead. Alias them onto the branded icons
+# nextcloud-client already installs. hicolor is the target because every GTK
+# icon theme falls back to it, so this works whatever icon theme is set
+# later. offline/pause have no branded artwork, so they land on the plain
+# cloud alongside ok. 24x24 has no sync/error/warning artwork upstream — the
+# `[[ -f ]]` guard below just skips those, and waybar falls back to the
+# nearest size it does have (16 or 32).
 NC_ICONS=/usr/share/icons/hicolor
 ICON_DEST="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
 log "-- Nextcloud tray icon names --"
@@ -158,6 +163,8 @@ elif ((DRY_RUN)); then
 	log "  (dry run) would run: cc -shared -fPIC -O2 \$(pkg-config --cflags --libs glib-2.0) -o $SHIM_SO $SHIM_SRC"
 else
 	mkdir -p "$(dirname "$SHIM_SO")"
+	# shellcheck disable=SC2046 # pkg-config output is meant to word-split into
+	# separate compiler flags — quoting it would pass them as one argument.
 	if cc -shared -fPIC -O2 $(pkg-config --cflags glib-2.0) $(pkg-config --libs glib-2.0) -o "$SHIM_SO" "$SHIM_SRC"; then
 		log "  build:  $SHIM_SO"
 	else

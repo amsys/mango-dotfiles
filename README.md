@@ -37,11 +37,12 @@ commit) — that stays an explicit, separate step.
 outside `~/.config`, and it points at `/usr/share`, not at this repo. The
 Nextcloud client advertises its tray icon as a bare name (`state-ok`,
 `state-sync`, …) with no `IconThemePath` and no `IconPixmap` — names that exist
-only in Breeze. Under Adwaita waybar cannot resolve them and falls back to a
-generic placeholder, so the installer aliases them onto the branded icons
-`nextcloud-client` already ships. hicolor is the target because every GTK icon
-theme falls back to it. `state-offline` and `state-pause` have no branded
-artwork and land on the plain cloud alongside `state-ok`.
+only in Breeze (confirmed still true on 34.0.1daily). Under Adwaita waybar
+cannot resolve them and falls back to a generic placeholder, so the installer
+aliases them onto the branded icons `nextcloud-client` already ships. hicolor
+is the target because every GTK icon theme falls back to it. `state-offline`
+and `state-pause` have no branded artwork and land on the plain cloud
+alongside `state-ok`.
 
 **Manual step:** the **Google Sans Flex** font (used by rofi, swaylock, mako)
 isn't in the Arch repos — grab it from
@@ -932,15 +933,6 @@ Things this desktop depends on that aren't tracked here:
 - [ ] Google Sans Flex font (manual — see Install)
 - [ ] KeePassXC: add attribute `application=mango` to the OpenRouter key entry
       (was `illogical-impulse`; Alt+I in rofi stays broken until this is done)
-- [ ] `~/.config/Nextcloud/nextcloud.cfg` — `showMainDialogAsNormalWindow=true`
-      under `[General]`. The tray window is a Qt popup by default, so with
-      `sloppyfocus=1` it self-closes the instant the pointer crosses another
-      window on the way to it. This key makes it a normal toplevel instead. Note
-      the key name: `useNormalWindow` is the QML property that reads it, not the
-      config key, and setting *that* silently does nothing. The mango windowrule
-      for `com.nextcloud.desktopclient.nextcloud` assumes this is set — and also
-      has to force a size, because the client maps the surface at 7x7 and never
-      grows it
 - [ ] a default wallpaper, or just document `~/Wallpapers/`
 - [ ] `hypr/hyprlock.conf` — currently unused (swaylock is bound instead); include or delete
 - [ ] `Code/User/settings.json` (`material-code.primaryColor`)
