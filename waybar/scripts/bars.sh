@@ -193,6 +193,24 @@ fi
 exec 9> "$RUN/mango-bars.lock"
 flock -n 9 || exit 0
 pkill -x waybar 2> /dev/null
+
+# Anything named waybar that isn't the one we're about to manage — a manual
+# launch, or a second bars.sh's fallback from before it took over. Measured
+# live: a stray survives forever otherwise, since every restart/reload path
+# below only ever touches $BAR.
+reap_strays() { pgrep -x waybar 2> /dev/null | grep -vx "${BAR:-}" | xargs -r kill 2> /dev/null; }
+
+# Defined before the pid file is written below, so both traps can use it from
+# the moment anyone could possibly signal us. Safe to define before $BAR
+# exists — a function body isn't evaluated until it's called.
+restart_bar() { # regenerate first; caller decides whether to
+	reap_strays
+	kill "$BAR" 2> /dev/null
+	wait "$BAR" 2> /dev/null
+	bar -c "$CFG" &
+	BAR=$!
+}
+
 printf '%s' "$$" > "$RUN/mango-bars.pid" # read by powermode.sh to signal us on a mode change
 
 # Trap installed before anything is launched below, including the degraded
@@ -208,6 +226,33 @@ printf '%s' "$$" > "$RUN/mango-bars.pid" # read by powermode.sh to signal us on 
 # `mmsg watch` left in a pipeline is exactly the leak watch.sh exists to avoid.
 trap 'rm -f "$RUN/mango-bars.pid"; pkill -P $$ > /dev/null 2>&1' EXIT INT TERM
 
+# USR1, not HUP: measured live that `nohup`-launched (or otherwise
+# HUP-preignoring) parents make HUP permanently untrappable here — bash
+# refuses to install a trap for any signal that was already SIG_IGN when the
+# shell started (see bash(1), SIGNALS), and there is no reliable way from
+# inside this script to know whether whatever launched it did that. USR1 is
+# never preignored by anything in this chain and isn't used by waybar's own
+# SIGUSR2 reload, so there's nothing to collide with.
+#
+# Restart, not reload: a SIGUSR2 reload re-reads config but doesn't reliably
+# rebuild the bars from it on waybar 0.15 — measured live, a mode-switch USR1
+# landing ~450ms into waybar's own startup dropped both bars with no error
+# and no recovery, because ac-watch.sh fires `powermode.sh cable` at login to
+# get the mode right immediately, racing this script's own launch below. A
+# full kill+relaunch costs a brief flicker instead of the bar silently
+# vanishing.
+#
+# Installed here, immediately after the pid file, not after the launch below:
+# nothing can read that pid file and signal us before this line runs, but the
+# gap used to be a couple hundred ms of retry-loop-and-launch during which a
+# USR1 hit bash's *default* SIGUSR1 action — terminate — and killed bars.sh
+# outright, EXIT trap and all, orphaning waybar with nothing left to manage
+# it. Guarded on $BAR: a signal landing before the launch below has nothing
+# to restart yet, and gen() alone is enough since the imminent launch already
+# reads the current mode. Without the guard, reap_strays's `grep -vx ""` (an
+# empty $BAR) would match every waybar on the system and kill all of them.
+trap '[ -n "${BAR:-}" ] && gen && restart_bar' USR1
+
 # exec-once fires at compositor start, so the IPC socket may not be answering
 # yet — same race config.conf's arch-update line waits out. Losing it would cost
 # the whole session its per-monitor bars, so retry before giving up.
@@ -215,12 +260,6 @@ for _ in 1 2 3 4 5; do
 	gen && break
 	sleep 0.5
 done
-
-# Anything named waybar that isn't the one we're about to manage — a manual
-# launch, or a second bars.sh's fallback from before it took over. Measured
-# live: a stray survives forever otherwise, since every restart/reload path
-# below only ever touches $BAR.
-reap_strays() { pgrep -x waybar 2> /dev/null | grep -vx "${BAR:-}" | xargs -r kill 2> /dev/null; }
 
 if [ -s "$CFG" ]; then
 	bar -c "$CFG" &
@@ -231,40 +270,6 @@ else
 	bar &
 fi
 BAR=$!
-
-restart_bar() { # regenerate first; caller decides whether to
-	reap_strays
-	kill "$BAR" 2> /dev/null
-	wait "$BAR" 2> /dev/null
-	bar -c "$CFG" &
-	BAR=$!
-}
-
-# Reload rather than restart: a mode switch changes nothing but a handful of
-# module `interval`s inside bars that already exist, so there is no torn
-# state to avoid by deferring — unlike the hotplug path below, where the bar
-# *list* itself changes. SIGUSR2 alone doesn't cost the bar its brief absence
-# a full kill+relaunch does, and by the time a mode switch signals us,
-# powermode.sh has usually already dropped the CPU to eco — the coldest
-# possible clock to cold-start waybar on.
-reload_bar() {
-	reap_strays
-	kill -USR2 "$BAR" 2> /dev/null
-}
-
-# USR1, not HUP: measured live that `nohup`-launched (or otherwise
-# HUP-preignoring) parents make HUP permanently untrappable here — bash
-# refuses to install a trap for any signal that was already SIG_IGN when the
-# shell started (see bash(1), SIGNALS), and there is no reliable way from
-# inside this script to know whether whatever launched it did that. USR1 is
-# never preignored by anything in this chain and isn't used by waybar's own
-# SIGUSR2 reload, so there's nothing to collide with.
-#
-# Acted on directly, not deferred through a flag: a mode switch has no bar-list
-# change to race against (see reload_bar above), so there is no torn state
-# the old flag-and-poll dance was protecting against here — only the hotplug
-# path below still needs that.
-trap 'gen && reload_bar' USR1
 
 # Hotplug: regenerate, then RESTART waybar. Not SIGUSR2 — waybar's reload
 # re-reads the config but does not rebuild the bar list from it, so a bar for a
