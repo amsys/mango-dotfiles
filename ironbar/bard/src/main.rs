@@ -3,6 +3,7 @@
 //! /home/martin/work/mango-dotfiles/IRONBAR.md for the full design and the
 //! T0 spike findings this implementation is built on.
 
+mod audio;
 mod clock;
 mod control;
 mod genconfig;
@@ -15,6 +16,7 @@ mod sys;
 mod tooltip;
 mod vars;
 
+use audio::Audio;
 use clock::Clock;
 use control::Line;
 use ipc::IronbarIpc;
@@ -45,6 +47,12 @@ struct Stats {
     net_noop: u64,
     /// Successful `style add-class`/`remove-class` round trips.
     style_sets: u64,
+    /// Lines received from `audio.rs`'s `pactl subscribe` child, before
+    /// dedup — same shape as `net_events`.
+    audio_events: u64,
+    /// Of those, how many were either byte-identical to the previous line
+    /// or classified as client noise (`event_matches()` — volume.sh:73).
+    audio_noop: u64,
     started: Instant,
 }
 
@@ -60,13 +68,15 @@ impl Stats {
             net_events: 0,
             net_noop: 0,
             style_sets: 0,
+            audio_events: 0,
+            audio_noop: 0,
             started: Instant::now(),
         }
     }
 
     fn to_json(&self, mode: powermode::Mode) -> String {
         format!(
-            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
+            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
             self.wakeups,
             self.var_sets,
             self.flushes,
@@ -76,6 +86,8 @@ impl Stats {
             self.net_events,
             self.net_noop,
             self.style_sets,
+            self.audio_events,
+            self.audio_noop,
             self.started.elapsed().as_secs(),
             mode.as_str(),
         )
@@ -123,6 +135,7 @@ async fn run() -> Result<(), String> {
 
     let mut mango = Mango::new();
     let mut net = Net::new();
+    let mut audio = Audio::new();
     let mut vars = Vars::new();
     let mut ipc = IronbarIpc::new();
     let mut stats = Stats::new();
@@ -131,6 +144,8 @@ async fn run() -> Result<(), String> {
     // debounces the IPC flush of whatever regrade() already computed) — see
     // net.rs module doc and IRONBAR.md T3 "Architecture".
     let mut regrade_due: Option<Instant> = None;
+    // Same shape as `regrade_due`, for audio.rs's `refresh()` (also forks).
+    let mut audio_due: Option<Instant> = None;
 
     clock::refresh(&mut vars);
     if vars.has_dirty() {
@@ -140,6 +155,12 @@ async fn run() -> Result<(), String> {
     // Initial full picture at startup — net.rs's `MonitorChild` has no
     // `mmsg get`-style snapshot pairing, so this stands in for one.
     net.regrade(&mut vars, pm_mode).await;
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+
+    // Same reason: a `pactl subscribe` stream has no snapshot companion.
+    audio.refresh(&mut vars).await;
     if vars.has_dirty() {
         dirty_since = Some(Instant::now());
     }
@@ -193,6 +214,15 @@ async fn run() -> Result<(), String> {
                     regrade_due = Some(Instant::now());
                 } else {
                     stats.net_noop += 1;
+                }
+            }
+
+            line = audio.pactl_mon.next_line() => {
+                stats.audio_events += 1;
+                if audio.ingest_line(&line) {
+                    audio_due = Some(Instant::now());
+                } else {
+                    stats.audio_noop += 1;
                 }
             }
 
@@ -255,9 +285,13 @@ async fn run() -> Result<(), String> {
                                         net.refresh_busy_var(&mut vars);
                                         regrade_due = Some(Instant::now());
                                     }
+                                    "audio" | "volume" | "mic" => {
+                                        audio_due = Some(Instant::now());
+                                    }
                                     _ => {
                                         clock::refresh(&mut vars);
                                         mango.apply(&mut vars);
+                                        audio.refresh(&mut vars).await;
                                     }
                                 }
                                 if vars.has_dirty() {
@@ -282,6 +316,19 @@ async fn run() -> Result<(), String> {
                     dirty_since = Some(Instant::now());
                 }
                 regrade_due = None;
+            }
+
+            _ = async {
+                match audio_due {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t + FLUSH_DEBOUNCE)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                audio.refresh(&mut vars).await;
+                if vars.has_dirty() {
+                    dirty_since = Some(Instant::now());
+                }
+                audio_due = None;
             }
 
             _ = async {
@@ -335,6 +382,7 @@ async fn run() -> Result<(), String> {
                 mango.clients.kill();
                 net.nmcli_mon.kill();
                 net.route_mon.kill();
+                audio.pactl_mon.kill();
                 control::unlink(&control_path);
                 return Ok(());
             }

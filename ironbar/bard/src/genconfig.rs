@@ -125,6 +125,10 @@ pub fn build(monitors: &[String]) -> Value {
     defaults.insert("wifi_text".into(), json!(""));
     defaults.insert("eth_text".into(), json!(""));
     defaults.insert("sec_text".into(), json!(""));
+    // T4 audio vars — see audio.rs.
+    defaults.insert("vol_text".into(), json!(""));
+    defaults.insert("vol_tip".into(), json!(""));
+    defaults.insert("mic_text".into(), json!(""));
     for slug in &slugs {
         defaults.insert(var_tags(slug), json!("true"));
         defaults.insert(var_ov(slug), json!("false"));
@@ -135,28 +139,42 @@ pub fn build(monitors: &[String]) -> Value {
 
     let mut monitors_map = serde_json::Map::new();
     for (name, slug) in monitors.iter().zip(&slugs) {
+        let bar_name = format!("bar-{name}");
         monitors_map.insert(
             name.clone(),
             json!({
-                "name": format!("bar-{name}"),
+                "name": bar_name,
                 "start": [ window_module() ],
                 "center": workspace_pills(name, slug),
-                "end": net_modules(),
+                "end": end_modules(&bar_name),
             }),
         );
     }
 
     json!({
         // Popups are click-driven (workspace pill right-click, window
-        // left-click) — autohide is what makes clicking away close them,
-        // since the default is `false`.
+        // left-click, volume left-click) — autohide is what makes clicking
+        // away close them, since the default is `false`.
         "popup_autohide": true,
         "ironvar_defaults": Value::Object(defaults),
+        // Named so the fallback bar's own volume popup has a
+        // `toggle-popup` target (T0 spike S3: an unlisted output still gets
+        // this bar). Two unlisted outputs would share the name — the
+        // generator lists every real monitor, so that never happens today.
+        "name": "bar-default",
         "start": [ window_module() ],
         "center": clock_pill(),
-        "end": net_modules(),
+        "end": end_modules("bar-default"),
         "monitors": Value::Object(monitors_map),
     })
+}
+
+/// `end` row order follows config.jsonc:271: volume/mic pills before the
+/// network pills.
+fn end_modules(bar_name: &str) -> Vec<Value> {
+    let mut end = audio_modules(bar_name);
+    end.extend(net_modules());
+    end
 }
 
 fn window_module() -> Value {
@@ -188,6 +206,36 @@ fn clock_pill() -> Vec<Value> {
 /// (`\xf3\xb0\xaa\xa5`, U+F0AA5) — reused rather than picking a fresh glyph,
 /// since it is already proven to render in this environment.
 const NET_SPINNER_GLYPH: &str = "\u{f0aa5}";
+
+/// Volume/mic pills: T4 (see audio.rs). Bar-global, like `net_modules()` —
+/// audio state is the same on every monitor. Click layout is a T4 design
+/// decision (IRONBAR.md has no hover tooltip, so the popup needs a click):
+/// left opens the popup (the detail that used to live under hover), right
+/// and middle keep waybar's own `on-click`/`on-click-right`
+/// (config.jsonc:309-312) unchanged. Scroll wiring is copied verbatim from
+/// the same lines.
+fn audio_modules(bar_name: &str) -> Vec<Value> {
+    vec![
+        json!({
+            "type": "custom",
+            "name": "volume",
+            "class": "volume",
+            "bar": [ { "type": "label", "label": "#vol_text" } ],
+            "popup": [ { "type": "label", "label": "#vol_tip" } ],
+            "on_click_left": format!("ironbar bar {bar_name} toggle-popup volume"),
+            "on_click_right": "pavucontrol-qt",
+            "on_click_middle": "pavucontrol-qt -t 5",
+            "on_scroll_up": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%+ -l 1.0",
+            "on_scroll_down": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%-"
+        }),
+        json!({
+            "type": "custom",
+            "name": "mic",
+            "class": "mic",
+            "bar": [ { "type": "label", "label": "#mic_text" } ]
+        }),
+    ]
+}
 
 /// Network pills: T3 (see net.rs). Bar-global — one instance per bar, like
 /// `window_module()` — rather than per-monitor, since network state is the
@@ -359,6 +407,28 @@ mod tests {
             !click.starts_with('!'),
             "module-level ScriptInput needs no ! prefix"
         );
+    }
+
+    #[test]
+    fn volume_popup_targets_its_own_bar_name() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let volume = end.iter().find(|m| m["name"] == "volume").unwrap();
+        assert!(volume["on_click_left"]
+            .as_str()
+            .unwrap()
+            .contains("bar-eDP-1"));
+
+        // The fallback bar (no monitor listed) must also get a name to
+        // target, per T0 spike S3 — an unlisted output still gets this bar.
+        let fallback = build(&[]);
+        assert_eq!(fallback["name"], json!("bar-default"));
+        let fb_end = fallback["end"].as_array().unwrap();
+        let fb_volume = fb_end.iter().find(|m| m["name"] == "volume").unwrap();
+        assert!(fb_volume["on_click_left"]
+            .as_str()
+            .unwrap()
+            .contains("bar-default"));
     }
 
     #[test]
