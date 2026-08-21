@@ -19,7 +19,7 @@ entry {
 }
 
 /* The global prompt glyph is a magnifier, which is wrong for a chat. Name the
-   Nerd Font explicitly — Google Sans Flex has no PUA glyphs, and leaving this
+   Nerd Font explicitly — IBM Plex Sans has no PUA glyphs, and leaving this
    to fontconfig fallback is how the waybar icons ended up mismatched. */
 textbox-prompt-colon {
     str: "󰭹 ";
@@ -50,6 +50,6 @@ element-text {
 /* The caption carries the chat position and the hotkeys, so it needs to be
    readable rather than a whisper. */
 message textbox {
-    font: "Google Sans Flex 10";
+    font: "IBM Plex Sans 10";
     text-color: @muted;
 }

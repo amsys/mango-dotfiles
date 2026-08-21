@@ -136,10 +136,10 @@ TerminalApplication=kitty -1
 XftHintStyle=hintslight
 XftSubPixel=none
 fixed=JetBrainsMono Nerd Font,11,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
-font=Google Sans Flex,11,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
-menuFont=Google Sans Flex,10,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
-smallestReadableFont=Google Sans Flex,9,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
-toolBarFont=Google Sans Flex,10,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
+font=IBM Plex Sans,11,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
+menuFont=IBM Plex Sans,10,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
+smallestReadableFont=IBM Plex Sans,9,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
+toolBarFont=IBM Plex Sans,10,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
 
 [KDE]
 # Must stay low on a dark scheme. contrast drives KColorScheme's derived
@@ -160,7 +160,7 @@ Theme=freedesktop
 [WM]
 activeBackground={{colors.surface_container.default.hex}}
 activeBlend=252,252,252
-activeFont=Google Sans Flex,10,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
+activeFont=IBM Plex Sans,10,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium
 activeForeground={{colors.on_surface.default.hex}}
 inactiveBackground={{colors.surface_container_high.default.hex}}
 inactiveBlend=161,169,177

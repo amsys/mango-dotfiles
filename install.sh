@@ -26,7 +26,6 @@ log
 log
 
 log "Manual steps still needed:"
-log "  - Install Google Sans Flex if flagged above"
 log "  - KeePassXC: the entry holding the OpenRouter key must carry the attribute"
 log "    application=mango (was: illogical-impulse). Edit it under Advanced ->"
 log "    Additional attributes, or rofi's Alt+I returns 'not found'."

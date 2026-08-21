@@ -20,7 +20,7 @@ TOOL_PKGS=(grim slurp swappy hyprpicker tesseract tesseract-data-eng
 	iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs kdialog
 	atop btop dmidecode)
 LOOK_PKGS=(fish starship eza ttf-jetbrains-mono-nerd adw-gtk-theme-git
-	breeze-plus kde-cli-tools)
+	breeze-plus kde-cli-tools ttf-ibm-plex ttf-material-symbols-variable-git)
 # Referenced directly by fish/config.fish and git/config. Not cosmetic: without
 # git-delta every paged git command fails outright, because git/config sets it
 # as core.pager.
@@ -71,9 +71,4 @@ fi
 
 if ((${#MISSING_SUGGESTED[@]})); then
 	log "  missing (suggested, nothing depends on them): ${MISSING_SUGGESTED[*]}"
-fi
-
-if ! fc-list | grep -qi "Google Sans Flex"; then
-	log "  missing (manual — not in Arch repos): Google Sans Flex font"
-	log "    used by rofi, swaylock, mako; get it from https://fonts.google.com/specimen/Google+Sans"
 fi

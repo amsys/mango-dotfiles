@@ -7,7 +7,7 @@ configuration {
        script modes cost ~1.35s between them (clipboard.sh alone is ~1.3s).
        Each of those is declared via -modes in its own launcher instead. */
     modes: "drun,run,calc";
-    font: "Google Sans Flex 11";
+    font: "IBM Plex Sans 11";
     show-icons: true;
 }
 
@@ -50,7 +50,7 @@ inputbar {
    text starts in the middle of the bar. */
 textbox-prompt-colon {
     str: "󰍉";
-    /* Google Sans Flex has no PUA glyphs — name the Nerd Font or this renders
+    /* IBM Plex Sans has no PUA glyphs — name the Nerd Font or this renders
        as blank space. */
     font: "JetBrainsMono Nerd Font 11";
     expand: false;
@@ -126,7 +126,7 @@ message {
 }
 
 message textbox {
-    font: "Google Sans Flex 9";
+    font: "IBM Plex Sans 9";
     text-color: @outline;
 }
 

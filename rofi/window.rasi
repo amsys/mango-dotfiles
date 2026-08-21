@@ -28,6 +28,6 @@ listview {
 /* The caption carries the window count and the hint, so it needs to be readable
    rather than a whisper — same call ai.rasi and clipboard.rasi make. */
 message textbox {
-    font: "Google Sans Flex 10";
+    font: "IBM Plex Sans 10";
     text-color: @muted;
 }

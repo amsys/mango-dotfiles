@@ -25,7 +25,7 @@
 @define-color caution #eed49f;
 
 * {
-    font-family: "Google Sans Flex", "Rubik", sans-serif;
+    font-family: "IBM Plex Sans", "Rubik", sans-serif;
     font-size: 15px;
     min-height: 0;
 }
@@ -80,6 +80,7 @@ window#waybar {
 #custom-wifi,
 #custom-eth,
 #custom-netsec,
+#custom-hotspot,
 #bluetooth {
     background-color: transparent;
     color: @bar_fg_dim;
@@ -96,7 +97,7 @@ window#waybar {
     font-family: "JetBrainsMono Nerd Font", monospace;
 }
 
-/* The whale is nf-linux-docker (U+F308), Nerd Font PUA — Google Sans Flex and
+/* The whale is nf-linux-docker (U+F308), Nerd Font PUA — IBM Plex Sans and
    Material Symbols Rounded both lack it, so this module names the Nerd Font
    rather than joining the shared icon stack above. Same exception
    #custom-netwatch makes, for the same reason. Size and baseline still come
@@ -107,10 +108,10 @@ window#waybar {
 
 /* Icon-bearing modules: text font first so digits/%/labels render identically
    to every other module (clock#date included); Material Symbols Rounded is a
-   fallback used only for the PUA icon codepoints Google Sans Flex lacks.
+   fallback used only for the PUA icon codepoints IBM Plex Sans lacks.
    (Material Symbols Rounded ships its own 0-9 glyphs, so putting it first
    made every digit in these modules render in the icon font's digit style
-   instead of Google Sans Flex — this order avoids that.) */
+   instead of IBM Plex Sans — this order avoids that.) */
 #custom-spark,
 #custom-window,
 #custom-cpu,
@@ -129,9 +130,10 @@ window#waybar {
 #custom-wifi,
 #custom-eth,
 #custom-netsec,
+#custom-hotspot,
 #bluetooth,
 #custom-power {
-    font-family: "Google Sans Flex", "Material Symbols Rounded", sans-serif;
+    font-family: "IBM Plex Sans", "Material Symbols Rounded", sans-serif;
 }
 
 /* The one destructive target on the bar, so it reads as one on hover rather
@@ -148,7 +150,7 @@ window#waybar {
 /* Same reasoning for claudebar; JetBrainsMono stays only as a trailing
    fallback for anything the binary itself emits in its tooltip. */
 #custom-claudebar {
-    font-family: "Google Sans Flex", "Material Symbols Rounded", "JetBrainsMono Nerd Font", sans-serif;
+    font-family: "IBM Plex Sans", "Material Symbols Rounded", "JetBrainsMono Nerd Font", sans-serif;
 }
 
 /* Tooltips are their own GTK windows, so they only ever picked up the `*` rule
@@ -203,7 +205,7 @@ tooltip box {
     box-shadow: 3px 4px 10px rgba(0, 0, 0, 0.55);
 }
 tooltip label {
-    font-family: "Google Sans Flex", "Material Symbols Rounded", "JetBrainsMono Nerd Font", monospace;
+    font-family: "IBM Plex Sans", "Material Symbols Rounded", "JetBrainsMono Nerd Font", monospace;
     color: #abb2bf;
     padding: 10px 14px;
 }
@@ -352,6 +354,16 @@ tooltip label {
     color: @bar_fg_dim;
 }
 
+/* Hotspot pill: dim while routing directly, accent while NordVPN carries it —
+   same "quiet unless there's something to react to" logic as netsec's colors,
+   just inverted (VPN here is the reassuring state, not the alarming one). */
+#custom-hotspot.active {
+    color: @bar_fg_dim;
+}
+#custom-hotspot.vpn {
+    color: @accent;
+}
+
 /* The security lock, in ascending order of "do something about this":
    green = tunnelled end to end, amber = tunnelled but a resolver is off it,
    red = traffic leaving in the clear. Open/WEP links and captive portals also
@@ -399,6 +411,7 @@ tooltip label {
 #custom-wifi:hover,
 #custom-eth:hover,
 #custom-netsec:hover,
+#custom-hotspot:hover,
 #bluetooth:hover,
 #custom-cpu:hover,
 #custom-memory:hover,

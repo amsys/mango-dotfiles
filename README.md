@@ -44,10 +44,8 @@ is the target because every GTK icon theme falls back to it. `state-offline`
 and `state-pause` have no branded artwork and land on the plain cloud
 alongside `state-ok`.
 
-**Manual step:** the **Google Sans Flex** font (used by rofi, swaylock, mako)
-isn't in the Arch repos — grab it from
-[Google Fonts](https://fonts.google.com/specimen/Google+Sans) and install it
-yourself. `install.sh` will tell you if it's missing.
+The UI font is **IBM Plex Sans** (`ttf-ibm-plex`, in the Arch repos —
+`install-deps.sh` reports it like any other package, no manual step).
 
 Dependencies `install-deps.sh` checks for. It is report-only — it won't install
 for you, since that needs root and several of these are AUR-only. It sorts what's
@@ -930,7 +928,6 @@ Things this desktop depends on that aren't tracked here:
 - [ ] `dolphinrc`, `kiorc`, `filetypesrc`, `darklyrc`, `konsolerc`
 - [ ] `gtk-3.0/bookmarks` (check for sensitive paths first)
 - [ ] `{chrome,code}-flags.conf`
-- [ ] Google Sans Flex font (manual — see Install)
 - [ ] KeePassXC: add attribute `application=mango` to the OpenRouter key entry
       (was `illogical-impulse`; Alt+I in rofi stays broken until this is done)
 - [ ] a default wallpaper, or just document `~/Wallpapers/`

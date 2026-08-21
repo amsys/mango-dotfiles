@@ -36,6 +36,6 @@ listview {
 /* The caption carries the hotkey legend and the wipe confirmation, so it has to
    be readable rather than a whisper — same call ai.rasi makes. */
 message textbox {
-    font: "Google Sans Flex 10";
+    font: "IBM Plex Sans 10";
     text-color: @muted;
 }

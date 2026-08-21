@@ -49,7 +49,7 @@ grid {
 /* Same font as the bar. The label is a hint under the icon, so it is small and
  * dimmed until the button is under the cursor. */
 button {
-	font-family: "Google Sans Flex", "Rubik", sans-serif;
+	font-family: "IBM Plex Sans", "Rubik", sans-serif;
 	font-size: 0.8rem;
 	font-weight: 500;
 	/* on_surface_variant is only a shade off on_surface in most palettes, which
