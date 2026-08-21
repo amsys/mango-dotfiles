@@ -118,6 +118,11 @@ main() {
 	# the mango colors.conf and kitty theme.conf targets.
 	matugen "${matugen_args[@]}"
 	pkill -SIGUSR2 waybar 2>/dev/null || true
+	# darkmode.rs has no watcher of its own (IRONBAR.md T6b decision D3 — a
+	# gsettings monitor child measured ~22 ctxt-switches/min idle, worse than
+	# every other watcher this daemon runs); this poke is its only refresh
+	# path, exactly like the waybar pkill right above it.
+	mango-bard refresh darkmode 2>/dev/null || true
 
 	# Qt/KDE + GTK3: matugen just wrote the palette into kdeglobals/gtk.css, but
 	# icon theme and gtk-theme are name-switched, not color-switched, so they

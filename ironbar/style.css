@@ -5,6 +5,24 @@
  * styling".
  */
 
+/* T6b defect pass: this file had NO font-family rule at all, unlike
+ * waybar/style.css (a global `* { font-family: "IBM Plex Sans", "Rubik",
+ * sans-serif; }` plus five per-module Nerd Font / Material Symbols
+ * overrides). Every icon-bearing pill — docker's whale, wifi/eth/netsec,
+ * battery, cpu/mem, volume — rendered as tofu on both monitors as a result
+ * (confirmed live via `grim` + `ironbar var get`: the underlying ironvar
+ * text was always correct, e.g. `<span ...>\ueXXX</span> 71%`, but GTK had
+ * no font covering the codepoint to fall back to). One rule covers every
+ * pill rather than waybar's five per-module ones — ironbar's `barico()`
+ * icons and plain text already share one span per pill, so there is no
+ * module-by-module distinction to preserve yet; revisit only if a future
+ * pill needs a font waybar never used.
+ */
+* {
+	font-family: "IBM Plex Sans", "JetBrainsMono Nerd Font", "Material Symbols Rounded", sans-serif;
+	font-size: 15px;
+}
+
 .pill {
 	padding: 0 8px;
 }
@@ -131,4 +149,21 @@
 }
 .memory.swapping {
 	color: #e5c07b;
+}
+
+/* T6b docker/hotspot pills — colors ported from
+ * matugen/templates/waybar/style.css:316 and :360-364. `.docker.warning`
+ * joins the same rule as cpu/memory above (same @urgent color); hotspot's
+ * pair is dim while routing directly, accent while NordVPN carries it — same
+ * "quiet unless there's something to react to" logic as netsec's colors,
+ * just inverted (VPN is the reassuring state here, not the alarming one).
+ */
+.docker.warning {
+	color: #e06c75;
+}
+.hotspot.active {
+	color: #5c6370;
+}
+.hotspot.vpn {
+	color: #61afef;
 }

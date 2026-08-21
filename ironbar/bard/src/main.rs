@@ -7,7 +7,10 @@ mod audio;
 mod clock;
 mod control;
 mod cpu;
+mod darkmode;
+mod docker;
 mod genconfig;
+mod hotspot;
 mod ipc;
 mod mango;
 mod memory;
@@ -24,6 +27,9 @@ use audio::Audio;
 use clock::Clock;
 use control::Line;
 use cpu::Cpu;
+use darkmode::Darkmode;
+use docker::Docker;
+use hotspot::Hotspot;
 use ipc::IronbarIpc;
 use mango::Mango;
 use memory::Memory;
@@ -70,6 +76,15 @@ struct Stats {
     wheel_ticks: u64,
     cpu_polls: u64,
     mem_polls: u64,
+    /// Lines received from `docker.rs`'s `docker events` child, before
+    /// dedup — same shape as `audio_events`. hotspot.rs/darkmode.rs have no
+    /// event stream of their own (T6b decisions D2/D3 — click-poke + a
+    /// tick-gated backstop instead), so neither needs a counter here.
+    docker_events: u64,
+    /// Of those, how many were byte-identical to the previous line (D1: the
+    /// server-side `--filter` set is docker.rs's real noise gate, so this
+    /// should stay near zero).
+    docker_noop: u64,
     started: Instant,
 }
 
@@ -91,13 +106,15 @@ impl Stats {
             wheel_ticks: 0,
             cpu_polls: 0,
             mem_polls: 0,
+            docker_events: 0,
+            docker_noop: 0,
             started: Instant::now(),
         }
     }
 
     fn to_json(&self, mode: powermode::Mode) -> String {
         format!(
-            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"power_events\":{},\"wheel_ticks\":{},\"cpu_polls\":{},\"mem_polls\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
+            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"power_events\":{},\"wheel_ticks\":{},\"cpu_polls\":{},\"mem_polls\":{},\"docker_events\":{},\"docker_noop\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
             self.wakeups,
             self.var_sets,
             self.flushes,
@@ -113,6 +130,8 @@ impl Stats {
             self.wheel_ticks,
             self.cpu_polls,
             self.mem_polls,
+            self.docker_events,
+            self.docker_noop,
             self.started.elapsed().as_secs(),
             mode.as_str(),
         )
@@ -170,6 +189,9 @@ async fn run() -> Result<(), String> {
     let mut power = Power::new();
     let mut cpu = Cpu::new();
     let mut mem = Memory::new();
+    let mut docker = Docker::new();
+    let mut hotspot = Hotspot::new();
+    let mut darkmode = Darkmode::new();
     let mut vars = Vars::new();
     let mut ipc = IronbarIpc::new();
     let mut stats = Stats::new();
@@ -182,6 +204,12 @@ async fn run() -> Result<(), String> {
     let mut audio_due: Option<Instant> = None;
     // Same shape again, for power.rs's `refresh()`.
     let mut power_due: Option<Instant> = None;
+    // Same shape again, for docker.rs's `refresh()` — a `docker compose up`
+    // can start several containers in a burst, each its own event line.
+    // hotspot.rs/darkmode.rs need no `_due` var: neither has an event stream
+    // that can burst (T6b D2/D3) — their refreshes are called directly,
+    // inline, from the control socket and (hotspot only) the clock tick.
+    let mut docker_due: Option<Instant> = None;
 
     clock::refresh(&mut vars);
     if vars.has_dirty() {
@@ -223,6 +251,23 @@ async fn run() -> Result<(), String> {
         dirty_since = Some(Instant::now());
     }
 
+    // T6b: docker/hotspot/darkmode all need an explicit startup refresh —
+    // none has a snapshot companion (docker's `MonitorChild` supplies no
+    // "current state" query, same reasoning as net.rs's own priming note
+    // above; hotspot/darkmode have no event stream at all).
+    docker.refresh(&mut vars).await;
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+    hotspot.refresh(&mut vars).await;
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+    darkmode.refresh(&mut vars).await;
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| format!("sigterm handler: {e}"))?;
 
@@ -252,6 +297,16 @@ async fn run() -> Result<(), String> {
                         // pm_mode gate, it is a staleness bound, not a poll.
                         if power.should_refresh_on_tick() {
                             power_due = Some(Instant::now());
+                        }
+                        // hotspot.rs's client-count backstop (T6b D2) — gated
+                        // on `up`, so this is a no-op almost always. Called
+                        // directly (not via a `_due` debounce) since the
+                        // clock's own 1/min cadence already bounds it.
+                        if hotspot.should_refresh_on_tick() {
+                            hotspot.refresh(&mut vars).await;
+                            if vars.has_dirty() {
+                                dirty_since = Some(Instant::now());
+                            }
                         }
                         // T6a eco path: the wheel is disarmed in eco (see
                         // wheel.rs module doc), so cpu/memory ride this tick
@@ -335,6 +390,15 @@ async fn run() -> Result<(), String> {
                 power_due = Some(Instant::now());
             }
 
+            line = docker.events_mon.next_line() => {
+                stats.docker_events += 1;
+                if docker.ingest_line(&line) {
+                    docker_due = Some(Instant::now());
+                } else {
+                    stats.docker_noop += 1;
+                }
+            }
+
             line = mango.monitors.next_doc() => {
                 stats.mmsg_events += 1;
                 if mango.ingest_monitors(&line) {
@@ -416,6 +480,17 @@ async fn run() -> Result<(), String> {
                                     }
                                     "cpu" => cpu.refresh(&mut vars),
                                     "memory" | "mem" => mem.refresh(&mut vars),
+                                    "docker" => {
+                                        docker_due = Some(Instant::now());
+                                    }
+                                    // hotspot.sh's trap pokes this on every
+                                    // --status/--menu/--toggle exit
+                                    // (hotspot.sh:32) — T6b D2's only event
+                                    // source for this collector.
+                                    "hotspot" => hotspot.refresh(&mut vars).await,
+                                    // switchwall.sh pokes this next to its
+                                    // existing waybar pkill — T6b D3.
+                                    "darkmode" => darkmode.refresh(&mut vars).await,
                                     _ => {
                                         clock::refresh(&mut vars);
                                         mango.apply(&mut vars);
@@ -423,6 +498,9 @@ async fn run() -> Result<(), String> {
                                         power.refresh(&mut vars, pm_mode).await;
                                         cpu.refresh(&mut vars);
                                         mem.refresh(&mut vars);
+                                        docker.refresh(&mut vars).await;
+                                        hotspot.refresh(&mut vars).await;
+                                        darkmode.refresh(&mut vars).await;
                                     }
                                 }
                                 if vars.has_dirty() {
@@ -473,6 +551,19 @@ async fn run() -> Result<(), String> {
                     dirty_since = Some(Instant::now());
                 }
                 power_due = None;
+            }
+
+            _ = async {
+                match docker_due {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t + FLUSH_DEBOUNCE)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                docker.refresh(&mut vars).await;
+                if vars.has_dirty() {
+                    dirty_since = Some(Instant::now());
+                }
+                docker_due = None;
             }
 
             _ = async {
@@ -528,6 +619,7 @@ async fn run() -> Result<(), String> {
                 net.route_mon.kill();
                 audio.pactl_mon.kill();
                 power.udev_mon.kill();
+                docker.events_mon.kill();
                 control::unlink(&control_path);
                 return Ok(());
             }

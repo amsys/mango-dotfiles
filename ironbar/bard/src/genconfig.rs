@@ -136,6 +136,16 @@ pub fn build(monitors: &[String]) -> Value {
     // tooltip popups are T7's job.
     defaults.insert("cpu_text".into(), json!(""));
     defaults.insert("mem_text".into(), json!(""));
+    // T6b docker/hotspot/darkmode vars — see docker.rs/hotspot.rs/
+    // darkmode.rs. hotspot_show defaults "false": hidden until proven active
+    // (IRONBAR.md parity table — waybar's own pill is empty-text while down
+    // too), unlike wifi_show's "true" default above.
+    defaults.insert("docker_text".into(), json!(""));
+    defaults.insert("docker_tip".into(), json!(""));
+    defaults.insert("hotspot_show".into(), json!("false"));
+    defaults.insert("hotspot_text".into(), json!(""));
+    defaults.insert("hotspot_tip".into(), json!(""));
+    defaults.insert("dark_icon".into(), json!(""));
     for slug in &slugs {
         defaults.insert(var_tags(slug), json!("true"));
         defaults.insert(var_ov(slug), json!("false"));
@@ -158,6 +168,11 @@ pub fn build(monitors: &[String]) -> Value {
         );
     }
 
+    // T6b: darkmode joins the fallback bar's clock pill too, same as it
+    // does in `workspace_pills()` for every real monitor.
+    let mut fallback_center = clock_pill();
+    fallback_center.push(darkmode_module());
+
     json!({
         // Popups are click-driven (workspace pill right-click, window
         // left-click, volume left-click) — autohide is what makes clicking
@@ -170,7 +185,7 @@ pub fn build(monitors: &[String]) -> Value {
         // generator lists every real monitor, so that never happens today.
         "name": "bar-default",
         "start": [ window_module() ],
-        "center": clock_pill(),
+        "center": fallback_center,
         "end": end_modules("bar-default"),
         "monitors": Value::Object(monitors_map),
     })
@@ -179,13 +194,17 @@ pub fn build(monitors: &[String]) -> Value {
 /// `end` row order follows config.jsonc:271 for volume/mic before the
 /// network pills; cpu/memory (T6a) sit between network and battery, matching
 /// waybar's own `group/leftcenter` order (config.jsonc:28: cpu, memory,
-/// docker, battery, claudebar). Docker (T6b) and claudebar (T6c, deferred
-/// behind T7) still have no anchor and will slot in here when they land.
+/// docker, battery, claudebar) — docker (T6b) slots in right after them, in
+/// the same spot. Hotspot (T6b) follows battery, matching waybar's
+/// `group/indicators` order (config.jsonc:271: ..., netsec, hotspot,
+/// bluetooth, ...). Claudebar (T6c, deferred behind T7) still has no anchor.
 fn end_modules(bar_name: &str) -> Vec<Value> {
     let mut end = audio_modules(bar_name);
     end.extend(net_modules());
     end.extend(cpu_modules());
+    end.push(docker_module(bar_name));
     end.extend(power_modules(bar_name));
+    end.push(hotspot_module(bar_name));
     end
 }
 
@@ -344,6 +363,58 @@ fn power_modules(bar_name: &str) -> Vec<Value> {
     })]
 }
 
+/// Docker pill: T6b (see docker.rs). Bar-global, one Docker daemon, not one
+/// per monitor. Click layout (IRONBAR.md T6b decision D4) follows T4/T5:
+/// left opens the popup (the container list that used to live under
+/// docker-menu.sh's own summary), right keeps waybar's own left-click
+/// (config.jsonc:60, the rofi quick-actions menu) — docker-menu.sh itself is
+/// untouched, only the gesture that reaches it moves.
+fn docker_module(bar_name: &str) -> Value {
+    json!({
+        "type": "custom",
+        "name": "docker",
+        "class": "docker",
+        "bar": [ { "type": "label", "label": "#docker_text" } ],
+        "popup": [ { "type": "label", "label": "#docker_tip" } ],
+        "on_click_left": format!("ironbar bar {bar_name} toggle-popup docker"),
+        "on_click_right": "~/.config/waybar/scripts/docker-menu.sh"
+    })
+}
+
+/// Hotspot pill: T6b (see hotspot.rs). Bar-global, like `docker_module()`.
+/// Click layout (D4): left/middle keep waybar's own bindings verbatim
+/// (config.jsonc:358-359 — `--menu`/`--toggle`, both click-only shell per
+/// goal 4); right takes the free gesture for the popup, since hotspot had no
+/// popup at all before T6b.
+fn hotspot_module(bar_name: &str) -> Value {
+    json!({
+        "type": "custom",
+        "name": "hotspot",
+        "class": "hotspot",
+        "show_if": "#hotspot_show",
+        "bar": [ { "type": "label", "label": "#hotspot_text" } ],
+        "popup": [ { "type": "label", "label": "#hotspot_tip" } ],
+        "on_click_left": "~/.config/waybar/scripts/hotspot.sh --menu",
+        "on_click_middle": "~/.config/waybar/scripts/hotspot.sh --toggle",
+        "on_click_right": format!("ironbar bar {bar_name} toggle-popup hotspot")
+    })
+}
+
+/// Darkmode pill: T6b (see darkmode.rs). Bar-global. No popup (nothing to
+/// show beyond the icon itself — waybar's own tooltip was a fixed string
+/// too, config.jsonc:224); a static `tooltip` string is supported (ironbar
+/// schema: `tooltip` is `string|null`, only *dynamic* strings need
+/// `{{script}}` and aren't supported — a fixed string needs neither).
+fn darkmode_module() -> Value {
+    json!({
+        "type": "custom",
+        "name": "darkmode",
+        "bar": [ { "type": "label", "label": "#dark_icon" } ],
+        "tooltip": "Toggle dark/light",
+        "on_click_left": "~/.config/waybar/scripts/darkmode.sh --toggle"
+    })
+}
+
 /// Nine numbered pills plus one overview pill for `mon`. Each pill is a
 /// `custom` module (not a widget) because `style add-class`/`remove-class`
 /// match module names, and `popup` exists only on `custom` modules.
@@ -387,6 +458,10 @@ fn workspace_pills(mon: &str, slug: &str) -> Vec<Value> {
         "on_click_left": "mmsg dispatch toggleoverview,"
     }));
     pills.extend(clock_pill());
+    // T6b: darkmode sits with clock/date, matching waybar's own
+    // `group/rightcenter` order (config.jsonc: clock, date, colorpicker,
+    // darkmode, snip — colorpicker/snip are static-only and not ported).
+    pills.push(darkmode_module());
     pills
 }
 
@@ -534,5 +609,69 @@ mod tests {
         let memory = names.iter().position(|n| *n == "memory").unwrap();
         let battery = names.iter().position(|n| *n == "battery").unwrap();
         assert!(netsec < cpu && cpu < memory && memory < battery);
+    }
+
+    #[test]
+    fn docker_sits_between_memory_and_battery() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
+        let memory = names.iter().position(|n| *n == "memory").unwrap();
+        let docker = names.iter().position(|n| *n == "docker").unwrap();
+        let battery = names.iter().position(|n| *n == "battery").unwrap();
+        assert!(memory < docker && docker < battery);
+    }
+
+    #[test]
+    fn hotspot_sits_after_battery() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
+        let battery = names.iter().position(|n| *n == "battery").unwrap();
+        let hotspot = names.iter().position(|n| *n == "hotspot").unwrap();
+        assert!(battery < hotspot);
+    }
+
+    #[test]
+    fn docker_popup_targets_its_own_bar_name() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let docker = end.iter().find(|m| m["name"] == "docker").unwrap();
+        assert!(docker["on_click_left"]
+            .as_str()
+            .unwrap()
+            .contains("bar-eDP-1"));
+
+        let fallback = build(&[]);
+        let fb_end = fallback["end"].as_array().unwrap();
+        let fb_docker = fb_end.iter().find(|m| m["name"] == "docker").unwrap();
+        assert!(fb_docker["on_click_left"]
+            .as_str()
+            .unwrap()
+            .contains("bar-default"));
+    }
+
+    #[test]
+    fn hotspot_popup_targets_its_own_bar_name() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let hotspot = end.iter().find(|m| m["name"] == "hotspot").unwrap();
+        assert!(hotspot["on_click_right"]
+            .as_str()
+            .unwrap()
+            .contains("bar-eDP-1"));
+    }
+
+    #[test]
+    fn darkmode_appears_once_per_monitor_and_on_the_fallback_bar() {
+        let cfg = build(&["eDP-1".to_string(), "DP-1".to_string()]);
+        for mon in ["eDP-1", "DP-1"] {
+            let center = cfg["monitors"][mon]["center"].as_array().unwrap();
+            let count = center.iter().filter(|m| m["name"] == "darkmode").count();
+            assert_eq!(count, 1, "{mon} must have exactly one darkmode module");
+        }
+        let fallback = build(&[]);
+        let fb_center = fallback["center"].as_array().unwrap();
+        assert!(fb_center.iter().any(|m| m["name"] == "darkmode"));
     }
 }

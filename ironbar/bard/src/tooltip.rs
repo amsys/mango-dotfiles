@@ -25,7 +25,10 @@ const F_MONO: &str = "JetBrainsMono Nerd Font";
 pub const C_TITLE: &str = "#61afef";
 const C_RULE: &str = "#5c6370";
 const C_LABEL: &str = "#abb2bf";
-const C_DIM: &str = "#5c6370";
+/// pub: docker.rs needs this directly for its per-row image-name span
+/// (docker.sh:148 uses `$C_DIM` from tooltip.sh the same way), not just
+/// through a helper defined in this module.
+pub const C_DIM: &str = "#5c6370";
 pub const C_GOOD: &str = "#98c379";
 pub const C_WARN: &str = "#e5c07b";
 pub const C_BAD: &str = "#e06c75";
@@ -108,6 +111,26 @@ pub fn row(body: &str) -> String {
 
 pub fn dim(text: &str) -> String {
     format!("{NBSP}{NBSP}{NBSP}<span foreground=\"{C_DIM}\">{text}</span>{NBSP}{NBSP}{NBSP}")
+}
+
+/// docker.sh:50-57 `dot()`: a colour-graded status dot for `class` in
+/// `{"good","warn","bad"}`; anything else (docker.sh's 4th case) gets the
+/// hollow ring instead of the filled dot.
+pub fn dot(class: &str) -> String {
+    let (glyph, colour) = match class {
+        "good" => ('●', C_GOOD),
+        "warn" => ('●', C_WARN),
+        "bad" => ('●', C_BAD),
+        _ => ('○', C_DIM),
+    };
+    format!("<span foreground=\"{colour}\">{glyph}</span>")
+}
+
+/// docker.sh:66 `projhdr()`: an unlabeled compose-project header line,
+/// deliberately icon-less — every icon on this bar already means something
+/// specific, a project name doesn't need one to read as a header.
+pub fn projhdr(name: &str) -> String {
+    format!("\n<span foreground=\"{C_LABEL}\">  {name}</span>\n")
 }
 
 /// tooltip.sh:36 — wraps the columnar part of a row (a meter and its
@@ -367,6 +390,28 @@ mod tests {
         let bi = s.find('▅').unwrap();
         let ci = s.find('█').unwrap();
         assert!(ai < bi && bi < ci, "glyphs out of order: {s}");
+    }
+
+    // ------------------------------------------- T6b additions, ported from
+    // docker.sh:50-57, 66.
+
+    #[test]
+    fn dot_grades_good_warn_bad_and_falls_back_to_hollow() {
+        assert!(dot("good").contains('●'));
+        assert!(dot("good").contains(C_GOOD));
+        assert!(dot("warn").contains(C_WARN));
+        assert!(dot("bad").contains(C_BAD));
+        assert!(
+            dot("dim").contains('○'),
+            "unrecognized class must be hollow"
+        );
+    }
+
+    #[test]
+    fn projhdr_has_no_icon_unlike_sect() {
+        let h = projhdr("myproject");
+        assert!(h.contains("myproject"));
+        assert!(h.starts_with('\n') && h.ends_with('\n'));
     }
 
     #[test]
