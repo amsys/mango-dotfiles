@@ -10,6 +10,7 @@ mod genconfig;
 mod ipc;
 mod mango;
 mod net;
+mod power;
 mod powermode;
 mod routes;
 mod sys;
@@ -22,6 +23,7 @@ use control::Line;
 use ipc::IronbarIpc;
 use mango::Mango;
 use net::Net;
+use power::Power;
 use powermode::PowermodeWatch;
 use std::time::{Duration, Instant};
 use tokio::io::unix::AsyncFd;
@@ -53,6 +55,11 @@ struct Stats {
     /// Of those, how many were either byte-identical to the previous line
     /// or classified as client noise (`event_matches()` — volume.sh:73).
     audio_noop: u64,
+    /// Lines received from `power.rs`'s `udevadm monitor` child. No dedup
+    /// counter: `udevadm monitor` timestamps every line, so byte-dedup can
+    /// never fire — every line is regrade-worthy (mirrors ac-watch.sh
+    /// reading "event count, not content").
+    power_events: u64,
     started: Instant,
 }
 
@@ -70,13 +77,14 @@ impl Stats {
             style_sets: 0,
             audio_events: 0,
             audio_noop: 0,
+            power_events: 0,
             started: Instant::now(),
         }
     }
 
     fn to_json(&self, mode: powermode::Mode) -> String {
         format!(
-            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
+            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"power_events\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
             self.wakeups,
             self.var_sets,
             self.flushes,
@@ -88,6 +96,7 @@ impl Stats {
             self.style_sets,
             self.audio_events,
             self.audio_noop,
+            self.power_events,
             self.started.elapsed().as_secs(),
             mode.as_str(),
         )
@@ -136,6 +145,7 @@ async fn run() -> Result<(), String> {
     let mut mango = Mango::new();
     let mut net = Net::new();
     let mut audio = Audio::new();
+    let mut power = Power::new();
     let mut vars = Vars::new();
     let mut ipc = IronbarIpc::new();
     let mut stats = Stats::new();
@@ -146,6 +156,8 @@ async fn run() -> Result<(), String> {
     let mut regrade_due: Option<Instant> = None;
     // Same shape as `regrade_due`, for audio.rs's `refresh()` (also forks).
     let mut audio_due: Option<Instant> = None;
+    // Same shape again, for power.rs's `refresh()`.
+    let mut power_due: Option<Instant> = None;
 
     clock::refresh(&mut vars);
     if vars.has_dirty() {
@@ -164,6 +176,16 @@ async fn run() -> Result<(), String> {
     if vars.has_dirty() {
         dirty_since = Some(Instant::now());
     }
+
+    // Same reason again, plus priming power.rs's own AC-edge detector so the
+    // first real refresh below doesn't read as a plug/unplug edge — see
+    // Power::prime's doc comment.
+    power.prime();
+    power.refresh(&mut vars, pm_mode).await;
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+    power.trigger_startup_mode();
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| format!("sigterm handler: {e}"))?;
@@ -189,6 +211,11 @@ async fn run() -> Result<(), String> {
                             if vars.has_dirty() {
                                 dirty_since = Some(Instant::now());
                             }
+                        }
+                        // power.rs's 5-minute discharging backstop — no
+                        // pm_mode gate, it is a staleness bound, not a poll.
+                        if power.should_refresh_on_tick() {
+                            power_due = Some(Instant::now());
                         }
                     }
                     Err(e) => eprintln!("mango-bard: clock fd error: {e}"),
@@ -224,6 +251,15 @@ async fn run() -> Result<(), String> {
                 } else {
                     stats.audio_noop += 1;
                 }
+            }
+
+            _line = power.udev_mon.next_line() => {
+                // No dedup gate — see Stats::power_events doc comment: every
+                // udevadm monitor line (including its own startup banner) is
+                // regrade-worthy, matching ac-watch.sh's "event count, not
+                // content" edge detector.
+                stats.power_events += 1;
+                power_due = Some(Instant::now());
             }
 
             line = mango.monitors.next_doc() => {
@@ -264,6 +300,12 @@ async fn run() -> Result<(), String> {
                             if vars.has_dirty() {
                                 dirty_since = Some(Instant::now());
                             }
+                            // power.rs's eco leaf and Mode row are drawn
+                            // from pm_mode — repaint on the flip. Safe from
+                            // a feedback loop: refresh() only fires the AC
+                            // edge action when `online` itself changed, and
+                            // a mode flip alone never changes that.
+                            power_due = Some(Instant::now());
                         }
                     }
                     Err(e) => eprintln!("mango-bard: powermode fd error: {e}"),
@@ -288,10 +330,14 @@ async fn run() -> Result<(), String> {
                                     "audio" | "volume" | "mic" => {
                                         audio_due = Some(Instant::now());
                                     }
+                                    "power" | "battery" | "bat" | "ac" => {
+                                        power_due = Some(Instant::now());
+                                    }
                                     _ => {
                                         clock::refresh(&mut vars);
                                         mango.apply(&mut vars);
                                         audio.refresh(&mut vars).await;
+                                        power.refresh(&mut vars, pm_mode).await;
                                     }
                                 }
                                 if vars.has_dirty() {
@@ -329,6 +375,19 @@ async fn run() -> Result<(), String> {
                     dirty_since = Some(Instant::now());
                 }
                 audio_due = None;
+            }
+
+            _ = async {
+                match power_due {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t + FLUSH_DEBOUNCE)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                power.refresh(&mut vars, pm_mode).await;
+                if vars.has_dirty() {
+                    dirty_since = Some(Instant::now());
+                }
+                power_due = None;
             }
 
             _ = async {
@@ -383,6 +442,7 @@ async fn run() -> Result<(), String> {
                 net.nmcli_mon.kill();
                 net.route_mon.kill();
                 audio.pactl_mon.kill();
+                power.udev_mon.kill();
                 control::unlink(&control_path);
                 return Ok(());
             }

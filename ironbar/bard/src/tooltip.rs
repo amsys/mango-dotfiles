@@ -1,9 +1,10 @@
 //! Tooltip/popup markup vocabulary, ported from
 //! src/waybar/scripts/tooltip.sh. T2 took escaping, row inset and the
 //! per-tag window list (workspace.sh's `winrows()`); T4 (audio.rs) adds the
-//! meter/section/grade vocabulary its volume popup needs. Full parity with
-//! tooltip.sh (per-process tables, claudebar's private copy) is still T7's
-//! job — see IRONBAR.md "Tooltips and popups".
+//! meter/section/grade vocabulary its volume popup needs; T5 (power.rs) adds
+//! the compact key/value row and duration formatters its battery popup
+//! needs. Full parity with tooltip.sh (per-process tables, claudebar's
+//! private copy) is still T7's job — see IRONBAR.md "Tooltips and popups".
 
 use crate::mango::Win;
 
@@ -11,6 +12,11 @@ use crate::mango::Win;
 /// plain spaces, which would silently undo a right-margin fix on whichever
 /// row happens to be last. NBSP survives that and renders identically.
 const NBSP: char = '\u{a0}';
+
+/// tooltip.sh:31 — Google Sans Flex's proportional figures drift a column
+/// padded with `%3s`/`%3d` by a few pixels per row; anything that has to
+/// line up column-for-column names this family explicitly instead.
+const F_MONO: &str = "JetBrainsMono Nerd Font";
 
 // -------------------------------------------------------------- meters
 
@@ -102,6 +108,66 @@ pub fn row(body: &str) -> String {
 
 pub fn dim(text: &str) -> String {
     format!("{NBSP}{NBSP}{NBSP}<span foreground=\"{C_DIM}\">{text}</span>{NBSP}{NBSP}{NBSP}")
+}
+
+/// tooltip.sh:36 — wraps the columnar part of a row (a meter and its
+/// number) in the mono family, leaving trailing prose in the proportional
+/// face. No trailing newline — always used inline within a `kv`/`kvsub` row.
+pub fn mono(text: &str) -> String {
+    format!("<span font_family=\"{F_MONO}\">{text}</span>")
+}
+
+/// tooltip.sh:99 — compact key/value row: an 8-cell label column in
+/// [`F_MONO`] (a fixed-width label needs a fixed-width font, same reasoning
+/// as [`mono`]), then the value as-is. Self-terminates with `\n`, unlike
+/// [`row`]/[`dim`] — battery.rs's tooltip is a straight-line sequence of
+/// these with no per-caller join needed.
+pub fn kv(label: &str, value: &str) -> String {
+    format!("{NBSP}{NBSP}{NBSP}<span font_family=\"{F_MONO}\">{label:<8}</span>{value}{NBSP}{NBSP}{NBSP}\n")
+}
+
+/// tooltip.sh:100 — a second, label-less row that lines up under [`kv`]'s
+/// value column: an 8-space run in the same [`F_MONO`] span, so it measures
+/// identically to an 8-character label instead of drifting in the
+/// proportional face.
+pub fn kvsub(value: &str) -> String {
+    format!(
+        "{NBSP}{NBSP}{NBSP}<span font_family=\"{F_MONO}\">{blank:<8}</span><span foreground=\"{C_DIM}\">{value}</span>{NBSP}{NBSP}{NBSP}\n",
+        blank = ""
+    )
+}
+
+/// tooltip.sh:174-179 — seconds to "2h 14m" / "14m" / "48s".
+pub fn hdur(secs: i64) -> String {
+    if secs >= 3600 {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+const HEATBAR_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// tooltip.sh:134-145 — one cell per value, each graded and coloured by its
+/// own reading rather than the series' average, so a single spike or trough
+/// is never hidden by a flat overall colour. `gap`-before-index (used
+/// upstream to part P-cores from E-cores in a per-core row) has no caller
+/// yet in this port — dropped rather than threaded through unused.
+/// ponytail: add a `gap: usize` parameter back if a per-core heatbar (T6's
+/// cpu collector) needs it.
+pub fn heatbar(pcts: &[i64], warn_at: i64, bad_at: i64) -> String {
+    let mut out = String::new();
+    for &p in pcts {
+        let k = ((p as f64 / 12.5) as i64 + 1).clamp(1, 8) as usize;
+        let colour = grade(p, warn_at, bad_at);
+        out.push_str(&format!(
+            "<span foreground=\"{colour}\">{}</span>",
+            HEATBAR_GLYPHS[k - 1]
+        ));
+    }
+    out
 }
 
 /// One markup row per window: mark + appid (monospace, padded to the widest
@@ -259,5 +325,57 @@ mod tests {
     fn sect_right_margin_is_two_nbsp() {
         let ind2: String = std::iter::repeat_n(NBSP, 2).collect();
         assert!(sect("i", "l").trim_end_matches('\n').ends_with(&ind2));
+    }
+
+    // ------------------------------------------- T5 additions, ported from
+    // tooltip.sh's `tooltip-selftest` (tooltip.sh:250-251, 253).
+
+    #[test]
+    fn kv_label_and_kvsub_blank_column_measure_identically() {
+        let ind3: String = std::iter::repeat_n(NBSP, 3).collect();
+        assert_eq!(
+            kv("Mode", "X"),
+            format!("{ind3}<span font_family=\"{F_MONO}\">Mode    </span>X{ind3}\n")
+        );
+        assert_eq!(
+            kvsub("Y"),
+            format!(
+                "{ind3}<span font_family=\"{F_MONO}\">        </span><span foreground=\"{C_DIM}\">Y</span>{ind3}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn mono_wraps_in_the_mono_font_with_no_trailing_newline() {
+        assert_eq!(
+            mono("x"),
+            format!("<span font_family=\"{F_MONO}\">x</span>")
+        );
+    }
+
+    #[test]
+    fn hdur_formats_hours_minutes_and_seconds() {
+        assert_eq!(hdur(8040), "2h 14m");
+        assert_eq!(hdur(90), "1m 30s");
+        assert_eq!(hdur(9), "9s");
+    }
+
+    #[test]
+    fn heatbar_glyph_ramp_from_low_to_high() {
+        let s = heatbar(&[0, 50, 100], 70, 90);
+        let ai = s.find('▁').unwrap();
+        let bi = s.find('▅').unwrap();
+        let ci = s.find('█').unwrap();
+        assert!(ai < bi && bi < ci, "glyphs out of order: {s}");
+    }
+
+    #[test]
+    fn heatbar_colours_each_cell_by_its_own_value() {
+        assert_eq!(
+            heatbar(&[0, 75, 95], 70, 90),
+            format!(
+                "<span foreground=\"{C_GOOD}\">▁</span><span foreground=\"{C_WARN}\">▇</span><span foreground=\"{C_BAD}\">█</span>"
+            )
+        );
     }
 }

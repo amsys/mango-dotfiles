@@ -107,3 +107,13 @@
 	color: #e06c75;
 	animation: none;
 }
+
+/* T5 battery pill — colors ported from
+ * matugen/templates/waybar/style.css:316-320. Only `.critical` is styled;
+ * charging/full/discharging/absent are deliberately unstyled, matching
+ * waybar's own battery.sh parity (no CSS rule existed for those classes
+ * either).
+ */
+.battery.critical {
+	color: #e06c75;
+}

@@ -129,6 +129,9 @@ pub fn build(monitors: &[String]) -> Value {
     defaults.insert("vol_text".into(), json!(""));
     defaults.insert("vol_tip".into(), json!(""));
     defaults.insert("mic_text".into(), json!(""));
+    // T5 power vars — see power.rs.
+    defaults.insert("bat_text".into(), json!(""));
+    defaults.insert("bat_tip".into(), json!(""));
     for slug in &slugs {
         defaults.insert(var_tags(slug), json!("true"));
         defaults.insert(var_ov(slug), json!("false"));
@@ -169,11 +172,15 @@ pub fn build(monitors: &[String]) -> Value {
     })
 }
 
-/// `end` row order follows config.jsonc:271: volume/mic pills before the
-/// network pills.
+/// `end` row order follows config.jsonc:271 for volume/mic before the
+/// network pills; the battery pill is appended last, provisionally — T6's
+/// cpu/memory/docker/claudebar collectors sit between network and battery
+/// in waybar's own `group/leftcenter` order (config.jsonc:28), and none of
+/// them exist yet to anchor it against.
 fn end_modules(bar_name: &str) -> Vec<Value> {
     let mut end = audio_modules(bar_name);
     end.extend(net_modules());
+    end.extend(power_modules(bar_name));
     end
 }
 
@@ -286,6 +293,25 @@ fn net_modules() -> Vec<Value> {
             "on_click_right": "~/.config/waybar/scripts/net.sh --sec-edit"
         }),
     ]
+}
+
+/// Battery pill: T5 (see power.rs). Bar-global, like `net_modules()` — one
+/// battery, not one per monitor. Click layout follows T4's rule (no hover
+/// tooltip exists in ironbar, so rich detail needs a click): left opens the
+/// popup, replacing waybar's own plain left-click; middle takes over
+/// waybar's old left (`powermode.sh toggle`, config.jsonc:249); right keeps
+/// waybar's own right-click powertop report unchanged.
+fn power_modules(bar_name: &str) -> Vec<Value> {
+    vec![json!({
+        "type": "custom",
+        "name": "battery",
+        "class": "battery",
+        "bar": [ { "type": "label", "label": "#bat_text" } ],
+        "popup": [ { "type": "label", "label": "#bat_tip" } ],
+        "on_click_left": format!("ironbar bar {bar_name} toggle-popup battery"),
+        "on_click_middle": "~/.config/mango/scripts/powermode.sh toggle",
+        "on_click_right": "kitty --class mango-monitor -e sudo -n powertop"
+    })]
 }
 
 /// Nine numbered pills plus one overview pill for `mon`. Each pill is a
@@ -426,6 +452,25 @@ mod tests {
         let fb_end = fallback["end"].as_array().unwrap();
         let fb_volume = fb_end.iter().find(|m| m["name"] == "volume").unwrap();
         assert!(fb_volume["on_click_left"]
+            .as_str()
+            .unwrap()
+            .contains("bar-default"));
+    }
+
+    #[test]
+    fn battery_popup_targets_its_own_bar_name() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let battery = end.iter().find(|m| m["name"] == "battery").unwrap();
+        assert!(battery["on_click_left"]
+            .as_str()
+            .unwrap()
+            .contains("bar-eDP-1"));
+
+        let fallback = build(&[]);
+        let fb_end = fallback["end"].as_array().unwrap();
+        let fb_battery = fb_end.iter().find(|m| m["name"] == "battery").unwrap();
+        assert!(fb_battery["on_click_left"]
             .as_str()
             .unwrap()
             .contains("bar-default"));
