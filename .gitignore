@@ -41,3 +41,6 @@ system/sddm/theme/Colors.qml
 __pycache__/
 *.pyc
 *.bak.*
+
+# Cargo build output for the mango-bard daemon (ironbar/IRONBAR.md T1+).
+ironbar/bard/target/
