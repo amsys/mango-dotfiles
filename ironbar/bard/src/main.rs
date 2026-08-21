@@ -6,9 +6,11 @@
 mod audio;
 mod clock;
 mod control;
+mod cpu;
 mod genconfig;
 mod ipc;
 mod mango;
+mod memory;
 mod net;
 mod power;
 mod powermode;
@@ -16,18 +18,22 @@ mod routes;
 mod sys;
 mod tooltip;
 mod vars;
+mod wheel;
 
 use audio::Audio;
 use clock::Clock;
 use control::Line;
+use cpu::Cpu;
 use ipc::IronbarIpc;
 use mango::Mango;
+use memory::Memory;
 use net::Net;
 use power::Power;
 use powermode::PowermodeWatch;
 use std::time::{Duration, Instant};
 use tokio::io::unix::AsyncFd;
 use vars::Vars;
+use wheel::Wheel;
 
 const FLUSH_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -60,6 +66,10 @@ struct Stats {
     /// never fire — every line is regrade-worthy (mirrors ac-watch.sh
     /// reading "event count, not content").
     power_events: u64,
+    /// Wheel fd wakeups (full/battery only — disarmed in eco, see wheel.rs).
+    wheel_ticks: u64,
+    cpu_polls: u64,
+    mem_polls: u64,
     started: Instant,
 }
 
@@ -78,13 +88,16 @@ impl Stats {
             audio_events: 0,
             audio_noop: 0,
             power_events: 0,
+            wheel_ticks: 0,
+            cpu_polls: 0,
+            mem_polls: 0,
             started: Instant::now(),
         }
     }
 
     fn to_json(&self, mode: powermode::Mode) -> String {
         format!(
-            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"power_events\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
+            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"power_events\":{},\"wheel_ticks\":{},\"cpu_polls\":{},\"mem_polls\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
             self.wakeups,
             self.var_sets,
             self.flushes,
@@ -97,6 +110,9 @@ impl Stats {
             self.audio_events,
             self.audio_noop,
             self.power_events,
+            self.wheel_ticks,
+            self.cpu_polls,
+            self.mem_polls,
             self.started.elapsed().as_secs(),
             mode.as_str(),
         )
@@ -142,10 +158,18 @@ async fn run() -> Result<(), String> {
     let control_listener = control::listen().map_err(|e| format!("control socket: {e}"))?;
     let control_path = control::socket_path();
 
+    let mut wheel = Wheel::new().map_err(|e| format!("wheel timerfd: {e}"))?;
+    wheel
+        .set_mode(pm_mode)
+        .map_err(|e| format!("wheel arm: {e}"))?;
+    let mut wheel_fd = AsyncFd::new(wheel).map_err(|e| format!("wheel AsyncFd: {e}"))?;
+
     let mut mango = Mango::new();
     let mut net = Net::new();
     let mut audio = Audio::new();
     let mut power = Power::new();
+    let mut cpu = Cpu::new();
+    let mut mem = Memory::new();
     let mut vars = Vars::new();
     let mut ipc = IronbarIpc::new();
     let mut stats = Stats::new();
@@ -187,6 +211,18 @@ async fn run() -> Result<(), String> {
     }
     power.trigger_startup_mode();
 
+    // T6a: cpu needs a short second sample to avoid a blank first reading
+    // (cpu.sh:344-350's own fix for the same problem); memory is
+    // instantaneous, so a plain refresh is already correct.
+    cpu.prime(&mut vars).await;
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+    mem.refresh(&mut vars);
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| format!("sigterm handler: {e}"))?;
 
@@ -217,8 +253,45 @@ async fn run() -> Result<(), String> {
                         if power.should_refresh_on_tick() {
                             power_due = Some(Instant::now());
                         }
+                        // T6a eco path: the wheel is disarmed in eco (see
+                        // wheel.rs module doc), so cpu/memory ride this tick
+                        // instead — mirrors net.rs's RSSI gate above.
+                        let due = wheel_fd.get_ref().on_minute(pm_mode);
+                        if due.cpu {
+                            cpu.refresh(&mut vars);
+                            stats.cpu_polls += 1;
+                        }
+                        if due.mem {
+                            mem.refresh(&mut vars);
+                            stats.mem_polls += 1;
+                        }
+                        if (due.cpu || due.mem) && vars.has_dirty() {
+                            dirty_since = Some(Instant::now());
+                        }
                     }
                     Err(e) => eprintln!("mango-bard: clock fd error: {e}"),
+                }
+            }
+
+            r = wheel_fd.readable_mut() => {
+                match r {
+                    Ok(mut guard) => {
+                        stats.wheel_ticks += 1;
+                        let due = guard.get_inner_mut().on_tick();
+                        guard.clear_ready();
+                        if due.cpu {
+                            cpu.refresh(&mut vars);
+                            stats.cpu_polls += 1;
+                        }
+                        if due.mem {
+                            mem.refresh(&mut vars);
+                            stats.mem_polls += 1;
+                        }
+                        if vars.has_dirty() {
+                            dirty_since = Some(Instant::now());
+                        }
+                    }
+                    Err(e) => eprintln!("mango-bard: wheel fd error: {e}"),
                 }
             }
 
@@ -306,6 +379,14 @@ async fn run() -> Result<(), String> {
                             // edge action when `online` itself changed, and
                             // a mode flip alone never changes that.
                             power_due = Some(Instant::now());
+                            // T6a: re-program the wheel for the new mode
+                            // (period table in wheel.rs); disarms outright
+                            // in eco, which is what keeps goal 2 intact.
+                            match wheel_fd.get_mut().set_mode(pm_mode) {
+                                Ok(true) => eprintln!("mango-bard: wheel re-programmed for {}", new_mode.as_str()),
+                                Ok(false) => {}
+                                Err(e) => eprintln!("mango-bard: wheel re-arm error: {e}"),
+                            }
                         }
                     }
                     Err(e) => eprintln!("mango-bard: powermode fd error: {e}"),
@@ -333,11 +414,15 @@ async fn run() -> Result<(), String> {
                                     "power" | "battery" | "bat" | "ac" => {
                                         power_due = Some(Instant::now());
                                     }
+                                    "cpu" => cpu.refresh(&mut vars),
+                                    "memory" | "mem" => mem.refresh(&mut vars),
                                     _ => {
                                         clock::refresh(&mut vars);
                                         mango.apply(&mut vars);
                                         audio.refresh(&mut vars).await;
                                         power.refresh(&mut vars, pm_mode).await;
+                                        cpu.refresh(&mut vars);
+                                        mem.refresh(&mut vars);
                                     }
                                 }
                                 if vars.has_dirty() {

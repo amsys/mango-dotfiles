@@ -117,3 +117,18 @@
 .battery.critical {
 	color: #e06c75;
 }
+
+/* T6a cpu/memory pills — colors ported from
+ * matugen/templates/waybar/style.css:313-325 (`@urgent` -> #e06c75,
+ * `@warn` -> #e5c07b, same One Dark hex already hardcoded above; full
+ * matugen theming is still T8's job). `warning` outranks `swapping` on
+ * memory — see memory.rs's `class_for` doc — so both selectors below can
+ * match the same pill without conflicting, same as the netsec eco pair.
+ */
+.cpu.warning,
+.memory.warning {
+	color: #e06c75;
+}
+.memory.swapping {
+	color: #e5c07b;
+}

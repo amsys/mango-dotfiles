@@ -7,8 +7,10 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::time::Duration;
 
 const CLOCK_REALTIME: libc::clockid_t = 0;
+const CLOCK_MONOTONIC: libc::clockid_t = 1;
 const TFD_NONBLOCK: libc::c_int = libc::O_NONBLOCK;
 const TFD_CLOEXEC: libc::c_int = libc::O_CLOEXEC;
 const TFD_TIMER_ABSTIME: libc::c_int = 1 << 0;
@@ -166,6 +168,73 @@ impl FileWatch {
             self.rewatch();
         }
         any
+    }
+}
+
+/// A `timerfd` on `CLOCK_MONOTONIC`, relative and disarmable — the poll
+/// wheel's clock (T6a: cpu.rs/memory.rs, see wheel.rs). Unlike `ClockTimer`
+/// (absolute, `CLOCK_REALTIME`, zero slack by kernel design) this is a plain
+/// interval timer, so `set_timer_slack` below actually coalesces its wakeups
+/// with the rest of the system's — this is the timer that doc comment's
+/// "matters once a later stage adds relative-interval polls" was about.
+/// Arming with a zero period disarms the timer without closing the fd
+/// (per `timerfd_settime(2)`), which is how eco mode costs nothing.
+pub struct PollTimer {
+    fd: OwnedFd,
+}
+
+impl AsRawFd for PollTimer {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl PollTimer {
+    pub fn new() -> io::Result<Self> {
+        // SAFETY: timerfd_create with valid, locally-defined flag constants;
+        // no pointers involved. Return value is checked before use.
+        let raw =
+            check(unsafe { libc::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC) })?;
+        // SAFETY: `raw` is a just-created, valid, owned fd from timerfd_create above.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        Ok(Self { fd })
+    }
+
+    /// Arms a repeating relative timer at `period`. `period` of zero disarms
+    /// the timer (per `timerfd_settime(2)`) without closing the fd.
+    pub fn arm(&self, period: Duration) -> io::Result<()> {
+        let ts = libc::timespec {
+            tv_sec: period.as_secs() as libc::time_t,
+            tv_nsec: libc::c_long::from(period.subsec_nanos()),
+        };
+        let spec = libc::itimerspec {
+            it_interval: ts,
+            it_value: ts,
+        };
+        // SAFETY: `self.fd` is a valid timerfd for this process; `spec` is a
+        // fully-initialized itimerspec (relative, no TFD_TIMER_ABSTIME);
+        // old_value out-param is null (we don't need the previous setting).
+        check(unsafe {
+            libc::timerfd_settime(self.fd.as_raw_fd(), 0, &spec, std::ptr::null_mut())
+        })?;
+        Ok(())
+    }
+
+    /// Drains the expiration counter. `WouldBlock` (nothing pending — e.g.
+    /// the timer is disarmed) reads as 0 ticks, not an error.
+    pub fn drain(&self) -> io::Result<u64> {
+        let mut buf = [0u8; 8];
+        // SAFETY: `buf` is an 8-byte buffer matching timerfd's fixed read
+        // size (a u64 expiration counter); `self.fd` is a valid timerfd.
+        let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr() as *mut _, 8) };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::WouldBlock {
+                return Ok(0);
+            }
+            return Err(e);
+        }
+        Ok(u64::from_ne_bytes(buf))
     }
 }
 

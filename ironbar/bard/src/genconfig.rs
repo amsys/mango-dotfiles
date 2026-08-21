@@ -132,6 +132,10 @@ pub fn build(monitors: &[String]) -> Value {
     // T5 power vars — see power.rs.
     defaults.insert("bat_text".into(), json!(""));
     defaults.insert("bat_tip".into(), json!(""));
+    // T6a cpu/memory vars — see cpu.rs/memory.rs. No `_tip` entries yet: the
+    // tooltip popups are T7's job.
+    defaults.insert("cpu_text".into(), json!(""));
+    defaults.insert("mem_text".into(), json!(""));
     for slug in &slugs {
         defaults.insert(var_tags(slug), json!("true"));
         defaults.insert(var_ov(slug), json!("false"));
@@ -173,13 +177,14 @@ pub fn build(monitors: &[String]) -> Value {
 }
 
 /// `end` row order follows config.jsonc:271 for volume/mic before the
-/// network pills; the battery pill is appended last, provisionally — T6's
-/// cpu/memory/docker/claudebar collectors sit between network and battery
-/// in waybar's own `group/leftcenter` order (config.jsonc:28), and none of
-/// them exist yet to anchor it against.
+/// network pills; cpu/memory (T6a) sit between network and battery, matching
+/// waybar's own `group/leftcenter` order (config.jsonc:28: cpu, memory,
+/// docker, battery, claudebar). Docker (T6b) and claudebar (T6c, deferred
+/// behind T7) still have no anchor and will slot in here when they land.
 fn end_modules(bar_name: &str) -> Vec<Value> {
     let mut end = audio_modules(bar_name);
     end.extend(net_modules());
+    end.extend(cpu_modules());
     end.extend(power_modules(bar_name));
     end
 }
@@ -291,6 +296,31 @@ fn net_modules() -> Vec<Value> {
             "bar": [ { "type": "label", "label": "#sec_text" } ],
             "on_click_left": "~/.config/waybar/scripts/net.sh --sec-click",
             "on_click_right": "~/.config/waybar/scripts/net.sh --sec-edit"
+        }),
+    ]
+}
+
+/// CPU/memory pills: T6a (see cpu.rs/memory.rs). Bar-global, like
+/// `net_modules()` — one reading, not one per monitor. No `popup` yet (no
+/// `_tip` var exists — T7 adds the tooltip content and the click migrates to
+/// `toggle-popup`, same as `power_modules`/`audio_modules` already did).
+/// `on_click_left` keeps waybar's own click (config.jsonc:35,42): opening
+/// btop, since there is no popup to open yet.
+fn cpu_modules() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "custom",
+            "name": "cpu",
+            "class": "cpu",
+            "bar": [ { "type": "label", "label": "#cpu_text" } ],
+            "on_click_left": "kitty --class mango-monitor -e btop"
+        }),
+        json!({
+            "type": "custom",
+            "name": "memory",
+            "class": "memory",
+            "bar": [ { "type": "label", "label": "#mem_text" } ],
+            "on_click_left": "kitty --class mango-monitor -e btop"
         }),
     ]
 }
@@ -492,5 +522,17 @@ mod tests {
         let cfg = build(&[]);
         assert!(cfg["monitors"].as_object().unwrap().is_empty());
         assert!(cfg["center"].as_array().is_some());
+    }
+
+    #[test]
+    fn cpu_and_memory_sit_between_net_and_battery() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
+        let netsec = names.iter().position(|n| *n == "netsec").unwrap();
+        let cpu = names.iter().position(|n| *n == "cpu").unwrap();
+        let memory = names.iter().position(|n| *n == "memory").unwrap();
+        let battery = names.iter().position(|n| *n == "battery").unwrap();
+        assert!(netsec < cpu && cpu < memory && memory < battery);
     }
 }
