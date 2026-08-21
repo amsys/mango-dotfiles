@@ -40,9 +40,11 @@ key-hl-color={{colors.primary.default.hex_stripped}}
 bs-hl-color={{colors.error.default.hex_stripped}}
 separator-color={{colors.outline_variant.default.hex_stripped}}
 
-# JetBrainsMono to match the greeter exactly. The greeter has no choice (the
-# `sddm` user cannot read ~/.local/share/fonts, where Google Sans Flex lives);
-# here it is deliberate, so the two screens look like one.
+# JetBrainsMono to match the greeter exactly. The greeter has no choice: its
+# Main.qml renders five Nerd Font PUA glyphs (power, refresh, moon, dropdown,
+# arrow) through the same font.family as its text, with no fallback list, so
+# it is pinned to a Nerd Font regardless of which UI font the rest of the
+# desktop uses. Matching here is deliberate, so the two screens look like one.
 font=JetBrainsMono Nerd Font
 indicator-radius=100
 indicator-thickness=6
