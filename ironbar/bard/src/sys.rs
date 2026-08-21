@@ -21,7 +21,11 @@ const IN_NONBLOCK: libc::c_int = libc::O_NONBLOCK;
 const IN_CLOEXEC: libc::c_int = libc::O_CLOEXEC;
 
 fn check(ret: libc::c_int) -> io::Result<libc::c_int> {
-    if ret < 0 { Err(io::Error::last_os_error()) } else { Ok(ret) }
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret)
+    }
 }
 
 /// A `timerfd` armed absolutely on `CLOCK_REALTIME` with
@@ -42,7 +46,8 @@ impl ClockTimer {
     pub fn new() -> io::Result<Self> {
         // SAFETY: timerfd_create with valid, locally-defined flag constants;
         // no pointers involved. Return value is checked before use.
-        let raw = check(unsafe { libc::timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC) })?;
+        let raw =
+            check(unsafe { libc::timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC) })?;
         // SAFETY: `raw` is a just-created, valid, owned fd from timerfd_create above.
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
         Ok(Self { fd })
@@ -58,14 +63,25 @@ impl ClockTimer {
         };
         let next = (now / 60 + 1) * 60;
         let spec = libc::itimerspec {
-            it_interval: libc::timespec { tv_sec: 60, tv_nsec: 0 },
-            it_value: libc::timespec { tv_sec: next, tv_nsec: 0 },
+            it_interval: libc::timespec {
+                tv_sec: 60,
+                tv_nsec: 0,
+            },
+            it_value: libc::timespec {
+                tv_sec: next,
+                tv_nsec: 0,
+            },
         };
         // SAFETY: `self.fd` is a valid timerfd for this process; `spec` is a
         // fully-initialized itimerspec; old_value out-param is null (we don't
         // need the previous setting).
         check(unsafe {
-            libc::timerfd_settime(self.fd.as_raw_fd(), TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &spec, std::ptr::null_mut())
+            libc::timerfd_settime(
+                self.fd.as_raw_fd(),
+                TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET,
+                &spec,
+                std::ptr::null_mut(),
+            )
         })?;
         Ok(())
     }
@@ -139,7 +155,8 @@ impl FileWatch {
         loop {
             // SAFETY: `buf` is a valid, sufficiently large buffer for
             // inotify_event records; `self.fd` is a valid inotify fd.
-            let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr() as *mut _, buf.len()) };
+            let n =
+                unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr() as *mut _, buf.len()) };
             if n <= 0 {
                 break;
             }

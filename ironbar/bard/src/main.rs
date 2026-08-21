@@ -5,14 +5,21 @@
 
 mod clock;
 mod control;
+mod genconfig;
 mod ipc;
+mod mango;
+mod net;
 mod powermode;
+mod routes;
 mod sys;
+mod tooltip;
 mod vars;
 
 use clock::Clock;
 use control::Line;
 use ipc::IronbarIpc;
+use mango::Mango;
+use net::Net;
 use powermode::PowermodeWatch;
 use std::time::{Duration, Instant};
 use tokio::io::unix::AsyncFd;
@@ -25,21 +32,50 @@ struct Stats {
     var_sets: u64,
     flushes: u64,
     ipc_errors: u64,
+    /// Lines received from either `mmsg watch` child, before dedup.
+    mmsg_events: u64,
+    /// Of those, how many were byte-identical to the previous document for
+    /// that topic (eco-invariant dedup layer 1 — see mango.rs).
+    mmsg_noop: u64,
+    /// Lines received from either net.rs `MonitorChild` (`nmcli monitor`,
+    /// `ip -o monitor route`), before dedup — same shape as `mmsg_events`.
+    net_events: u64,
+    /// Of those, how many were byte-identical to the previous line on that
+    /// child (net.rs's `ingest_*` dedup layer 1, mirroring mango.rs).
+    net_noop: u64,
+    /// Successful `style add-class`/`remove-class` round trips.
+    style_sets: u64,
     started: Instant,
 }
 
 impl Stats {
     fn new() -> Self {
-        Self { wakeups: 0, var_sets: 0, flushes: 0, ipc_errors: 0, started: Instant::now() }
+        Self {
+            wakeups: 0,
+            var_sets: 0,
+            flushes: 0,
+            ipc_errors: 0,
+            mmsg_events: 0,
+            mmsg_noop: 0,
+            net_events: 0,
+            net_noop: 0,
+            style_sets: 0,
+            started: Instant::now(),
+        }
     }
 
     fn to_json(&self, mode: powermode::Mode) -> String {
         format!(
-            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
+            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
             self.wakeups,
             self.var_sets,
             self.flushes,
             self.ipc_errors,
+            self.mmsg_events,
+            self.mmsg_noop,
+            self.net_events,
+            self.net_noop,
+            self.style_sets,
             self.started.elapsed().as_secs(),
             mode.as_str(),
         )
@@ -57,7 +93,8 @@ async fn main() {
         },
         Some("ping") => client_cmd("ping").await,
         Some("stats") => client_cmd("stats").await,
-        _ => Err("usage: mango-bard [run|refresh <topic>|ping|stats]".into()),
+        Some("gen-config") => genconfig::main(&args[2..]).await,
+        _ => Err("usage: mango-bard [run|refresh <topic>|ping|stats|gen-config]".into()),
     };
     if let Err(e) = result {
         eprintln!("{e}");
@@ -84,12 +121,25 @@ async fn run() -> Result<(), String> {
     let control_listener = control::listen().map_err(|e| format!("control socket: {e}"))?;
     let control_path = control::socket_path();
 
+    let mut mango = Mango::new();
+    let mut net = Net::new();
     let mut vars = Vars::new();
     let mut ipc = IronbarIpc::new();
     let mut stats = Stats::new();
     let mut dirty_since: Option<Instant> = None;
+    // Debounces regrade() itself (forks), separate from `dirty_since` (which
+    // debounces the IPC flush of whatever regrade() already computed) — see
+    // net.rs module doc and IRONBAR.md T3 "Architecture".
+    let mut regrade_due: Option<Instant> = None;
 
     clock::refresh(&mut vars);
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+
+    // Initial full picture at startup — net.rs's `MonitorChild` has no
+    // `mmsg get`-style snapshot pairing, so this stands in for one.
+    net.regrade(&mut vars, pm_mode).await;
     if vars.has_dirty() {
         dirty_since = Some(Instant::now());
     }
@@ -111,8 +161,62 @@ async fn run() -> Result<(), String> {
                         if vars.has_dirty() {
                             dirty_since = Some(Instant::now());
                         }
+                        // Decision 2 (IRONBAR.md T3): RSSI rides this tick,
+                        // gated by powermode — no timer of its own.
+                        if net.should_refresh_on_tick(pm_mode) {
+                            net.regrade(&mut vars, pm_mode).await;
+                            if vars.has_dirty() {
+                                dirty_since = Some(Instant::now());
+                            }
+                        }
                     }
                     Err(e) => eprintln!("mango-bard: clock fd error: {e}"),
+                }
+            }
+
+            line = net.nmcli_mon.next_line() => {
+                stats.net_events += 1;
+                if net.ingest_nmcli_line(&line) {
+                    net.refresh_busy_var(&mut vars);
+                    if vars.has_dirty() {
+                        dirty_since = Some(Instant::now());
+                    }
+                    regrade_due = Some(Instant::now());
+                } else {
+                    stats.net_noop += 1;
+                }
+            }
+
+            line = net.route_mon.next_line() => {
+                stats.net_events += 1;
+                if net.ingest_route_line(&line) {
+                    regrade_due = Some(Instant::now());
+                } else {
+                    stats.net_noop += 1;
+                }
+            }
+
+            line = mango.monitors.next_doc() => {
+                stats.mmsg_events += 1;
+                if mango.ingest_monitors(&line) {
+                    mango.apply(&mut vars);
+                    if vars.has_dirty() {
+                        dirty_since = Some(Instant::now());
+                    }
+                } else {
+                    stats.mmsg_noop += 1;
+                }
+            }
+
+            line = mango.clients.next_doc() => {
+                stats.mmsg_events += 1;
+                if mango.ingest_clients(&line) {
+                    mango.apply(&mut vars);
+                    if vars.has_dirty() {
+                        dirty_since = Some(Instant::now());
+                    }
+                } else {
+                    stats.mmsg_noop += 1;
                 }
             }
 
@@ -124,6 +228,12 @@ async fn run() -> Result<(), String> {
                         if let Some(new_mode) = changed {
                             pm_mode = new_mode;
                             eprintln!("mango-bard: powermode -> {}", new_mode.as_str());
+                            // Pure class recompute, no forks — the netsec
+                            // verdict itself doesn't change on a mode flip.
+                            net.set_eco_class(&mut vars, pm_mode);
+                            if vars.has_dirty() {
+                                dirty_since = Some(Instant::now());
+                            }
                         }
                     }
                     Err(e) => eprintln!("mango-bard: powermode fd error: {e}"),
@@ -138,7 +248,18 @@ async fn run() -> Result<(), String> {
                             Line::Stats => { let _ = control::reply(&mut stream, &stats.to_json(pm_mode)).await; }
                             Line::Refresh(topic) => {
                                 eprintln!("mango-bard: refresh requested: {topic}");
-                                clock::refresh(&mut vars);
+                                match topic.as_str() {
+                                    "clock" => clock::refresh(&mut vars),
+                                    "mango" | "workspaces" | "window" => mango.apply(&mut vars),
+                                    "net" | "netsec" | "wifi" | "eth" | "wifi-scan" => {
+                                        net.refresh_busy_var(&mut vars);
+                                        regrade_due = Some(Instant::now());
+                                    }
+                                    _ => {
+                                        clock::refresh(&mut vars);
+                                        mango.apply(&mut vars);
+                                    }
+                                }
                                 if vars.has_dirty() {
                                     dirty_since = Some(Instant::now());
                                 }
@@ -148,6 +269,19 @@ async fn run() -> Result<(), String> {
                         }
                     }
                 }
+            }
+
+            _ = async {
+                match regrade_due {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t + FLUSH_DEBOUNCE)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                net.regrade(&mut vars, pm_mode).await;
+                if vars.has_dirty() {
+                    dirty_since = Some(Instant::now());
+                }
+                regrade_due = None;
             }
 
             _ = async {
@@ -163,7 +297,28 @@ async fn run() -> Result<(), String> {
                 loop {
                     let next = vars.peek_dirty().map(|(k, v)| (k.to_string(), v.to_string()));
                     let Some((k, v)) = next else { break };
-                    match ipc.var_set(&k, &v).await {
+                    // `@class/` keys never reach the wire as ironvars — they
+                    // route to `style add-class`/`remove-class` instead
+                    // (mango.rs: CLASS_PREFIX doc comment). A module may hold
+                    // more than one independently dirty-tracked class (netsec
+                    // needs both its verdict class and an independent `eco`
+                    // class — IRONBAR.md T3): the key format is
+                    // `@class/<module>[#<slot>]`, and only the module half
+                    // (before `#`) is a real ironbar module name — the slot
+                    // exists purely to keep the two keys apart in `Vars`.
+                    let result = match k.strip_prefix(mango::CLASS_PREFIX) {
+                        Some(module_key) => {
+                            let module = module_key.split('#').next().unwrap_or(module_key);
+                            let old = vars.live_value(&k).map(str::to_string);
+                            let r = ipc.set_class(module, old.as_deref(), &v).await;
+                            if r.is_ok() {
+                                stats.style_sets += 1;
+                            }
+                            r
+                        }
+                        None => ipc.var_set(&k, &v).await,
+                    };
+                    match result {
                         Ok(()) => { vars.ack(&k); stats.var_sets += 1; }
                         Err(e) => { stats.ipc_errors += 1; eprintln!("mango-bard: ipc error setting {k}: {e}"); break; }
                     }
@@ -173,6 +328,13 @@ async fn run() -> Result<(), String> {
 
             _ = sigterm.recv() => {
                 eprintln!("mango-bard: SIGTERM, shutting down");
+                // A silent `mmsg watch` never takes SIGPIPE and leaks
+                // forever (mango.rs: Watch::kill doc comment) — kill_on_drop
+                // alone isn't enough since nothing drops `mango` before exit.
+                mango.monitors.kill();
+                mango.clients.kill();
+                net.nmcli_mon.kill();
+                net.route_mon.kill();
                 control::unlink(&control_path);
                 return Ok(());
             }

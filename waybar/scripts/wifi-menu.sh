@@ -17,12 +17,14 @@ spin_start() {
 	printf '%s\n' "$$" >"$SCAN_FLAG"
 	pkill -USR1 -f net-watch.sh 2>/dev/null
 	pkill -RTMIN+12 waybar 2>/dev/null
+	mango-bard refresh wifi-scan 2>/dev/null
 	return 0
 }
 
 spin_stop() {
 	rm -f "$SCAN_FLAG"
 	pkill -USR2 -f net-watch.sh 2>/dev/null
+	mango-bard refresh wifi-scan 2>/dev/null
 	return 0
 }
 

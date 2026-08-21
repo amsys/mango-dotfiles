@@ -1,0 +1,381 @@
+//! Generates ironbar's `config.json`. Corn (ironbar's own config language)
+//! has no loops or includes, so 9 pills × N monitors would otherwise mean
+//! either a shell templating layer (the naming scheme duplicated across two
+//! languages, free to drift) or a checked-in per-monitor block (drifts the
+//! moment a monitor is added or removed). Generating it here keeps
+//! `mango::{ws_module, var_tags, var_ov, var_tip}` as the single source of
+//! truth for every name this config and the collector must agree on — see
+//! the tests at the bottom, which check that agreement mechanically.
+//!
+//! `install-config.sh` symlinks every regular file under a listed source
+//! dir into the matching `~/.config/<dir>/`, so a generated
+//! `~/.config/ironbar/config.json` must be a REAL file — the repo
+//! deliberately contains nothing named `config.*` under `src/ironbar/` so
+//! there is nothing for that symlink loop to collide with.
+
+use crate::mango::{slugs_for, var_ov, var_tags, var_tip, ws_module, ws_module_ov, TAG_COUNT};
+use serde_json::{json, Value};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// `mango-bard gen-config [--monitors a,b,...] [--out PATH|-]`
+pub async fn main(args: &[String]) -> Result<(), String> {
+    let mut monitors: Option<Vec<String>> = None;
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--monitors" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or("gen-config: --monitors needs a value")?;
+                monitors = Some(
+                    v.split(',')
+                        .map(String::from)
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                );
+                i += 2;
+            }
+            "--out" => {
+                out = Some(
+                    args.get(i + 1)
+                        .ok_or("gen-config: --out needs a value")?
+                        .clone(),
+                );
+                i += 2;
+            }
+            other => return Err(format!("gen-config: unknown argument {other}")),
+        }
+    }
+
+    let monitors = match monitors {
+        Some(m) => m,
+        None => query_monitors().await?,
+    };
+    let text = serde_json::to_string_pretty(&build(&monitors)).map_err(|e| e.to_string())?;
+
+    match out.as_deref() {
+        Some("-") => println!("{text}"),
+        Some(path) => write_atomic(Path::new(path), &text)?,
+        None => write_atomic(&default_out_path(), &text)?,
+    }
+    Ok(())
+}
+
+fn default_out_path() -> PathBuf {
+    let dir = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
+        });
+    dir.join("ironbar").join("config.json")
+}
+
+async fn query_monitors() -> Result<Vec<String>, String> {
+    let out = tokio::process::Command::new("mmsg")
+        .args(["get", "all-monitors"])
+        .output()
+        .await
+        .map_err(|e| format!("mmsg get all-monitors: {e}"))?;
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("bad all-monitors JSON: {e}"))?;
+    Ok(doc
+        .get("monitors")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("name").and_then(Value::as_str))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// `.tmp` + `rename`, same pattern bars.sh used for its generated config —
+/// a reader never observes a half-written file.
+fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Builds the whole ironbar config for `monitors`, in the order given.
+/// `monitors` empty is valid — the top-level entry is also the fallback bar
+/// for any output not named under `monitors` (T0 spike S3), so it still
+/// renders clock/date/window with no workspace pills, matching S3's finding
+/// that an unlisted output gets a bar rather than none at all.
+pub fn build(monitors: &[String]) -> Value {
+    let slugs = slugs_for(monitors);
+
+    let mut defaults = serde_json::Map::new();
+    defaults.insert("clk_text".into(), json!("--:--"));
+    defaults.insert("date_text".into(), json!(""));
+    defaults.insert("win_text".into(), json!(""));
+    defaults.insert("win_tip".into(), json!(""));
+    // T3 network vars — see net.rs. wifi_show defaults "true" (not busy) so
+    // the pill is visible before the daemon's first regrade() lands.
+    defaults.insert("net_busy".into(), json!("false"));
+    defaults.insert("wifi_show".into(), json!("true"));
+    defaults.insert("wifi_text".into(), json!(""));
+    defaults.insert("eth_text".into(), json!(""));
+    defaults.insert("sec_text".into(), json!(""));
+    for slug in &slugs {
+        defaults.insert(var_tags(slug), json!("true"));
+        defaults.insert(var_ov(slug), json!("false"));
+        for tag in 1..=TAG_COUNT {
+            defaults.insert(var_tip(slug, tag), json!(""));
+        }
+    }
+
+    let mut monitors_map = serde_json::Map::new();
+    for (name, slug) in monitors.iter().zip(&slugs) {
+        monitors_map.insert(
+            name.clone(),
+            json!({
+                "name": format!("bar-{name}"),
+                "start": [ window_module() ],
+                "center": workspace_pills(name, slug),
+                "end": net_modules(),
+            }),
+        );
+    }
+
+    json!({
+        // Popups are click-driven (workspace pill right-click, window
+        // left-click) — autohide is what makes clicking away close them,
+        // since the default is `false`.
+        "popup_autohide": true,
+        "ironvar_defaults": Value::Object(defaults),
+        "start": [ window_module() ],
+        "center": clock_pill(),
+        "end": net_modules(),
+        "monitors": Value::Object(monitors_map),
+    })
+}
+
+fn window_module() -> Value {
+    json!({
+        "type": "custom",
+        "name": "win",
+        "bar": [ { "type": "label", "label": "#win_text" } ],
+        "popup": [ { "type": "label", "label": "#win_tip" } ],
+        "on_scroll_up": "brightnessctl set +5%",
+        "on_scroll_down": "brightnessctl set 5%-"
+    })
+}
+
+fn clock_pill() -> Vec<Value> {
+    vec![json!({
+        "type": "custom",
+        "class": "pill",
+        "bar": [
+            { "type": "label", "name": "clock", "label": "#clk_text" },
+            { "type": "label", "name": "date", "label": "#date_text" }
+        ]
+    })]
+}
+
+/// Single glyph, animated by CSS `@keyframes` — this is what T0/S4 already
+/// concluded (spinner-over-IPC would cost ~72us x 8.3Hz forever while a
+/// link transitions; a class-flipping var costs one set per transition
+/// edge instead). First frame of net-watch.sh's own pie-slice family
+/// (`\xf3\xb0\xaa\xa5`, U+F0AA5) — reused rather than picking a fresh glyph,
+/// since it is already proven to render in this environment.
+const NET_SPINNER_GLYPH: &str = "\u{f0aa5}";
+
+/// Network pills: T3 (see net.rs). Bar-global — one instance per bar, like
+/// `window_module()` — rather than per-monitor, since network state is the
+/// same everywhere. Module names double as `@class/<module>` targets,
+/// exactly as `ws_module()` establishes for workspace pills (mango.rs).
+///
+/// Click paths follow config.jsonc's existing convention for waybar's
+/// on-click scripts (`~/.config/waybar/scripts/<script>`, confirmed by
+/// grep against the live config) — T3 keeps every click-driven menu as
+/// shell (IRONBAR.md goal 4); only the polling/event code moved into the
+/// daemon. `nm-connection-editor` is a real installed binary, not a repo
+/// script, so it is referenced bare.
+fn net_modules() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "custom",
+            "name": "net-spinner",
+            "class": "net-spinner",
+            "show_if": "#net_busy",
+            "bar": [ { "type": "label", "label": NET_SPINNER_GLYPH } ]
+        }),
+        json!({
+            "type": "custom",
+            "name": "wifi",
+            "class": "wifi",
+            // Logical inverse of net_busy: the spinner REPLACES the wifi
+            // pill rather than sitting beside it (net.sh:598-608's
+            // contract, ported to show_if — see net.rs's refresh_busy_var).
+            "show_if": "#wifi_show",
+            "bar": [ { "type": "label", "label": "#wifi_text" } ],
+            "on_click_left": "~/.config/waybar/scripts/wifi-menu.sh",
+            "on_click_right": "nm-connection-editor"
+        }),
+        json!({
+            "type": "custom",
+            "name": "eth",
+            "class": "eth",
+            "bar": [ { "type": "label", "label": "#eth_text" } ],
+            "on_click_left": "~/.config/waybar/scripts/eth-toggle.sh",
+            "on_click_right": "nm-connection-editor"
+        }),
+        json!({
+            "type": "custom",
+            "name": "netsec",
+            "class": "netsec",
+            "bar": [ { "type": "label", "label": "#sec_text" } ],
+            "on_click_left": "~/.config/waybar/scripts/net.sh --sec-click",
+            "on_click_right": "~/.config/waybar/scripts/net.sh --sec-edit"
+        }),
+    ]
+}
+
+/// Nine numbered pills plus one overview pill for `mon`. Each pill is a
+/// `custom` module (not a widget) because `style add-class`/`remove-class`
+/// match module names, and `popup` exists only on `custom` modules.
+///
+/// `on_click_left`/`on_click_right` are module-level `ScriptInput`, which
+/// runs its string as a plain shell command — unlike a *widget*-level
+/// `on_click`, which is overloaded between built-in actions
+/// (`popup:toggle`) and a shell command disambiguated by a leading `!`.
+/// Verified live (T2 probe V1): no `!` prefix here.
+fn workspace_pills(mon: &str, slug: &str) -> Vec<Value> {
+    let bar_name = format!("bar-{mon}");
+    let mut pills: Vec<Value> = (1..=TAG_COUNT)
+        .map(|n| {
+            let module = ws_module(mon, n);
+            json!({
+                "type": "custom",
+                "name": module,
+                "class": "ws",
+                "show_if": format!("#{}", var_tags(slug)),
+                "bar": [ { "type": "label", "label": n.to_string() } ],
+                "popup": [ { "type": "label", "label": format!("#{}", var_tip(slug, n)) } ],
+                "on_click_left": format!("mmsg dispatch view,{n},0"),
+                "on_click_right": format!("ironbar bar {bar_name} toggle-popup {module}"),
+                "on_scroll_up": "mmsg dispatch viewtoleft,0",
+                "on_scroll_down": "mmsg dispatch viewtoright,0"
+            })
+        })
+        .collect();
+
+    // Overview is its own module rather than pill 1's old dual-purpose
+    // state (workspace.sh --click's toggleoverview/view,1,0 branch): with
+    // `show_if` able to hide the numbered pills outright, nothing needs to
+    // ask "am I in overview?" at click time — each module gets a static
+    // on_click_left and the two are simply never visible together.
+    pills.push(json!({
+        "type": "custom",
+        "name": ws_module_ov(mon),
+        "class": "ws-overview",
+        "show_if": format!("#{}", var_ov(slug)),
+        "bar": [ { "type": "label", "label": "overview" } ],
+        "on_click_left": "mmsg dispatch toggleoverview,"
+    }));
+    pills.extend(clock_pill());
+    pills
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn collect_var_refs(v: &Value, out: &mut HashSet<String>) {
+        match v {
+            Value::String(s) => {
+                if let Some(name) = s.strip_prefix('#') {
+                    out.insert(name.to_string());
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| collect_var_refs(x, out)),
+            Value::Object(m) => m.values().for_each(|x| collect_var_refs(x, out)),
+            _ => {}
+        }
+    }
+
+    fn collect_module_names(v: &Value, out: &mut HashSet<String>) {
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::String(n)) = m.get("name") {
+                    out.insert(n.clone());
+                }
+                m.values().for_each(|x| collect_module_names(x, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| collect_module_names(x, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn every_referenced_var_has_a_default() {
+        let cfg = build(&["eDP-1".to_string(), "DP-1".to_string()]);
+        let mut refs = HashSet::new();
+        collect_var_refs(&cfg, &mut refs);
+        let defaults: HashSet<String> = cfg["ironvar_defaults"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for r in &refs {
+            assert!(
+                defaults.contains(r),
+                "no ironvar_defaults entry for referenced #{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_pill_module_name_agrees_with_mango_ws_module() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let mut names = HashSet::new();
+        collect_module_names(&cfg, &mut names);
+        for tag in 1..=TAG_COUNT {
+            assert!(names.contains(&ws_module("eDP-1", tag)));
+        }
+        assert!(names.contains(&ws_module_ov("eDP-1")));
+    }
+
+    #[test]
+    fn toggle_popup_targets_the_monitors_own_bar_name() {
+        let cfg = build(&["eDP-1".to_string()]);
+        assert_eq!(cfg["monitors"]["eDP-1"]["name"], json!("bar-eDP-1"));
+        let click = cfg["monitors"]["eDP-1"]["center"][0]["on_click_right"]
+            .as_str()
+            .unwrap();
+        assert!(click.contains("bar-eDP-1"));
+        assert!(
+            !click.starts_with('!'),
+            "module-level ScriptInput needs no ! prefix"
+        );
+    }
+
+    #[test]
+    fn ironvar_keys_are_pure_ascii_alphanumeric_or_underscore() {
+        let cfg = build(&["eDP-1".to_string(), "HDMI-A-1".to_string()]);
+        for key in cfg["ironvar_defaults"].as_object().unwrap().keys() {
+            assert!(
+                key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "bad key: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_monitor_list_still_builds_a_fallback_bar() {
+        let cfg = build(&[]);
+        assert!(cfg["monitors"].as_object().unwrap().is_empty());
+        assert!(cfg["center"].as_array().is_some());
+    }
+}

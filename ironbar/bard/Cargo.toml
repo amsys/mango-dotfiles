@@ -4,16 +4,26 @@ version = "0.1.0"
 edition = "2021"
 
 # T1 scope: clock collector + powermode watcher + control socket + ironbar
-# IPC client. Later stages add zbus (T3), a pactl child (T4), etc — see
-# IRONBAR.md.
+# IPC client. T2 adds the mango collector (workspaces + focused window) and
+# the config generator. T3 adds the network collector (net.rs/routes.rs) —
+# two more long-lived children (`nmcli monitor`, `ip -o monitor route`), no
+# zbus: IRONBAR.md's T3 corrections explain why the original NM D-Bus sketch
+# was dropped. Later stages add a pactl child (T4), etc — see IRONBAR.md.
 
 [dependencies]
-# default-features off: no worker threads, so no wakeups beyond what T1's
-# own fds generate. `time` is for tokio::time::timeout around the IPC round
-# trip — see IRONBAR.md Spike findings S4 (an incomplete write wedges every
-# other ironbar IPC client, so every round trip needs a hard deadline).
-tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "macros", "signal", "time"] }
+# default-features off: no worker threads, so no wakeups beyond what our own
+# fds generate. `time` is for tokio::time::timeout around the IPC round trip
+# — see IRONBAR.md Spike findings S4 (an incomplete write wedges every other
+# ironbar IPC client, so every round trip needs a hard deadline). `process`
+# runs the two long-lived `mmsg watch` children (T2) — it hooks the signal
+# driver already enabled for `signal`, so it adds no thread and no timer.
+tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "process", "macros", "signal", "time"] }
 libc = "0.2"
+# Window titles are arbitrary UTF-8 with embedded quotes, backslashes and
+# possibly \uXXXX escapes — a hand-rolled parser's only interesting failure
+# is exactly the case nobody tests. No `derive`: Value keeps syn/quote out of
+# the build and maps 1:1 onto the jq the ported fixtures were written against.
+serde_json = "1"
 
 [profile.release]
 opt-level = "s"

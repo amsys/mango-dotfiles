@@ -12,7 +12,10 @@ pub struct Vars {
 
 impl Vars {
     pub fn new() -> Self {
-        Self { live: HashMap::new(), dirty: BTreeMap::new() }
+        Self {
+            live: HashMap::new(),
+            dirty: BTreeMap::new(),
+        }
     }
 
     /// Queues `key=value` if it differs from what ironbar last acknowledged.
@@ -28,6 +31,14 @@ impl Vars {
 
     pub fn has_dirty(&self) -> bool {
         !self.dirty.is_empty()
+    }
+
+    /// The value ironbar last acknowledged for `key`, or `None` if we have
+    /// never sent it (or it was wiped by `mark_all_dirty`). Used by the
+    /// `@class/` flush path (mango.rs) to know which CSS class to remove
+    /// before adding the new one.
+    pub fn live_value(&self, key: &str) -> Option<&str> {
+        self.live.get(key).map(|v| &**v)
     }
 
     /// Takes the next dirty pair without removing it from `dirty` — the

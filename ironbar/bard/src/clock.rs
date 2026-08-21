@@ -57,7 +57,12 @@ fn format_local(fmt: &str) -> String {
         libc::localtime_r(&t, &mut tm);
         let cfmt = std::ffi::CString::new(fmt).expect("format has no NUL bytes");
         let mut buf = vec![0u8; 128];
-        let n = libc::strftime(buf.as_mut_ptr() as *mut libc::c_char, buf.len(), cfmt.as_ptr(), &tm);
+        let n = libc::strftime(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            cfmt.as_ptr(),
+            &tm,
+        );
         buf.truncate(n);
         String::from_utf8_lossy(&buf).into_owned()
     }
