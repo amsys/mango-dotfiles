@@ -31,10 +31,17 @@ use std::time::{Duration, Instant};
 /// loading it in a real ironbar instance and screenshotting the result.
 /// T19: U+F2DB -> U+F0EE0 (md-cpu_64_bit) — one-icon-family sweep
 /// (IRONBAR.md T19); U+F2DB (Font Awesome) sat smaller and higher than its
-/// Material Design neighbours on the bar. Deliberately not U+F061A
-/// (md-chip, `IC_CORES` below) — the bar pill and the popup's "Cores"
-/// section header would otherwise share one glyph for two different things.
-const IC_CPU: char = '\u{f0ee0}';
+/// Material Design neighbours on the bar.
+/// T23: U+F0EE0 -> U+F04C5 (md-speedometer, `IC_LOAD` below). The old
+/// glyph bakes a literal "64" into its ink; at the bar's 15px font-size
+/// those digits collapse into two grey smudges inside a toothed ring,
+/// reading as a generic settings gear rather than a processor (confirmed
+/// by rendering candidates at 15px with the live Propo font, not just
+/// eyeballing a 96px preview). The bar pill's own number is the total load
+/// percentage, so the gauge glyph already used for the popup's "Load"
+/// section is the correct icon for it, not just a legible one — no
+/// "one glyph, two things" conflict, since both spots mean the same thing.
+const IC_CPU: char = '\u{f04c5}';
 
 fn class_key(module: &str) -> String {
     format!("{CLASS_PREFIX}{module}")
