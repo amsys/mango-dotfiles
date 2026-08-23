@@ -1,0 +1,9 @@
+# Rebuild: ollama create qwen3:14b -f src/ollama/qwen3-14b.Modelfile
+#
+# num_gpu 0: keeps this 9.3GB model off the iGPU entirely. It shares rcs0
+# with the compositor and with qwen3-laptop (see qwen3-laptop.Modelfile) —
+# a model this size run at -ngl 99 is a far worse GPU-hang risk than the 4B
+# that already crashed the session on 2026-08-12. CPU-only is slower but
+# categorically removes this model from that failure class.
+FROM qwen3:14b
+PARAMETER num_gpu 0

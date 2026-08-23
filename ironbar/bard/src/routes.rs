@@ -48,14 +48,11 @@ pub enum ConflictKind {
     Tie,
 }
 
-// `regrade()` (net.rs) only needs `conflict_scan(&routes).len()` for
-// classify()'s `nconf` count — the per-conflict fields below are consumed
-// by the T7 tooltip (net.sh's `sec_emit` "Route conflicts" section, which
-// prints exactly this dst/dev/metric/kind tuple). `conflict_scan()` has to
-// return the full record regardless, to be tested against net.sh's
-// fixtures faithfully — so the fields are ported and tested now, wired
-// into a tooltip later, rather than re-derived from the shell twice.
-#[allow(dead_code)]
+// `regrade()` (net.rs) uses `conflict_scan(&routes).len()` for classify()'s
+// `nconf` count. T19: the per-conflict fields below are now also consumed
+// by net.rs's `refresh_sec_tip` (net.sh's `sec_emit` "Route conflicts"
+// section, which prints exactly this dst/dev/metric/kind tuple) — the
+// `#[allow(dead_code)]` that used to sit here is gone.
 #[derive(Clone, Debug)]
 pub struct Conflict {
     /// The more-specific (or, for a tie, first-seen) route of the pair.

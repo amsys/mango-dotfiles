@@ -1,5 +1,5 @@
 //! Tooltip/popup markup vocabulary, ported from
-//! src/waybar/scripts/tooltip.sh. T2 took escaping, row inset and the
+//! src/ironbar/scripts/tooltip.sh. T2 took escaping, row inset and the
 //! per-tag window list (workspace.sh's `winrows()`); T4 (audio.rs) adds the
 //! meter/section/grade vocabulary its volume popup needs; T5 (power.rs) adds
 //! the compact key/value row and duration formatters its battery popup
@@ -7,11 +7,15 @@
 //! private copy) is still T7's job — see IRONBAR.md "Tooltips and popups".
 
 use crate::mango::Win;
+use crate::vars::Vars;
 
 /// U+00A0, not a plain space — Pango's width request can drop trailing
 /// plain spaces, which would silently undo a right-margin fix on whichever
 /// row happens to be last. NBSP survives that and renders identically.
-const NBSP: char = '\u{a0}';
+/// `pub(crate)`: cpu.rs's `coregrid` prints its own row indent to match
+/// [`row`]/[`dim`] instead of going through either helper (its row already
+/// carries its own `<span font_family>` wrapper as a single unit).
+pub(crate) const NBSP: char = '\u{a0}';
 
 /// tooltip.sh:31 — Google Sans Flex's proportional figures drift a column
 /// padded with `%3s`/`%3d` by a few pixels per row; anything that has to
@@ -23,8 +27,13 @@ const F_MONO: &str = "JetBrainsMono Nerd Font";
 // One-dark constants, hardcoded rather than matugen colors so tooltips stay
 // legible against the fixed GTK tooltip background (tooltip.sh:13-23).
 pub const C_TITLE: &str = "#61afef";
-const C_RULE: &str = "#5c6370";
-const C_LABEL: &str = "#abb2bf";
+// T-popup-sep: dimmed from #5c6370 — the in-body title/section rules were
+// reading too dominant against the surrounding text. #3e4451 is C_EMPTY's
+// value below, the dimmest gray already in this palette.
+const C_RULE: &str = "#3e4451";
+/// pub: clock.rs's `cal_grid` needs this directly for the calendar's day
+/// cells, same reason `C_DIM` is already public for docker.rs.
+pub const C_LABEL: &str = "#abb2bf";
 /// pub: docker.rs needs this directly for its per-row image-name span
 /// (docker.sh:148 uses `$C_DIM` from tooltip.sh the same way), not just
 /// through a helper defined in this module.
@@ -57,6 +66,13 @@ pub fn good(text: &str) -> String {
 pub fn bad(text: &str) -> String {
     format!("<span foreground=\"{C_BAD}\">{text}</span>")
 }
+/// T19: sibling of `good`/`bad`, added for net.rs's three detail popups —
+/// net.sh's own `warn()` (tooltip.sh) is used in five places across
+/// `sec_emit`/`wifi_emit` (route conflicts, security warnings) that this
+/// port needs and had no counterpart for until now.
+pub fn warn(text: &str) -> String {
+    format!("<span foreground=\"{C_WARN}\">{text}</span>")
+}
 
 /// tooltip.sh:106-109 — good/warn/bad colour for a percentage against two
 /// ascending thresholds.
@@ -85,8 +101,49 @@ pub fn bar(pct: i64, colour: &str, cells: usize) -> String {
 }
 
 /// tooltip.sh:65 — every icon-bearing bar/tooltip glyph wraps identically.
+///
+/// T15: `size="115%"` dropped to `100%` — every glyph through this helper
+/// (volume, netsec, hotspot, wifi-off, eth-disconnected) rendered visibly
+/// larger than the 15px text beside it on the bar; nothing here needs to be
+/// bigger than its neighbours. `rise` moves to `0` to match — it was only
+/// ever compensating for the enlarged glyph sitting low against the
+/// baseline, see `ICO_RISE`'s own comment for the same correction on
+/// [`barico_label`].
 pub fn barico(icon: char) -> String {
-    format!("<span size=\"115%\" rise=\"-1200\">{icon}</span>")
+    format!("<span size=\"100%\" rise=\"0\">{icon}</span>")
+}
+
+/// Pango `rise` is 1/1024 pt, `letter_spacing` likewise; at 96 dpi 1px = 768
+/// units. Both are calibration knobs, retuned against a live screenshot —
+/// not derived constants.
+///
+/// `barico()`'s old `rise="-1200"` was tuned for Material Symbols Rounded,
+/// the font T8b removed from the whole bar, then retuned once for a 115%
+/// JetBrainsMono Nerd Font glyph. T15 drops the glyph back to 100% (its own
+/// comment), which needs no rise correction at all — `0` is the starting
+/// point for the next screenshot-driven retune, not a derived value.
+/// T16: `ICO_GAP` doubled, 2048 -> 4096 (~2.7px -> ~5.3px at 96 dpi). Every
+/// `barico_label()` caller (cpu, memory, docker, battery, wifi, eth, pomo,
+/// claude) reported the number sitting almost against the glyph — but the
+/// real cause (found at T18) was the icon font's own ink spilling up to
+/// 8.3px past its advance box (style.css's T18 comment on the icon-pill
+/// rule has the measurements), which this gap was papering over one glyph
+/// at a time. With the font swapped to the Propo variant (zero spill),
+/// 4096 reads as a visibly wider gap than any neighbouring pill uses —
+/// dropped back to T16's own starting point, 2048. Retune from a live
+/// screenshot if this over- or under-shoots — each call site also adds its
+/// own literal space on top of this gap, so the visible gap is never this
+/// value alone.
+const ICO_RISE: i32 = 0;
+const ICO_GAP: i32 = 2048;
+
+/// Icon+label variant of [`barico`] — every pill whose bar text is an icon
+/// followed immediately by a value (cpu/memory/docker's percent or count,
+/// eth's IP, wifi's signal percent, battery's charge percent, pomodoro's
+/// countdown). `barico()` itself is untouched (see its own doc comment) so
+/// icon-only pills never move.
+pub fn barico_label(icon: char) -> String {
+    format!("<span size=\"100%\" rise=\"{ICO_RISE}\" letter_spacing=\"{ICO_GAP}\">{icon}</span>")
 }
 
 /// Escapes `&`, `<`, `>` for embedding in Pango markup, in that order (so
@@ -111,6 +168,108 @@ pub fn row(body: &str) -> String {
 
 pub fn dim(text: &str) -> String {
     format!("{NBSP}{NBSP}{NBSP}<span foreground=\"{C_DIM}\">{text}</span>{NBSP}{NBSP}{NBSP}")
+}
+
+/// Gesture hints for a popup's footer. These strings are the static GTK
+/// `tooltip` text that used to live on the same modules in genconfig.rs —
+/// deleted at T13 because a tooltip and a popup fire on the same hover and
+/// compete for the same space. Keyed by tip ironvar, so the list stays in
+/// one place instead of scattered across nine collectors. `clk_tip` is
+/// deliberately absent: its old tooltip said only "hover for world times",
+/// which the popup now demonstrates. Workspace-pill tips are also absent —
+/// their popup body already reads as the hint (mango.rs's `apply()`).
+///
+/// T15: middle-click retired bar-wide (genconfig.rs) — every "middle-click"
+/// string below is rewritten for the gesture its action actually moved to.
+/// `hotspot_tip` is new: hotspot's static `tooltip` moved here when it
+/// joined the hover-opens-the-popup group (genconfig.rs's `hotspot_module`
+/// doc comment).
+///
+/// T19: `wifi_tip`/`eth_tip`/`sec_tip` join the same way — their old static
+/// `tooltip` strings moved here now that all three have a hover popup (see
+/// net.rs's three `refresh_*_tip` functions).
+///
+/// T-popup-sep: no longer appended into the tip body by [`set_tip`] — a
+/// pango rule of `─` characters never actually reached the popup's real
+/// width. `genconfig.rs` reads this table directly and renders each hint as
+/// its own `popup-hint` label, below a real `popup-sep` box widget (a GTK
+/// box painted 100% wide by CSS) — see that module's `popup_widgets()`.
+/// `pub(crate)`: genconfig.rs is a sibling module needing read access.
+pub(crate) const HINTS: &[(&str, &str)] = &[
+    ("cpu_tip", "click: btop"),
+    ("mem_tip", "click: btop"),
+    ("date_tip", "click: open calendar app"),
+    ("pomo_tip", "click: start/pause · right-click: mute"),
+    (
+        "vol_tip",
+        "click: mixer · scroll: volume · right-click: pavucontrol",
+    ),
+    (
+        "bat_tip",
+        "click: toggle power mode · right-click: powertop",
+    ),
+    ("hotspot_tip", "click: menu · right-click: toggle"),
+    ("docker_tip", "right-click: menu"),
+    ("claude_tip", "right-click: settings"),
+    (
+        "wifi_tip",
+        "click: pick a network · right-click: edit connections",
+    ),
+    (
+        "eth_tip",
+        "click: toggle adapter · right-click: edit connections",
+    ),
+    ("sec_tip", "click: details · right-click: edit connections"),
+];
+
+/// `vars.set` for a popup tip. `body` is expected trailing-newline-trimmed,
+/// same convention every tip builder already follows (cpu.rs's `build_tip`,
+/// claude.rs's own `trim_end_matches('\n')`). No longer appends a HINTS
+/// footer (T-popup-sep) — the footer is now a static widget in the popup's
+/// own config, built once by `genconfig.rs` from the same [`HINTS`] table,
+/// not re-appended into the ironvar body on every refresh.
+pub fn set_tip(vars: &mut Vars, key: &str, body: String) {
+    vars.set(key, body);
+}
+
+/// Keys whose popup carries a title widget above the body. Every collector
+/// in this list used to open its `tip` string with `title(...)` (and a
+/// `rule(N)` under it); T-popup-vert moved both out of the body — see
+/// `set_titled`'s own doc comment for why.
+///
+/// `pub(crate)`: genconfig.rs reads this directly, same as [`HINTS`].
+pub(crate) const TITLED: &[&str] = &[
+    "cpu_tip",
+    "mem_tip",
+    "docker_tip",
+    "bat_tip",
+    "claude_tip",
+    "vol_tip",
+    "hotspot_tip",
+    "clk_tip",
+    "date_tip",
+    "wifi_tip",
+    "eth_tip",
+    "sec_tip",
+];
+
+/// `vars.set` for a popup that carries a title. Splits what a `tip` string
+/// used to hold as its own first two lines (`title(text)` + `rule(N)`) into
+/// two ironvars — `<key>_title` and `<key>` — that `genconfig.rs::popup()`
+/// renders as two separate widgets either side of a real `box.popup-sep`.
+///
+/// T-popup-vert: the old in-body `rule(N)` was a pango run of `─`
+/// characters sized by a hand-picked cell count per caller (13 different
+/// magic numbers across cpu/memory/docker/.../net) that never actually
+/// matched the popup's real width — see `genconfig.rs::popup()`'s own doc
+/// comment for the GTK-box replacement. `title_text` is plain text; this
+/// wraps it in the same bold-blue span [`title`] always used, trimmed of
+/// its trailing `\n` since the title is now a whole label on its own, not
+/// a body line other lines get joined under.
+pub fn set_titled(vars: &mut Vars, key: &str, title_text: &str, body: String) {
+    let title_key = format!("{key}_title");
+    vars.set(&title_key, title(title_text).trim_end_matches('\n').to_string());
+    vars.set(key, body);
 }
 
 /// docker.sh:50-57 `dot()`: a colour-graded status dot for `class` in
@@ -171,18 +330,86 @@ pub fn hdur(secs: i64) -> String {
     }
 }
 
+/// tooltip.sh:156-163 — KiB to a human string (`memory.sh`'s RAM/swap rows).
+/// `0` is a real value here (an empty swap file's used column), so it gets
+/// its own literal case rather than falling out of the loop as `"0.0 KiB"`.
+pub fn hkib(kib: i64) -> String {
+    if kib == 0 {
+        return "none".to_string();
+    }
+    let units = ["KiB", "MiB", "GiB", "TiB"];
+    let mut k = kib as f64;
+    let mut i = 0;
+    while k >= 1024.0 && i < 3 {
+        k /= 1024.0;
+        i += 1;
+    }
+    if k >= 100.0 {
+        format!("{k:.0} {}", units[i])
+    } else {
+        format!("{k:.1} {}", units[i])
+    }
+}
+
+/// tooltip.sh:165-171 — a raw count to a human string (`memory.sh`'s
+/// page-fault rates/totals, `cpu.sh`'s process counts). The first bucket
+/// prints with no unit suffix at all — not even an empty one — matching the
+/// shell's `"%d"` vs `"%.0f%s"`/`"%.1f%s"` format split.
+pub fn hcount(n: i64) -> String {
+    let units = ["", "k", "M", "G"];
+    let mut n = n as f64;
+    let mut i = 0;
+    while n >= 1000.0 && i < 3 {
+        n /= 1000.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{}", n as i64)
+    } else if n >= 100.0 {
+        format!("{n:.0}{}", units[i])
+    } else {
+        format!("{n:.1}{}", units[i])
+    }
+}
+
+/// tooltip.sh's `human()` — a byte rate to "1.2 MB/s"/"340 kB/s"/"0 B/s".
+/// T19: net.rs's throughput rows. Exact port including the shell's own
+/// `1024` divisor for a nominally-decimal unit table (`split("B kB MB GB",
+/// u, " ")`, `while (b >= 1024...) b /= 1024`) — not corrected to a true
+/// 1000-based SI scale here, to stay an honest port rather than a
+/// re-derivation. `i == 0` here is awk's `i == 1` (1-indexed there, 0-
+/// indexed here): the first bucket, `B`, never gets a decimal point even
+/// below 100 — a "12.0 B/s" reads as false precision tooltip.sh's own
+/// author rejected.
+pub fn human(bytes_per_sec: i64) -> String {
+    let units = ["B", "kB", "MB", "GB"];
+    let mut b = bytes_per_sec as f64;
+    let mut i = 0;
+    while b >= 1024.0 && i < 3 {
+        b /= 1024.0;
+        i += 1;
+    }
+    if b >= 100.0 || i == 0 {
+        format!("{b:.0} {}/s", units[i])
+    } else {
+        format!("{b:.1} {}/s", units[i])
+    }
+}
+
 const HEATBAR_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// tooltip.sh:134-145 — one cell per value, each graded and coloured by its
 /// own reading rather than the series' average, so a single spike or trough
-/// is never hidden by a flat overall colour. `gap`-before-index (used
-/// upstream to part P-cores from E-cores in a per-core row) has no caller
-/// yet in this port — dropped rather than threaded through unused.
-/// ponytail: add a `gap: usize` parameter back if a per-core heatbar (T6's
-/// cpu collector) needs it.
-pub fn heatbar(pcts: &[i64], warn_at: i64, bad_at: i64) -> String {
+/// is never hidden by a flat overall colour. `gap` is the 1-based index of
+/// the cell before which a literal space is inserted (0 = no gap) — T7a's
+/// cpu.rs uses this to part P-cores from E-cores in `core_labels`' row;
+/// power.rs's history heatbar has no such split and passes 0.
+pub fn heatbar(pcts: &[i64], warn_at: i64, bad_at: i64, gap: usize) -> String {
     let mut out = String::new();
-    for &p in pcts {
+    for (i, &p) in pcts.iter().enumerate() {
+        if gap != 0 && i + 1 == gap {
+            out.push(' ');
+        }
         let k = ((p as f64 / 12.5) as i64 + 1).clamp(1, 8) as usize;
         let colour = grade(p, warn_at, bad_at);
         out.push_str(&format!(
@@ -385,11 +612,23 @@ mod tests {
 
     #[test]
     fn heatbar_glyph_ramp_from_low_to_high() {
-        let s = heatbar(&[0, 50, 100], 70, 90);
+        let s = heatbar(&[0, 50, 100], 70, 90, 0);
         let ai = s.find('▁').unwrap();
         let bi = s.find('▅').unwrap();
         let ci = s.find('█').unwrap();
         assert!(ai < bi && bi < ci, "glyphs out of order: {s}");
+    }
+
+    // ------------------------------------------- T7a addition, ported from
+    // tooltip.sh:238-239 (heatbar's optional gap-before-index argument).
+    #[test]
+    fn heatbar_gap_inserts_a_space_before_the_given_index() {
+        assert!(heatbar(&[0, 0, 0], 70, 90, 3).contains("</span> <span"));
+    }
+
+    #[test]
+    fn heatbar_does_not_gap_without_an_index() {
+        assert!(!heatbar(&[0, 0, 0], 70, 90, 0).contains("</span> <span"));
     }
 
     // ------------------------------------------- T6b additions, ported from
@@ -417,10 +656,150 @@ mod tests {
     #[test]
     fn heatbar_colours_each_cell_by_its_own_value() {
         assert_eq!(
-            heatbar(&[0, 75, 95], 70, 90),
+            heatbar(&[0, 75, 95], 70, 90, 0),
             format!(
                 "<span foreground=\"{C_GOOD}\">▁</span><span foreground=\"{C_WARN}\">▇</span><span foreground=\"{C_BAD}\">█</span>"
             )
         );
+    }
+
+    // ------------------------------------------- T7a additions, ported from
+    // tooltip.sh:148-171 (`human`/`hkib`/`hcount` — human's the net.rs T7b
+    // gap; hkib/hcount are exercised here since cpu.rs/memory.rs both need
+    // them for T7a's popups).
+
+    #[test]
+    fn hkib_matches_tooltip_sh_selftest() {
+        assert_eq!(hkib(1_048_576), "1.0 GiB");
+        assert_eq!(hkib(0), "none");
+    }
+
+    #[test]
+    fn hcount_matches_tooltip_sh_selftest() {
+        assert_eq!(hcount(1_234_567), "1.2M");
+    }
+
+    // ------------------------------------------- item 3 additions
+    // (IRONBAR.md T-next): barico() vs barico_label() carry different
+    // `rise` values, and only the label variant carries `letter_spacing`.
+
+    #[test]
+    fn barico_and_barico_label_differ_only_by_letter_spacing() {
+        // T15: both dropped to a shared rise=0 once the 115% oversize that
+        // motivated a separate rise correction was itself removed — see
+        // ICO_RISE's own comment. The two helpers still aren't identical:
+        // barico_label() alone carries letter_spacing (its own test below).
+        assert!(barico('x').contains(&format!("rise=\"{ICO_RISE}\"")));
+        assert!(barico_label('x').contains(&format!("rise=\"{ICO_RISE}\"")));
+        assert_ne!(barico('x'), barico_label('x'));
+    }
+
+    #[test]
+    fn only_barico_label_carries_letter_spacing() {
+        assert!(!barico('x').contains("letter_spacing"));
+        assert!(barico_label('x').contains(&format!("letter_spacing=\"{ICO_GAP}\"")));
+    }
+
+    // ---------------------------- T-popup-sep: set_tip is a plain passthrough
+    // now — the HINTS footer moved to a static widget in genconfig.rs.
+
+    #[test]
+    fn set_tip_passes_the_body_through_unchanged() {
+        let mut vars = Vars::new();
+        set_tip(&mut vars, "cpu_tip", "body".to_string());
+        assert_eq!(vars.peek_dirty(), Some(("cpu_tip", "body")));
+    }
+
+    #[test]
+    fn set_tip_leaves_an_empty_body_empty() {
+        let mut vars = Vars::new();
+        set_tip(&mut vars, "docker_tip", String::new());
+        assert_eq!(vars.peek_dirty(), Some(("docker_tip", "")));
+    }
+
+    #[test]
+    fn hints_keys_match_the_expected_tip_set() {
+        // A typo'd key here would silently drop a hint with no test failure
+        // anywhere else — this pins the exact set so that can't happen.
+        let mut keys: Vec<&str> = HINTS.iter().map(|(k, _)| *k).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "bat_tip",
+                "claude_tip",
+                "cpu_tip",
+                "date_tip",
+                "docker_tip",
+                "eth_tip",
+                "hotspot_tip",
+                "mem_tip",
+                "pomo_tip",
+                "sec_tip",
+                "vol_tip",
+                "wifi_tip",
+            ]
+        );
+    }
+
+    #[test]
+    fn titled_keys_match_the_expected_tip_set() {
+        // Same guard as hints_keys_match_the_expected_tip_set, for TITLED.
+        let mut keys: Vec<&str> = TITLED.to_vec();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "bat_tip",
+                "claude_tip",
+                "clk_tip",
+                "cpu_tip",
+                "date_tip",
+                "docker_tip",
+                "eth_tip",
+                "hotspot_tip",
+                "mem_tip",
+                "sec_tip",
+                "vol_tip",
+                "wifi_tip",
+            ]
+        );
+    }
+
+    #[test]
+    fn set_titled_writes_body_and_a_trimmed_title_to_separate_keys() {
+        let mut vars = Vars::new();
+        set_titled(&mut vars, "cpu_tip", "CPU", "body".to_string());
+        vars.ack("cpu_tip");
+        vars.ack("cpu_tip_title");
+        assert_eq!(vars.live_value("cpu_tip"), Some("body"));
+        assert_eq!(
+            vars.live_value("cpu_tip_title"),
+            Some(title("CPU").trim_end_matches('\n'))
+        );
+    }
+
+    // ------------------------------------------- T19 additions: warn() and
+    // human(), net.rs's detail-popup gaps.
+
+    #[test]
+    fn warn_uses_the_warn_colour() {
+        assert_eq!(warn("x"), format!("<span foreground=\"{C_WARN}\">x</span>"));
+    }
+
+    #[test]
+    fn human_matches_tooltip_sh_selftest() {
+        // Exact port of tooltip.sh's own 1024-divisor, decimal-unit-table
+        // human() — see the function's own doc comment for why 1024 stays.
+        assert_eq!(human(0), "0 B/s");
+        assert_eq!(human(999), "999 B/s");
+        assert_eq!(human(1024), "1.0 kB/s");
+        assert_eq!(human(1_048_576), "1.0 MB/s");
+        assert_eq!(human(104_857_600), "100 MB/s");
+    }
+
+    #[test]
+    fn human_bytes_bucket_never_gets_a_decimal() {
+        assert_eq!(human(12), "12 B/s");
     }
 }

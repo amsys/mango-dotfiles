@@ -10,6 +10,12 @@
 # CriticalPowerAction=Auto resolves to *power off* — an unclean session kill at
 # 2%. Suspending at 5% means that backstop is never reached while awake.
 #
+# The weak-charger check (see weak_ucsi/weak_on_ac below) is suppressed for
+# PM_WEAK_SETTLE seconds after every resume from suspend, and its recovery no
+# longer depends on the status string reading Charging/Full — see recovering()
+# and the PM_WEAK_SETTLE comment in powermode.conf for why both were needed
+# after a s2idle resume produced a false "weak charger" alarm on 2026-08-13.
+#
 #   battery-guard.sh        exec-once from mango/config.conf — poll and act
 #   battery-guard.sh test   assert the tier thresholds, no device needed
 set -uo pipefail
@@ -18,7 +24,7 @@ BAT="${MANGO_BAT_DIR:-}"
 AC="${MANGO_AC_DIR:-}"
 
 # warn,critical,action,floor — same one-env-var-holds-the-tuple shape as
-# MANGO_POMODORO in waybar/scripts/clock.sh.
+# MANGO_POMODORO in ironbar/scripts/clock.sh.
 IFS=, read -r WARN CRIT ACT FLOOR <<< "${MANGO_BATTERY:-20,10,5,3}"
 
 DRYRUN="${MANGO_BAT_DRYRUN:-}"
@@ -36,6 +42,7 @@ CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
 [ -r "$CONF" ] && . "$CONF"
 PM_WEAK_MIN_W=${PM_WEAK_MIN_W:-45}
 PM_WEAK_POLLS=${PM_WEAK_POLLS:-2}
+PM_WEAK_SETTLE=${PM_WEAK_SETTLE:-420}
 PM_BAT_ECO_PCT=${PM_BAT_ECO_PCT:-40}
 
 POLL=30    # seconds between reads; 30s is well inside the time 1% takes to burn
@@ -107,6 +114,23 @@ weak_ucsi() { # min-watts -> true if any live USB-C source is under it
 	return 1
 }
 
+# Was gated on STATUS being Charging/Full — which never happens again once a
+# charge ceiling (PM_CHARGE_LIMIT, powermode.conf) holds the battery at "Not
+# charging" forever, so the weak latch could never clear once the ceiling was
+# reached. AC being online is what recovery actually means: weak_on_ac already
+# excludes "AC online" from ever reading weak on its own, so its absence with
+# AC online is unambiguous recovery, whatever the status string says.
+recovering() { [ "$1" = 1 ]; } # online -> true if this poll counts toward recovery
+
+# Which predicate fired, for the notification body — today neither is
+# distinguishable after the fact, which is what made the ucsi-driven false
+# alarm on 2026-08-13 hard to diagnose from the journal alone.
+weak_reason() { # status online -> notification body
+	if weak_on_ac "$1" "$2"; then printf 'Plugged in but still losing charge (on AC but discharging). Switched to eco mode.\n'
+	else printf 'USB-C source negotiating under %sW. Switched to eco mode.\n' "$PM_WEAK_MIN_W"
+	fi
+}
+
 # ---------------------------------------------------------------- self-check
 
 if [ "${1:-}" = test ]; then
@@ -159,6 +183,20 @@ if [ "${1:-}" = test ]; then
 
 	printf '0\n' > "$T/weak/online"
 	weak_ucsi 45 && { echo "an offline USB-C port must not count"; exit 1; }
+
+	# --- recovery: AC online, not the status string ---
+	recovering 1 || { echo "AC online should count toward recovery"; exit 1; }
+	recovering 0 && { echo "AC offline must not count toward recovery"; exit 1; }
+
+	# --- which predicate fired ---
+	case "$(weak_reason Discharging 1)" in
+	*"on AC but discharging"*) : ;;
+	*) echo "weak_reason should name the on-AC-but-discharging predicate"; exit 1 ;;
+	esac
+	case "$(weak_reason Discharging 0)" in
+	*"USB-C source"*) : ;;
+	*) echo "weak_reason should name the weak-ucsi predicate when AC isn't the cause"; exit 1 ;;
+	esac
 
 	echo "ok"
 	exit 0
@@ -224,6 +262,9 @@ REARM=101      # charge at which LAST is forgotten, so tiers cannot flap
 CRIT_AT=0      # when the critical alarm last sounded
 WEAKN=0        # consecutive polls that read as a weak charger
 RECN=0         # consecutive healthy polls since a weak latch, before it's cleared
+LASTPOLL=0     # $SECONDS at the previous poll, to detect a suspend/resume gap
+RESUMED=$((-PM_WEAK_SETTLE)) # $SECONDS at the last detected resume; far enough
+                              # in the past that the weak check is active from boot
 
 while :; do
 	PCT=$(readf capacity)
@@ -233,31 +274,43 @@ while :; do
 	# A removed or unreadable battery is not an emergency either.
 	if [ -z "$PCT" ]; then sleep "$POLL"; continue; fi
 
+	# $SECONDS is wall-clock, but sleep counts CLOCK_MONOTONIC, which is frozen
+	# across s2idle — so a jump far past one POLL interval is a reliable resume
+	# detector with no systemd sleep hook needed. WEAKN resets too: a partial
+	# weak count spanning the resume boundary must not carry into the settled
+	# window and shortcut PM_WEAK_POLLS.
+	if [ $((NOW - LASTPOLL)) -gt $((POLL * 3)) ]; then RESUMED=$NOW; WEAKN=0; fi
+	LASTPOLL=$NOW
+
 	# Weak-charger check runs independently of the low-battery ladder below —
 	# it can fire at 90% just as well as at 15%, the symptom is the charger,
 	# not the level. WEAK_MARK is powermode.sh's own latch file; this only
 	# reads it, to avoid re-notifying every 30s while it stays set.
+	#
+	# Suppressed for PM_WEAK_SETTLE seconds after a resume: the USB-C PD
+	# controller can take minutes to renegotiate after s2idle, and until it
+	# does, ucsi-source-psy-*/BAT0 status both read as a dead or weak charger
+	# even though nothing is wrong. The low-battery ladder below is NOT gated
+	# by this — a genuinely flat battery on resume still has to act at once.
 	ONLINE=$(cat "$AC/online" 2> /dev/null || echo 0)
-	if weak_on_ac "$STATUS" "$ONLINE" || weak_ucsi "$PM_WEAK_MIN_W"; then
-		WEAKN=$((WEAKN + 1))
-		RECN=0
-		if [ "$WEAKN" -ge "$PM_WEAK_POLLS" ] && [ ! -f "$WEAK_MARK" ]; then
-			notify critical "Weak charger — ${PCT}%" \
-				"Plugged in but still losing charge. Switched to eco mode."
-			beep dialog-warning
-			"$POWERMODE" weak
-		fi
-	else
-		WEAKN=0
-		if [ -f "$WEAK_MARK" ]; then
-			case "$STATUS" in
-			Charging | Full) RECN=$((RECN + 1)) ;;
-			*) RECN=0 ;;
-			esac
-			if [ "$RECN" -ge 2 ]; then
-				notify normal "Charger recovered" "Back to full performance."
-				"$POWERMODE" unweak
-				RECN=0
+	if [ $((NOW - RESUMED)) -ge "$PM_WEAK_SETTLE" ]; then
+		if weak_on_ac "$STATUS" "$ONLINE" || weak_ucsi "$PM_WEAK_MIN_W"; then
+			WEAKN=$((WEAKN + 1))
+			RECN=0
+			if [ "$WEAKN" -ge "$PM_WEAK_POLLS" ] && [ ! -f "$WEAK_MARK" ]; then
+				notify critical "Weak charger — ${PCT}%" "$(weak_reason "$STATUS" "$ONLINE")"
+				beep dialog-warning
+				"$POWERMODE" weak
+			fi
+		else
+			WEAKN=0
+			if [ -f "$WEAK_MARK" ]; then
+				if recovering "$ONLINE"; then RECN=$((RECN + 1)); else RECN=0; fi
+				if [ "$RECN" -ge 2 ]; then
+					notify normal "Charger recovered" "Back to full performance."
+					"$POWERMODE" unweak
+					RECN=0
+				fi
 			fi
 		fi
 	fi

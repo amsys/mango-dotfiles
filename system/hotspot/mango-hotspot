@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# Root-owned hotspot helper. The only thing in this repo that creates the
+# p2p0 vif, drives hostapd/dnsmasq on it, or touches iptables/ufw for it.
+#
+# Why P2P-GO instead of a plain AP interface: this box's chip (Intel Wi-Fi 6
+# AX201, iwlwifi) advertises AP+managed concurrency in `iw list`'s interface
+# combination table, but the firmware's AP-type command path is broken —
+# `iw dev wlo1 interface add ap0 type __ap` reproducibly fails with ENFILE
+# (mac80211's reused errno for "driver rejected the op"), sometimes leaving a
+# half-registered netdev behind. A `type __p2pgo` vif on the same chip takes
+# a different, working firmware code path and hostapd drives it exactly like
+# a normal AP — confirmed live: WPA2 handshake completes, wlo1's own STA link
+# is untouched throughout. This is a known real-world gap in AX200/AX201,
+# not something a config change on our end can fix.
+#
+# waybar/scripts/hotspot.sh (unprivileged) computes SSID/PSK/band/channel —
+# channel must match whatever wlo1 is on, since the driver's combination
+# table caps this chip at one channel across all its virtual interfaces —
+# and pipes them in as KEY=value lines on stdin. Same reasoning as
+# mango-powermode: sudoers cannot see or restrict that payload, so this
+# script re-validates every value against a closed set before writing
+# anything.
+#
+#   sudo mango-hotspot up   <<< "$payload"   # normal use, from hotspot.sh
+#   sudo mango-hotspot down                  # tear down, no payload needed
+#   mango-hotspot test                       # self-check, no root needed
+set -uo pipefail
+
+IFACE="${MANGO_HS_IFACE:-p2p0}"
+UPLINK="${MANGO_WIFI_DEV:-wlo1}"
+SUBNET="${MANGO_HS_SUBNET:-10.44.0}"
+RUN_DIR="${MANGO_HS_RUN_DIR:-/run/mango-hotspot}"
+HOSTAPD_BIN="${MANGO_HS_HOSTAPD:-hostapd}"
+DNSMASQ_BIN="${MANGO_HS_DNSMASQ:-dnsmasq}"
+
+# ---------------------------------------------------------------- validation
+
+# Closed set per key — the trust boundary. hotspot.sh's inputs (an SSID you
+# typed, a generated PSK) are not, so nothing here is written unchecked.
+valid() { # key value
+	case "$1" in
+	SSID) [ "${#2}" -ge 1 ] && [ "${#2}" -le 32 ] && case "$2" in *[!\ -~]* | *'"'*) return 1 ;; *) return 0 ;; esac ;;
+	PSK) [ "${#2}" -ge 8 ] && [ "${#2}" -le 63 ] && case "$2" in *[!\ -~]* | *'"'*) return 1 ;; *) return 0 ;; esac ;;
+	BAND) case "$2" in bg | a) return 0 ;; esac ;;
+	CHANNEL)
+		case "$2" in
+		1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) return 0 ;;
+		36 | 40 | 44 | 48 | 149 | 153 | 157 | 161 | 165) return 0 ;;
+		esac
+		;;
+	esac
+	return 1
+}
+
+# ---------------------------------------------------------------- primitives
+
+hostapd_pid() { [ -r "$RUN_DIR/hostapd.pid" ] && cat "$RUN_DIR/hostapd.pid" 2>/dev/null; }
+dnsmasq_pid() { [ -r "$RUN_DIR/dnsmasq.pid" ] && cat "$RUN_DIR/dnsmasq.pid" 2>/dev/null; }
+
+kill_pidfile() { # pidfile
+	_p=$(cat "$1" 2>/dev/null) || return 0
+	[ -n "$_p" ] && kill "$_p" 2>/dev/null
+	rm -f "$1"
+}
+
+# ---------------------------------------------------------------- up
+
+cmd_up() {
+	SSID="" PSK="" BAND="" CHANNEL=""
+	while IFS='=' read -r k v; do
+		case "$k" in SSID | PSK | BAND | CHANNEL) valid "$k" "$v" && export "$k=$v" ;; esac
+	done
+	[ -n "$SSID" ] && [ -n "$PSK" ] && [ -n "$BAND" ] && [ -n "$CHANNEL" ] || {
+		echo "mango-hotspot: missing or invalid SSID/PSK/BAND/CHANNEL on stdin" >&2
+		exit 1
+	}
+
+	mkdir -p "$RUN_DIR"
+	chmod 755 "$RUN_DIR"
+
+	if ! ip link show "$IFACE" >/dev/null 2>&1; then
+		iw dev "$UPLINK" interface add "$IFACE" type __p2pgo || {
+			echo "mango-hotspot: failed to add $IFACE (type __p2pgo) on $UPLINK" >&2
+			exit 1
+		}
+	fi
+	ip addr flush dev "$IFACE" 2>/dev/null
+	ip addr add "$SUBNET.1/24" dev "$IFACE"
+	ip link set "$IFACE" up
+
+	# hostapd's hw_mode is a/b/g/ad/any — "bg" is BAND's own validated token
+	# (matches valid()'s case set), not a hostapd value.
+	HW_MODE=g
+	[ "$BAND" = a ] && HW_MODE=a
+
+	cat >"$RUN_DIR/hostapd.conf" <<-EOF
+		interface=$IFACE
+		driver=nl80211
+		ssid=$SSID
+		hw_mode=$HW_MODE
+		channel=$CHANNEL
+		wpa=2
+		wpa_passphrase=$PSK
+		wpa_key_mgmt=WPA-PSK
+		rsn_pairwise=CCMP
+		ieee80211n=1
+		ctrl_interface=$RUN_DIR/hostapd_ctrl
+	EOF
+	chmod 600 "$RUN_DIR/hostapd.conf"
+
+	cat >"$RUN_DIR/dnsmasq.conf" <<-EOF
+		interface=$IFACE
+		bind-interfaces
+		except-interface=lo
+		dhcp-range=$SUBNET.10,$SUBNET.100,255.255.255.0,12h
+		dhcp-option=option:router,$SUBNET.1
+		dhcp-leasefile=$RUN_DIR/dnsmasq.leases
+		no-resolv
+		server=127.0.0.53
+		server=1.1.1.1
+	EOF
+
+	kill_pidfile "$RUN_DIR/hostapd.pid"
+	kill_pidfile "$RUN_DIR/dnsmasq.pid"
+
+	"$HOSTAPD_BIN" -B -P "$RUN_DIR/hostapd.pid" "$RUN_DIR/hostapd.conf" || {
+		echo "mango-hotspot: hostapd failed to start" >&2
+		ip link set "$IFACE" down 2>/dev/null
+		iw dev "$IFACE" del 2>/dev/null
+		exit 1
+	}
+	"$DNSMASQ_BIN" --conf-file="$RUN_DIR/dnsmasq.conf" --pid-file="$RUN_DIR/dnsmasq.pid" || {
+		echo "mango-hotspot: dnsmasq failed to start" >&2
+		kill_pidfile "$RUN_DIR/hostapd.pid"
+		ip link set "$IFACE" down 2>/dev/null
+		iw dev "$IFACE" del 2>/dev/null
+		exit 1
+	}
+
+	sysctl -qw net.ipv4.ip_forward=1
+	iptables -t nat -C POSTROUTING -s "$SUBNET.0/24" -j MASQUERADE 2>/dev/null ||
+		iptables -t nat -A POSTROUTING -s "$SUBNET.0/24" -j MASQUERADE
+	ufw allow in on "$IFACE" comment 'mango hotspot' >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------------- down
+
+cmd_down() {
+	kill_pidfile "$RUN_DIR/hostapd.pid"
+	kill_pidfile "$RUN_DIR/dnsmasq.pid"
+	iptables -t nat -D POSTROUTING -s "$SUBNET.0/24" -j MASQUERADE 2>/dev/null || true
+	ufw delete allow in on "$IFACE" >/dev/null 2>&1 || true
+	ip link set "$IFACE" down 2>/dev/null || true
+	iw dev "$IFACE" del 2>/dev/null || true
+	rm -rf "$RUN_DIR"
+}
+
+# ---------------------------------------------------------------- status / test
+
+cmd_status() {
+	if ip link show "$IFACE" >/dev/null 2>&1 && [ -n "$(hostapd_pid)" ] && kill -0 "$(hostapd_pid)" 2>/dev/null; then
+		echo up
+	else
+		echo down
+	fi
+}
+
+cmd_test() {
+	for b in "$HOSTAPD_BIN" "$DNSMASQ_BIN" iw ip iptables ufw sysctl; do
+		command -v "$b" >/dev/null 2>&1 || {
+			echo "mango-hotspot test: missing binary: $b" >&2
+			exit 1
+		}
+	done
+	valid CHANNEL 9 && valid BAND bg && valid SSID mango-hotspot && valid PSK testpass1234 || {
+		echo "mango-hotspot test: valid() rejected a known-good value" >&2
+		exit 1
+	}
+	! valid CHANNEL 100 || {
+		echo "mango-hotspot test: valid() accepted a DFS channel" >&2
+		exit 1
+	}
+	! valid PSK short || {
+		echo "mango-hotspot test: valid() accepted a too-short PSK" >&2
+		exit 1
+	}
+	echo ok
+}
+
+case "${1:-}" in
+up) cmd_up ;;
+down) cmd_down ;;
+status) cmd_status ;;
+test) cmd_test ;;
+*)
+	echo "usage: mango-hotspot up|down|status|test" >&2
+	exit 1
+	;;
+esac

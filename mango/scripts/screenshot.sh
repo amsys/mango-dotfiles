@@ -5,6 +5,8 @@
 #
 # Usage:
 #   screenshot.sh monitor   # active output, no selection step
+#   screenshot.sh all       # every output in one image
+#   screenshot.sh window    # click a visible window (slurp -r over mmsg rects)
 #   screenshot.sh region    # slurp selection
 #   screenshot.sh test      # self-check
 set -u
@@ -13,6 +15,8 @@ set -u
 # README's "Machine-specific values"), so a leading ~/ has to be expanded here
 # or MANGO_SCREENSHOT_DIR=~/Shots would create a directory literally named ~.
 DIR="${MANGO_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots}"
+# literal ~/ prefix check, not a shell expansion
+# shellcheck disable=SC2088
 case "$DIR" in
 "~/"*) DIR="$HOME/${DIR#"~/"}" ;;
 esac
@@ -38,11 +42,26 @@ if [ "${1:-}" = "test" ]; then
 	exit 0
 fi
 
+mon=""
 case "${1:-}" in
 monitor)
 	mon=$(active_monitor)
 	[ -n "$mon" ] || { notify "Screenshot failed" "no active monitor"; exit 1; }
 	geom=""
+	;;
+all)
+	# grim with no -o/-g captures every output in one image.
+	geom=""
+	;;
+window)
+	# Visible-window rectangles from the compositor, picked with one click —
+	# slurp -r restricts the selection to the given rects. Same
+	# cancel-quietly rule as region below.
+	rects=$(mmsg get all-clients |
+		jq -r '.clients[]|select(.is_visible)|"\(.x),\(.y) \(.width)x\(.height)"')
+	[ -n "$rects" ] || { notify "Screenshot failed" "no visible windows"; exit 1; }
+	geom=$(printf '%s\n' "$rects" | slurp -r) || exit 0
+	[ -n "$geom" ] || exit 0
 	;;
 region)
 	# slurp writes nothing and exits non-zero when cancelled with Escape. Bail
@@ -51,7 +70,7 @@ region)
 	[ -n "$geom" ] || exit 0
 	;;
 *)
-	echo "usage: screenshot.sh monitor|region|test" >&2
+	echo "usage: screenshot.sh monitor|all|window|region|test" >&2
 	exit 1
 	;;
 esac
@@ -61,8 +80,10 @@ file="$DIR/Screenshot_$(date '+%Y-%m-%d_%H.%M.%S').png"
 
 if [ -n "$geom" ]; then
 	grim -g "$geom" "$file"
-else
+elif [ -n "$mon" ]; then
 	grim -o "$mon" "$file"
+else
+	grim "$file"
 fi
 
 wl-copy <"$file"

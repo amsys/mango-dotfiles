@@ -1,0 +1,16 @@
+[Unit]
+Description=mango-bard — event-driven bar data daemon for ironbar
+# This is the self-healing restart waybar's own process supervision used to
+# give the old bar for free (IRONBAR.md's Architecture section) — one unit
+# owns every collector that used to be five separate `--watch` scripts.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mango-bard run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

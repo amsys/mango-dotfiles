@@ -22,12 +22,21 @@
 
 use crate::mango::CLASS_PREFIX;
 use crate::net::MonitorChild;
-use crate::tooltip::{barico, dim, dot, esc, mono, projhdr, rule, title, C_DIM};
+use crate::tooltip::{barico_label, dim, dot, esc, mono, projhdr, set_titled, C_DIM};
 use crate::vars::Vars;
 use tokio::process::Command;
 
-/// nf-linux-docker (whale), docker.sh:26.
-const IC_DOCKER: char = '\u{f308}';
+/// T16 retracts T8b's stated root cause. T8b tried nf-linux-docker (whale,
+/// U+F308), saw it render as CJK tofu, and concluded this ironbar/GTK4 build
+/// cannot rasterize that PUA codepoint — then fell back to U+F13B (a generic
+/// container/box badge, not a whale). The actual cause: `fc-list
+/// ":charset=f308" family` also lists `IBM Plex Sans TC`, and style.css's
+/// icon font stack puts `"IBM Plex Sans"` ahead of `"JetBrainsMono Nerd
+/// Font"` — fontconfig matched the CJK face for that one codepoint, not a
+/// missing glyph in the Nerd Font. U+F0868 (nf-md-docker, Plane-15 PUA) has
+/// no such competing claimant (`fc-list ":charset=f0868" family` returns
+/// only the Nerd Font), so it is the real whale. See IRONBAR.md's T16 entry.
+const IC_DOCKER: char = '\u{f0868}';
 
 const FORMAT: &str = r#"{{.Names}}|{{.State}}|{{.Status}}|{{.Image}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}"#;
 
@@ -151,9 +160,6 @@ fn class_for(rows: &[Row]) -> &'static str {
 /// original script's own behaviour, not a port bug.
 fn build_tip(rows: &[Row], stopped: usize, projects: usize) -> String {
     let mut tip = String::new();
-    tip.push_str(&title("Docker"));
-    tip.push_str(&rule(44));
-
     let mut prev = String::new();
     for r in grouped(rows.to_vec()) {
         if r.name.is_empty() {
@@ -265,7 +271,7 @@ impl Docker {
                 // daemon unreachable — empty text hides the module, same as
                 // net.sh does mid-scan; no error pill, no tofu.
                 vars.set("docker_text", "");
-                vars.set("docker_tip", "");
+                set_titled(vars, "docker_tip", "Docker", String::new());
                 vars.set(&class_key("docker"), "");
                 return;
             }
@@ -273,8 +279,11 @@ impl Docker {
 
         let rows = parse_rows(&raw);
         let (running, stopped, projects) = counts(&rows);
-        vars.set("docker_text", format!("{} {running}", barico(IC_DOCKER)));
-        vars.set("docker_tip", build_tip(&rows, stopped, projects));
+        vars.set(
+            "docker_text",
+            format!("{} {running}", barico_label(IC_DOCKER)),
+        );
+        set_titled(vars, "docker_tip", "Docker", build_tip(&rows, stopped, projects));
         vars.set(&class_key("docker"), class_for(&rows));
     }
 }
@@ -365,7 +374,13 @@ loose-1|restarting|Restarting (1) 5 seconds ago|busybox||";
     fn build_tip_groups_by_project_with_a_standalone_header() {
         let rows = parse_rows(SAMPLE);
         let tip = build_tip(&rows, 2, 2);
-        assert!(tip.starts_with("<span"), "title markup expected: {tip}");
+        // T-popup-vert: the "Docker" title moved out of the body into its
+        // own `docker_tip_title` ironvar (see genconfig.rs::popup()) — the
+        // body now opens straight on the first project header.
+        assert!(
+            tip.trim_start().starts_with("<span"),
+            "project header markup expected: {tip}"
+        );
         assert!(tip.contains("crema-v16"));
         assert!(tip.contains("crema-develop"));
         assert!(

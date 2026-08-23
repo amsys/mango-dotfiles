@@ -4,6 +4,7 @@
 //! T0 spike findings this implementation is built on.
 
 mod audio;
+mod claude;
 mod clock;
 mod control;
 mod cpu;
@@ -15,6 +16,7 @@ mod ipc;
 mod mango;
 mod memory;
 mod net;
+mod pomo;
 mod power;
 mod powermode;
 mod routes;
@@ -24,8 +26,9 @@ mod vars;
 mod wheel;
 
 use audio::Audio;
+use claude::Claude;
 use clock::Clock;
-use control::Line;
+use control::{HoverEvent, Line, PopupHoverEvent};
 use cpu::Cpu;
 use darkmode::Darkmode;
 use docker::Docker;
@@ -34,6 +37,7 @@ use ipc::IronbarIpc;
 use mango::Mango;
 use memory::Memory;
 use net::Net;
+use pomo::Pomo;
 use power::Power;
 use powermode::PowermodeWatch;
 use std::time::{Duration, Instant};
@@ -42,6 +46,35 @@ use vars::Vars;
 use wheel::Wheel;
 
 const FLUSH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// How long the mouse must stay over a hover-eligible pill before its popup
+/// opens. A calibration knob, same convention as net.rs's own debounce —
+/// tuned, not derived. T13: dropped from 300ms to 80ms once
+/// `ECO_TIMER_SLACK_MS` was found to be the real ~650-850ms cause (see
+/// IRONBAR.md's T13 entry) — 80ms matches the value this repo already chose
+/// for the same first-hover question in `waybar/fast-tooltips.c`
+/// (`MANGO_TOOLTIP_DELAY_MS` default): short enough to read as instant, long
+/// enough that a mouse passing through on its way elsewhere never triggers a
+/// popup at all. `waybar/fast-tooltips.c` moved to `ironbar/fast-tooltips.c`
+/// at the T8 cutover; the constant it tunes and this value are unchanged.
+const HOVER_DELAY: Duration = Duration::from_millis(80);
+
+/// T-popup-hold: how long a popup stays visible after the pointer leaves
+/// its pill, before actually closing — long enough to cross the `popup_gap`
+/// (12px, see genconfig.rs's own comment on that setting) into the popup
+/// itself, short enough that a popup abandoned for good doesn't linger. A
+/// calibration knob, same convention as `HOVER_DELAY` above — tuned against
+/// a live screenshot/pointer test, not derived. Cancelled outright by
+/// `hover_enter` (re-hovering any pill) or `hover_hold` (the pointer
+/// reaching the popup's own content box).
+const HOVER_HIDE_GRACE: Duration = Duration::from_millis(200);
+
+/// `sys::set_timer_slack` value while idle (no hover pending) — the existing
+/// eco knob, unchanged in magnitude. T13: this is scoped to idle-only now
+/// (tight while `hover_due` is armed) because 500ms of slack was silently
+/// adding up to 500ms to every `hover_due` firing, on top of `HOVER_DELAY`
+/// itself — see the `Line::Hover` and `hover_due` select arms.
+const ECO_TIMER_SLACK_MS: u64 = 500;
 
 struct Stats {
     wakeups: u64,
@@ -85,6 +118,31 @@ struct Stats {
     /// server-side `--filter` set is docker.rs's real noise gate, so this
     /// should stay near zero).
     docker_noop: u64,
+    /// T7a: how many times `cpu_tip`/`mem_tip` were actually rebuilt — the
+    /// counters T7a's own verification measures against a closed popup,
+    /// since `strace` is blocked by ptrace permissions in this environment
+    /// (T4's own prior finding). Both must stay flat while both popups are
+    /// closed; this is the ptrace-free proof of the "popup-closed strace
+    /// shows zero execs" acceptance line.
+    cpu_detail_builds: u64,
+    mem_detail_builds: u64,
+    /// T6c: how many times the claudebar cache was read + rendered — the
+    /// cadence proof that this only happens once per 5-minute clock tick,
+    /// same method T7a's `cpu_detail_builds` uses for its own cadence.
+    claude_fetches: u64,
+    /// T7c-rest: how many times `clk_tip`/`date_tip` were actually rebuilt
+    /// — same acceptance shape as `cpu_detail_builds`: both must stay flat
+    /// across a clean idle window and only climb on a real popup click,
+    /// since `strace` is ptrace-blocked in this environment (T4 onwards).
+    clock_detail_builds: u64,
+    date_detail_builds: u64,
+    /// T19: how many times `wifi_tip`/`eth_tip`/`sec_tip` were actually
+    /// rebuilt — same acceptance shape as `cpu_detail_builds`/
+    /// `clock_detail_builds`: flat while every net popup is closed, climbs
+    /// only on a real hover-open.
+    wifi_detail_builds: u64,
+    eth_detail_builds: u64,
+    sec_detail_builds: u64,
     started: Instant,
 }
 
@@ -108,13 +166,21 @@ impl Stats {
             mem_polls: 0,
             docker_events: 0,
             docker_noop: 0,
+            cpu_detail_builds: 0,
+            mem_detail_builds: 0,
+            claude_fetches: 0,
+            clock_detail_builds: 0,
+            date_detail_builds: 0,
+            wifi_detail_builds: 0,
+            eth_detail_builds: 0,
+            sec_detail_builds: 0,
             started: Instant::now(),
         }
     }
 
     fn to_json(&self, mode: powermode::Mode) -> String {
         format!(
-            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"power_events\":{},\"wheel_ticks\":{},\"cpu_polls\":{},\"mem_polls\":{},\"docker_events\":{},\"docker_noop\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
+            "{{\"wakeups\":{},\"var_sets\":{},\"flushes\":{},\"ipc_errors\":{},\"mmsg_events\":{},\"mmsg_noop\":{},\"net_events\":{},\"net_noop\":{},\"style_sets\":{},\"audio_events\":{},\"audio_noop\":{},\"power_events\":{},\"wheel_ticks\":{},\"cpu_polls\":{},\"mem_polls\":{},\"docker_events\":{},\"docker_noop\":{},\"cpu_detail_builds\":{},\"mem_detail_builds\":{},\"claude_fetches\":{},\"clock_detail_builds\":{},\"date_detail_builds\":{},\"wifi_detail_builds\":{},\"eth_detail_builds\":{},\"sec_detail_builds\":{},\"uptime_s\":{},\"mode\":\"{}\"}}",
             self.wakeups,
             self.var_sets,
             self.flushes,
@@ -132,6 +198,14 @@ impl Stats {
             self.mem_polls,
             self.docker_events,
             self.docker_noop,
+            self.cpu_detail_builds,
+            self.mem_detail_builds,
+            self.claude_fetches,
+            self.clock_detail_builds,
+            self.date_detail_builds,
+            self.wifi_detail_builds,
+            self.eth_detail_builds,
+            self.sec_detail_builds,
             self.started.elapsed().as_secs(),
             mode.as_str(),
         )
@@ -144,13 +218,71 @@ async fn main() {
     let result = match args.get(1).map(String::as_str) {
         Some("run") | None => run().await,
         Some("refresh") => match args.get(2) {
-            Some(topic) => client_cmd(&format!("refresh {topic}")).await,
-            None => Err("usage: mango-bard refresh <topic>".into()),
+            // T7a: the popup's own lazy-poke script (genconfig.rs's
+            // `cpu_modules`) calls this every few seconds while open and
+            // discards nothing itself (ironbar execs scripts directly, no
+            // shell — confirmed live — so a `>/dev/null` redirect would be
+            // passed through as a literal argv token, not interpreted).
+            // `-q` is what keeps the daemon's `ok` reply out of the popup's
+            // otherwise-invisible poke label.
+            Some(topic) => {
+                let quiet = args.iter().skip(3).any(|a| a == "-q");
+                client_cmd(&format!("refresh {topic}"), quiet).await
+            }
+            None => Err("usage: mango-bard refresh <topic> [-q]".into()),
         },
-        Some("ping") => client_cmd("ping").await,
-        Some("stats") => client_cmd("stats").await,
+        Some("ping") => client_cmd("ping", false).await,
+        Some("stats") => client_cmd("stats", false).await,
         Some("gen-config") => genconfig::main(&args[2..]).await,
-        _ => Err("usage: mango-bard [run|refresh <topic>|ping|stats|gen-config]".into()),
+        // `mango-bard pomo start|toggle|reset|mute|note|resume|idle|unlock|status [arg] [-q]`
+        // — one control-socket line, same shape as `refresh` above. `-q`
+        // matters here too: focus-note.sh/focus-task.sh call this from a
+        // rofi callback where a stray "ok" on stdout would be distracting.
+        Some("pomo") => match args.get(2) {
+            Some(verb) => {
+                let rest: Vec<&str> = args.iter().skip(3).map(String::as_str).collect();
+                let quiet = rest.contains(&"-q");
+                let arg = rest.into_iter().find(|a| *a != "-q");
+                let cmd = match arg {
+                    Some(a) => format!("pomo {verb} {a}"),
+                    None => format!("pomo {verb}"),
+                };
+                client_cmd(&cmd, quiet).await
+            }
+            None => Err("usage: mango-bard pomo <verb> [arg] [-q]".into()),
+        },
+        // `mango-bard hover enter|exit <bar> <widget> [-q]` — one
+        // control-socket line, same shape as `pomo` above. Fired straight
+        // from genconfig.rs's `on_mouse_enter`/`on_mouse_exit`, so `-q`
+        // matters here too: ironbar has no visible surface for a stray "ok"
+        // reply to land on, but staying quiet keeps this consistent with
+        // every other fire-and-forget gesture in this file (T-hover).
+        //
+        // T-popup-hold: `hover hold|release <bar> [-q]` — the same verbs,
+        // fired from the popup's own content box instead of a pill, so
+        // there is no widget name to pass (see `control::PopupHoverEvent`'s
+        // own doc comment).
+        Some("hover") => {
+            let rest: Vec<&str> = args.iter().skip(2).map(String::as_str).collect();
+            let quiet = rest.contains(&"-q");
+            let parts: Vec<&str> = rest.into_iter().filter(|a| *a != "-q").collect();
+            match parts.as_slice() {
+                [verb @ ("enter" | "exit"), bar, widget] => {
+                    client_cmd(&format!("hover {verb} {bar} {widget}"), quiet).await
+                }
+                [verb @ ("hold" | "release"), bar] => {
+                    client_cmd(&format!("hover {verb} {bar}"), quiet).await
+                }
+                _ => Err(
+                    "usage: mango-bard hover <enter|exit> <bar> <widget> [-q] | hover <hold|release> <bar> [-q]"
+                        .into(),
+                ),
+            }
+        }
+        _ => Err(
+            "usage: mango-bard [run|refresh <topic> [-q]|ping|stats|gen-config|pomo <verb> [arg] [-q]|hover <enter|exit> <bar> <widget> [-q]|hover <hold|release> <bar> [-q]]"
+                .into(),
+        ),
     };
     if let Err(e) = result {
         eprintln!("{e}");
@@ -158,14 +290,309 @@ async fn main() {
     }
 }
 
-async fn client_cmd(cmd: &str) -> Result<(), String> {
+/// Drains every dirty ironvar over IPC — extracted verbatim from what used
+/// to be the `dirty_since` select arm's own inline body (T13), so the hover
+/// path can call the same flush synchronously before `show_popup` instead of
+/// waiting out a separate `FLUSH_DEBOUNCE` after the popup is already open
+/// (that gap showed stale tip content for the debounce's duration). Leaves
+/// `dirty_since` itself untouched — that is loop state the caller owns, not
+/// flush state.
+async fn flush_vars(vars: &mut Vars, ipc: &mut IronbarIpc, stats: &mut Stats) {
+    stats.flushes += 1;
+    if ipc.restarted() {
+        vars.mark_all_dirty();
+    }
+    loop {
+        let next = vars
+            .peek_dirty()
+            .map(|(k, v)| (k.to_string(), v.to_string()));
+        let Some((k, v)) = next else { break };
+        // `@class/` keys never reach the wire as ironvars — they route to
+        // `style add-class`/`remove-class` instead (mango.rs: CLASS_PREFIX
+        // doc comment). A module may hold more than one independently
+        // dirty-tracked class (netsec needs both its verdict class and an
+        // independent `eco` class — IRONBAR.md T3): the key format is
+        // `@class/<module>[#<slot>]`, and only the module half (before `#`)
+        // is a real ironbar module name — the slot exists purely to keep
+        // the two keys apart in `Vars`.
+        let result = match k.strip_prefix(mango::CLASS_PREFIX) {
+            Some(module_key) => {
+                let module = module_key.split('#').next().unwrap_or(module_key);
+                let old = vars.live_value(&k).map(str::to_string);
+                let r = ipc.set_class(module, old.as_deref(), &v).await;
+                if r.is_ok() {
+                    stats.style_sets += 1;
+                }
+                r
+            }
+            None => ipc.var_set(&k, &v).await,
+        };
+        match result {
+            Ok(()) => {
+                vars.ack(&k);
+                stats.var_sets += 1;
+            }
+            Err(e) => {
+                stats.ipc_errors += 1;
+                eprintln!("mango-bard: ipc error setting {k}: {e}");
+                break;
+            }
+        }
+    }
+}
+
+/// Per-topic refresh dispatch, shared by the click path (`Line::Refresh`,
+/// `mango-bard refresh <topic> -q`) and the hover-open select arm — extracted
+/// from what used to be `Line::Refresh`'s own inline match so the two
+/// callers can never drift into two different topic tables (T-hover).
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_refresh(
+    topic: &str,
+    vars: &mut Vars,
+    mango: &mut Mango,
+    net: &mut Net,
+    audio: &mut Audio,
+    power: &mut Power,
+    cpu: &mut Cpu,
+    mem: &mut Memory,
+    docker: &mut Docker,
+    hotspot: &mut Hotspot,
+    darkmode: &mut Darkmode,
+    claude: &mut Claude,
+    pm_mode: powermode::Mode,
+    stats: &mut Stats,
+    regrade_due: &mut Option<Instant>,
+    audio_due: &mut Option<Instant>,
+    power_due: &mut Option<Instant>,
+    docker_due: &mut Option<Instant>,
+) {
+    match topic {
+        "clock" => clock::refresh(vars),
+        "mango" | "workspaces" | "window" => mango.apply(vars),
+        "net" | "netsec" | "wifi" | "eth" | "wifi-scan" => {
+            net.refresh_busy_var(vars);
+            *regrade_due = Some(Instant::now());
+        }
+        // T19: unlike the debounced "net"/"netsec"/"wifi"/"eth" arm above,
+        // these three build their tip synchronously — only ever poked from
+        // inside a hover-open (main.rs's hover select arm awaits this
+        // directly, then flushes, then calls show_popup). Routing hover
+        // through the debounced arm instead would show a stale popup: the
+        // 150ms `regrade_due` debounce fires AFTER show_popup already ran,
+        // the exact T13 bug the hover arm's own comment describes. Same
+        // "lazily-built detail tip" shape as cpu-detail/mem-detail below.
+        "wifi-detail" => {
+            net.refresh_wifi_tip(vars).await;
+            stats.wifi_detail_builds += 1;
+        }
+        "eth-detail" => {
+            net.refresh_eth_tip(vars).await;
+            stats.eth_detail_builds += 1;
+        }
+        "sec-detail" => {
+            net.refresh_sec_tip(vars).await;
+            stats.sec_detail_builds += 1;
+        }
+        "audio" | "volume" | "mic" => {
+            *audio_due = Some(Instant::now());
+        }
+        "power" | "battery" | "bat" | "ac" => {
+            *power_due = Some(Instant::now());
+        }
+        "cpu" => cpu.refresh(vars),
+        "memory" | "mem" => mem.refresh(vars),
+        // T7a: only ever poked from inside the popup's own script while it
+        // is open (genconfig.rs's `cpu_modules`) or, since T-hover, the
+        // hover-open select arm — never from the wheel/clock path, so
+        // nothing here runs while neither the popup nor a hover-pending
+        // peek is active.
+        "cpu-detail" => {
+            cpu.refresh_detail(vars).await;
+            stats.cpu_detail_builds += 1;
+        }
+        "mem-detail" => {
+            mem.refresh_detail(vars).await;
+            stats.mem_detail_builds += 1;
+        }
+        // T7c-rest: only ever poked from inside the clock/date popup's own
+        // click, or now its hover-open — same shape as cpu-detail/
+        // mem-detail above.
+        "clock-detail" => {
+            clock::refresh_clock_tip(vars).await;
+            stats.clock_detail_builds += 1;
+        }
+        "date-detail" => {
+            clock::refresh_date_tip(vars).await;
+            stats.date_detail_builds += 1;
+        }
+        "docker" => {
+            *docker_due = Some(Instant::now());
+        }
+        // hotspot.sh's toggle() pokes this on the actual state-change edge
+        // only (reached from --toggle/--menu, never --status) — T6b D2's
+        // only event source for this collector.
+        "hotspot" => hotspot.refresh(vars).await,
+        // switchwall.sh pokes this after every matugen regen — T6b D3.
+        "darkmode" => darkmode.refresh(vars).await,
+        // T6c: pure render (cache read only — never a fork), fired either by
+        // spawn_fetch()'s own post-fetch poke or by the popup's left-click
+        // (T7a's refresh-then-toggle-popup pattern) or hover-open.
+        "claude" => {
+            claude.refresh(vars);
+            stats.claude_fetches += 1;
+        }
+        // Deliberately excludes cpu-detail/mem-detail/clock-detail/
+        // date-detail: this is the generic "resync every pill" path (e.g.
+        // after an unrecognized topic), and rebuilding any detail popup
+        // unconditionally here would defeat T7a's whole point — only a real
+        // popup open (click or hover) may ever trigger that work.
+        _ => {
+            clock::refresh(vars);
+            mango.apply(vars);
+            audio.refresh(vars).await;
+            power.refresh(vars, pm_mode).await;
+            cpu.refresh(vars);
+            mem.refresh(vars);
+            docker.refresh(vars).await;
+            hotspot.refresh(vars).await;
+            darkmode.refresh(vars).await;
+            claude.refresh(vars);
+        }
+    }
+}
+
+/// Maps a hover target's ironbar widget name to the `dispatch_refresh` topic
+/// that keeps its popup content current. Most hover widgets share their
+/// module name as the topic (`battery`, `volume`, `docker` — all three just
+/// mark their own `_due` var, since their event streams already keep them
+/// fresh); the four modules whose popup is a lazily-built detail tip (T7a/
+/// T7c-rest) use their own `-detail` topic instead, and `claudebar`'s module
+/// name differs from its refresh topic (`claude`).
+///
+/// `None` means "skip `dispatch_refresh` entirely", not "fall through to the
+/// generic full resync" — two cases: `bluetooth` is a native module with no
+/// daemon-tracked ironvar at all (nothing here could refresh), and a
+/// workspace tag pill's tip is already kept live by `mango.apply()` off its
+/// own `mmsg watch` event stream (mango.rs), so it never goes stale between
+/// hovers. Calling the fallback resync for either would cost a real refresh
+/// cycle for no matching content.
+///
+/// T15: `hotspot` joins the `battery`/`volume`/`docker` group — its own
+/// module name doubles as its refresh topic (`main.rs:379`), same as those
+/// three, now that hover opens its popup instead of a click.
+///
+/// T19: `wifi`/`eth`/`netsec` join the `cpu`/`memory`/`clock`/`date` group —
+/// each maps to its own `-detail` topic (`wifi-detail`/`eth-detail`/
+/// `sec-detail`), not its own module name, for the same reason those four
+/// do: the popup content is lazily built, not already kept fresh by an
+/// event stream the way `battery`/`volume`/`docker`/`hotspot` are.
+fn hover_refresh_topic(widget: &str) -> Option<&str> {
+    match widget {
+        "cpu" => Some("cpu-detail"),
+        "memory" => Some("mem-detail"),
+        "clock" => Some("clock-detail"),
+        "date" => Some("date-detail"),
+        "claudebar" => Some("claude"),
+        "wifi" => Some("wifi-detail"),
+        "eth" => Some("eth-detail"),
+        "netsec" => Some("sec-detail"),
+        "battery" | "volume" | "docker" | "hotspot" => Some(widget),
+        _ => None,
+    }
+}
+
+/// `Hover::Enter`'s pure state transition. Returns `Some(bar)` when a
+/// *different* widget's popup was already open and must be hidden now (the
+/// mouse jumped pill to pill with no gap) — the actual `ipc.hide_popup`
+/// call stays in the select loop so this branching is unit-testable without
+/// a live ironbar socket.
+///
+/// T-popup-hold: always cancels `hover_hide_due` first — any real hover
+/// activity (re-hovering the open pill, or jumping to a different one)
+/// supersedes a pending grace-hide from a just-abandoned `Hover::Exit`.
+fn hover_enter(
+    key: (String, String),
+    hover_pending: &mut Option<(String, String)>,
+    hover_due: &mut Option<Instant>,
+    hover_open: &mut Option<(String, String)>,
+    hover_hide_due: &mut Option<Instant>,
+) -> Option<String> {
+    *hover_hide_due = None;
+    if hover_open.as_ref() == Some(&key) {
+        // Already showing this exact (bar, widget): no-op, not a re-arm —
+        // a re-hover of the same pill must not restart the delay.
+        return None;
+    }
+    let hide = hover_open.take().map(|(old_bar, _)| old_bar);
+    *hover_pending = Some(key);
+    *hover_due = Some(Instant::now() + HOVER_DELAY);
+    hide
+}
+
+/// `Hover::Exit`'s pure state transition.
+///
+/// T-popup-hold: no longer hides on the spot when the popup was open —
+/// the pointer may be headed across `popup_gap` into the popup itself
+/// (bluetooth's own "can never reach it" report), which `on_mouse_exit`
+/// cannot tell apart from actually leaving for good. Arms
+/// `hover_hide_due` instead; the select loop closes it if nothing cancels
+/// that deadline first (`hover_enter` on any pill, or `hover_hold` on the
+/// popup). `hover_open` itself is left untouched — the popup is still
+/// genuinely showing until the grace period actually elapses.
+fn hover_exit(
+    key: (String, String),
+    hover_pending: &mut Option<(String, String)>,
+    hover_due: &mut Option<Instant>,
+    hover_open: &Option<(String, String)>,
+    hover_hide_due: &mut Option<Instant>,
+) {
+    if hover_pending.as_ref() == Some(&key) {
+        // Still waiting, never opened — cancel outright. This is the whole
+        // point of a cancelable debounce over a shell sleep.
+        *hover_pending = None;
+        *hover_due = None;
+    }
+    if hover_open.as_ref() == Some(&key) {
+        *hover_hide_due = Some(Instant::now() + HOVER_HIDE_GRACE);
+    }
+}
+
+/// `Hover::Hold`'s pure state transition — the pointer reached the popup's
+/// own content box (genconfig.rs's `popup()` wires this to the outer
+/// vertical box's `on_mouse_enter`). Cancels a pending grace-hide, the same
+/// "still here" signal a pill re-hover already gives via `hover_enter`.
+///
+/// `bar` is checked against `hover_open` rather than trusted outright: the
+/// popup box carries no widget name of its own (see `HoverEvent`'s doc
+/// comment), so this is the only cross-check available against acting on a
+/// stale event for a bar that isn't the one currently shown.
+fn hover_hold(bar: &str, hover_open: &Option<(String, String)>, hover_hide_due: &mut Option<Instant>) {
+    if hover_open.as_ref().is_some_and(|(b, _)| b == bar) {
+        *hover_hide_due = None;
+    }
+}
+
+/// `Hover::Release`'s pure state transition — the pointer left the popup's
+/// own content box after previously entering it (`Hold`). Arms the same
+/// grace-hide deadline `hover_exit` arms for a pill leave, so leaving the
+/// popup behaves exactly like leaving the pill it came from: one more short
+/// window to come back before the popup actually closes.
+fn hover_release(bar: &str, hover_open: &Option<(String, String)>, hover_hide_due: &mut Option<Instant>) {
+    if hover_open.as_ref().is_some_and(|(b, _)| b == bar) {
+        *hover_hide_due = Some(Instant::now() + HOVER_HIDE_GRACE);
+    }
+}
+
+async fn client_cmd(cmd: &str, quiet: bool) -> Result<(), String> {
     let resp = control::send(cmd).await.map_err(|e| e.to_string())?;
-    println!("{resp}");
+    if !quiet {
+        println!("{resp}");
+    }
     Ok(())
 }
 
 async fn run() -> Result<(), String> {
-    sys::set_timer_slack(500);
+    sys::set_timer_slack(ECO_TIMER_SLACK_MS);
 
     let clock = Clock::new().map_err(|e| format!("clock timerfd: {e}"))?;
     let clock_fd = AsyncFd::new(clock).map_err(|e| format!("clock AsyncFd: {e}"))?;
@@ -183,6 +610,10 @@ async fn run() -> Result<(), String> {
         .map_err(|e| format!("wheel arm: {e}"))?;
     let mut wheel_fd = AsyncFd::new(wheel).map_err(|e| format!("wheel AsyncFd: {e}"))?;
 
+    let pomo = Pomo::new().map_err(|e| format!("pomo timerfd: {e}"))?;
+    let mut pomo_fd = AsyncFd::new(pomo).map_err(|e| format!("pomo AsyncFd: {e}"))?;
+    pomo_fd.get_mut().catch_up_on_start().await;
+
     let mut mango = Mango::new();
     let mut net = Net::new();
     let mut audio = Audio::new();
@@ -192,6 +623,7 @@ async fn run() -> Result<(), String> {
     let mut docker = Docker::new();
     let mut hotspot = Hotspot::new();
     let mut darkmode = Darkmode::new();
+    let mut claude = Claude::new();
     let mut vars = Vars::new();
     let mut ipc = IronbarIpc::new();
     let mut stats = Stats::new();
@@ -211,7 +643,33 @@ async fn run() -> Result<(), String> {
     // inline, from the control socket and (hotspot only) the clock tick.
     let mut docker_due: Option<Instant> = None;
 
+    // Hover-to-open state (T-hover): one pending slot, matching the shape of
+    // every `_due` var above — a mouse can only be hovering one bar pill at
+    // a time, so one slot is correct, not a per-hover spawned task or a
+    // shell `sleep` (neither of which `on_mouse_exit` could cancel).
+    // `hover_due` already holds its own fire-at deadline (unlike the
+    // `_due` vars above, which store the event time and add
+    // `FLUSH_DEBOUNCE` at the sleep_until call site) — see the select arm
+    // below.
+    let mut hover_due: Option<Instant> = None;
+    // What the pending open, once `hover_due` elapses, will show:
+    // (bar, widget).
+    let mut hover_pending: Option<(String, String)> = None;
+    // What is actually shown right now — lets Hover::Exit tell "still
+    // waiting, cancel" apart from "already open, hide": (bar, widget).
+    let mut hover_open: Option<(String, String)> = None;
+    // T-popup-hold: when set, the bar in `hover_open` closes once this
+    // deadline elapses, unless `hover_enter`/`hover_hold` cancels it first
+    // — see `hover_exit`'s own doc comment for why this replaced an
+    // immediate hide.
+    let mut hover_hide_due: Option<Instant> = None;
+
     clock::refresh(&mut vars);
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+
+    pomo_fd.get_ref().refresh(&mut vars);
     if vars.has_dirty() {
         dirty_since = Some(Instant::now());
     }
@@ -268,6 +726,16 @@ async fn run() -> Result<(), String> {
         dirty_since = Some(Instant::now());
     }
 
+    // T6c: render whatever claudebar's cache already holds (likely stale or
+    // absent on a cold start), then kick off a real fetch in the background
+    // so the pill has fresh data soon rather than waiting for the next
+    // 5-minute-aligned tick.
+    claude.refresh(&mut vars);
+    if vars.has_dirty() {
+        dirty_since = Some(Instant::now());
+    }
+    claude::spawn_fetch();
+
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| format!("sigterm handler: {e}"))?;
 
@@ -282,6 +750,14 @@ async fn run() -> Result<(), String> {
                     Ok(mut guard) => {
                         guard.get_inner().on_tick(&mut vars);
                         guard.clear_ready();
+                        if vars.has_dirty() {
+                            dirty_since = Some(Instant::now());
+                        }
+                        // T7c: the pomodoro's minute-granular countdown and
+                        // its break-time nag ride this same tick — no timer
+                        // of their own beyond the one phase-boundary timerfd
+                        // (pomo_fd's own select arm, below).
+                        pomo_fd.get_mut().on_minute(&mut vars).await;
                         if vars.has_dirty() {
                             dirty_since = Some(Instant::now());
                         }
@@ -307,6 +783,14 @@ async fn run() -> Result<(), String> {
                             if vars.has_dirty() {
                                 dirty_since = Some(Instant::now());
                             }
+                        }
+                        // T6c: claudebar's own 300s-aligned fetch, riding
+                        // this tick instead of a dedicated timerfd — see
+                        // claude.rs::due_on_tick. The fetch itself runs in
+                        // the background (claude::spawn_fetch), so this
+                        // never blocks the tick handler.
+                        if claude::due_on_tick() {
+                            claude::spawn_fetch();
                         }
                         // T6a eco path: the wheel is disarmed in eco (see
                         // wheel.rs module doc), so cpu/memory ride this tick
@@ -347,6 +831,19 @@ async fn run() -> Result<(), String> {
                         }
                     }
                     Err(e) => eprintln!("mango-bard: wheel fd error: {e}"),
+                }
+            }
+
+            r = pomo_fd.readable_mut() => {
+                match r {
+                    Ok(mut guard) => {
+                        guard.get_inner_mut().on_boundary(&mut vars).await;
+                        guard.clear_ready();
+                        if vars.has_dirty() {
+                            dirty_since = Some(Instant::now());
+                        }
+                    }
+                    Err(e) => eprintln!("mango-bard: pomo fd error: {e}"),
                 }
             }
 
@@ -461,51 +958,90 @@ async fn run() -> Result<(), String> {
                 if let Ok((mut stream, _)) = accepted {
                     if let Ok(line) = control::read_line(&mut stream).await {
                         match control::parse(&line) {
+                            Line::Pomo(verb, arg) => {
+                                let reply = pomo_fd.get_mut().control(&verb, arg.as_deref(), &mut vars).await;
+                                if vars.has_dirty() {
+                                    dirty_since = Some(Instant::now());
+                                }
+                                let _ = control::reply(&mut stream, &reply).await;
+                            }
                             Line::Ping => { let _ = control::reply(&mut stream, "ok").await; }
                             Line::Stats => { let _ = control::reply(&mut stream, &stats.to_json(pm_mode)).await; }
                             Line::Refresh(topic) => {
                                 eprintln!("mango-bard: refresh requested: {topic}");
-                                match topic.as_str() {
-                                    "clock" => clock::refresh(&mut vars),
-                                    "mango" | "workspaces" | "window" => mango.apply(&mut vars),
-                                    "net" | "netsec" | "wifi" | "eth" | "wifi-scan" => {
-                                        net.refresh_busy_var(&mut vars);
-                                        regrade_due = Some(Instant::now());
-                                    }
-                                    "audio" | "volume" | "mic" => {
-                                        audio_due = Some(Instant::now());
-                                    }
-                                    "power" | "battery" | "bat" | "ac" => {
-                                        power_due = Some(Instant::now());
-                                    }
-                                    "cpu" => cpu.refresh(&mut vars),
-                                    "memory" | "mem" => mem.refresh(&mut vars),
-                                    "docker" => {
-                                        docker_due = Some(Instant::now());
-                                    }
-                                    // hotspot.sh's trap pokes this on every
-                                    // --status/--menu/--toggle exit
-                                    // (hotspot.sh:32) — T6b D2's only event
-                                    // source for this collector.
-                                    "hotspot" => hotspot.refresh(&mut vars).await,
-                                    // switchwall.sh pokes this next to its
-                                    // existing waybar pkill — T6b D3.
-                                    "darkmode" => darkmode.refresh(&mut vars).await,
-                                    _ => {
-                                        clock::refresh(&mut vars);
-                                        mango.apply(&mut vars);
-                                        audio.refresh(&mut vars).await;
-                                        power.refresh(&mut vars, pm_mode).await;
-                                        cpu.refresh(&mut vars);
-                                        mem.refresh(&mut vars);
-                                        docker.refresh(&mut vars).await;
-                                        hotspot.refresh(&mut vars).await;
-                                        darkmode.refresh(&mut vars).await;
-                                    }
-                                }
+                                dispatch_refresh(
+                                    &topic, &mut vars, &mut mango, &mut net, &mut audio,
+                                    &mut power, &mut cpu, &mut mem, &mut docker, &mut hotspot,
+                                    &mut darkmode, &mut claude, pm_mode, &mut stats,
+                                    &mut regrade_due, &mut audio_due, &mut power_due,
+                                    &mut docker_due,
+                                ).await;
                                 if vars.has_dirty() {
                                     dirty_since = Some(Instant::now());
                                 }
+                                let _ = control::reply(&mut stream, "ok").await;
+                            }
+                            Line::Hover(event, bar, widget) => {
+                                // hover_enter/hover_exit do the actual state
+                                // mutation and return which bar (if any)
+                                // needs an unconditional hide_popup — the IO
+                                // stays here so the branching logic itself
+                                // is unit-testable (see main.rs's own tests).
+                                let hide = match event {
+                                    HoverEvent::Enter => hover_enter(
+                                        (bar, widget),
+                                        &mut hover_pending,
+                                        &mut hover_due,
+                                        &mut hover_open,
+                                        &mut hover_hide_due,
+                                    ),
+                                    HoverEvent::Exit => {
+                                        hover_exit(
+                                            (bar, widget),
+                                            &mut hover_pending,
+                                            &mut hover_due,
+                                            &hover_open,
+                                            &mut hover_hide_due,
+                                        );
+                                        None
+                                    }
+                                };
+                                if let Some(hide_bar) = hide {
+                                    let _ = ipc.hide_popup(&hide_bar).await;
+                                }
+                                // T13: eco slack (500ms) would let `hover_due`
+                                // fire up to half a second late on top of
+                                // `HOVER_DELAY` itself — and now the same for
+                                // `hover_hide_due`'s own grace window
+                                // (T-popup-hold). Tight while either is
+                                // pending — a hover means the user is at the
+                                // machine, so there is no idle wakeup to
+                                // coalesce.
+                                sys::set_timer_slack(if hover_due.is_some() || hover_hide_due.is_some() {
+                                    0
+                                } else {
+                                    ECO_TIMER_SLACK_MS
+                                });
+                                let _ = control::reply(&mut stream, "ok").await;
+                            }
+                            Line::HoverPopup(event, bar) => {
+                                // Hold/release never trigger an immediate
+                                // hide_popup — they only arm/cancel
+                                // `hover_hide_due` (T-popup-hold; see
+                                // PopupHoverEvent's own doc comment).
+                                match event {
+                                    PopupHoverEvent::Hold => {
+                                        hover_hold(&bar, &hover_open, &mut hover_hide_due)
+                                    }
+                                    PopupHoverEvent::Release => {
+                                        hover_release(&bar, &hover_open, &mut hover_hide_due)
+                                    }
+                                }
+                                sys::set_timer_slack(if hover_due.is_some() || hover_hide_due.is_some() {
+                                    0
+                                } else {
+                                    ECO_TIMER_SLACK_MS
+                                });
                                 let _ = control::reply(&mut stream, "ok").await;
                             }
                             Line::Unknown => { let _ = control::reply(&mut stream, "unknown").await; }
@@ -566,50 +1102,105 @@ async fn run() -> Result<(), String> {
                 docker_due = None;
             }
 
+            // Hover-open debounce (T-hover) — same single-slot shape as the
+            // `_due` arms above, but `hover_due` already holds the fire-at
+            // deadline (set at Hover::Enter), not an event time needing
+            // `HOVER_DELAY` added here.
+            _ = async {
+                match hover_due {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some((bar, widget)) = hover_pending.take() {
+                    if let Some(topic) = hover_refresh_topic(&widget) {
+                        dispatch_refresh(
+                            topic, &mut vars, &mut mango, &mut net, &mut audio,
+                            &mut power, &mut cpu, &mut mem, &mut docker, &mut hotspot,
+                            &mut darkmode, &mut claude, pm_mode, &mut stats,
+                            &mut regrade_due, &mut audio_due, &mut power_due,
+                            &mut docker_due,
+                        ).await;
+                    } else if widget == "pomo" {
+                        // Passive peek only — `pomo.refresh()` is a pure
+                        // render from already-current state, never the
+                        // mutating `pomo click`/`toggle` verb. Hover must
+                        // never trigger a mutating action.
+                        pomo_fd.get_ref().refresh(&mut vars);
+                    }
+                    // T13: flush synchronously here, before show_popup,
+                    // instead of only arming `dirty_since` and leaving the
+                    // fresh tip content to land on the next `FLUSH_DEBOUNCE`
+                    // tick — that gap used to show the *previous* tip for
+                    // 150ms after the popup was already visible.
+                    if vars.has_dirty() {
+                        flush_vars(&mut vars, &mut ipc, &mut stats).await;
+                        dirty_since = if vars.has_dirty() { Some(Instant::now()) } else { None };
+                    }
+                    match ipc.show_popup(&bar, &widget).await {
+                        Ok(()) => hover_open = Some((bar, widget)),
+                        Err(e) => {
+                            stats.ipc_errors += 1;
+                            eprintln!("mango-bard: hover show_popup error: {e}");
+                        }
+                    }
+                }
+                hover_due = None;
+                // T13: the debounce fired — restore eco slack now that no
+                // hover is pending (Line::Hover's own arm handles the other
+                // two transitions: Enter tightens, an Exit before firing
+                // clears `hover_due` and restores there instead).
+                // T-popup-hold: `hover_hide_due` is always None here — it's
+                // only ever armed by an Exit/Release on a popup that's
+                // already open, and `hover_enter` (this popup's own open
+                // path started there) unconditionally clears it — but the
+                // check costs nothing and keeps this line correct even if
+                // that invariant ever changes.
+                sys::set_timer_slack(if hover_hide_due.is_some() {
+                    0
+                } else {
+                    ECO_TIMER_SLACK_MS
+                });
+            }
+
+            // Popup grace-hide (T-popup-hold) — same single-slot shape as
+            // `hover_due` above. Fires `HOVER_HIDE_GRACE` after a pill or
+            // the popup itself was left with nothing cancelling it first
+            // (see `hover_exit`/`hover_release`'s own doc comments).
+            _ = async {
+                match hover_hide_due {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some((bar, _)) = hover_open.take() {
+                    let _ = ipc.hide_popup(&bar).await;
+                }
+                hover_hide_due = None;
+                sys::set_timer_slack(if hover_due.is_some() {
+                    0
+                } else {
+                    ECO_TIMER_SLACK_MS
+                });
+            }
+
             _ = async {
                 match dirty_since {
                     Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t + FLUSH_DEBOUNCE)).await,
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                stats.flushes += 1;
-                if ipc.restarted() {
-                    vars.mark_all_dirty();
-                }
-                loop {
-                    let next = vars.peek_dirty().map(|(k, v)| (k.to_string(), v.to_string()));
-                    let Some((k, v)) = next else { break };
-                    // `@class/` keys never reach the wire as ironvars — they
-                    // route to `style add-class`/`remove-class` instead
-                    // (mango.rs: CLASS_PREFIX doc comment). A module may hold
-                    // more than one independently dirty-tracked class (netsec
-                    // needs both its verdict class and an independent `eco`
-                    // class — IRONBAR.md T3): the key format is
-                    // `@class/<module>[#<slot>]`, and only the module half
-                    // (before `#`) is a real ironbar module name — the slot
-                    // exists purely to keep the two keys apart in `Vars`.
-                    let result = match k.strip_prefix(mango::CLASS_PREFIX) {
-                        Some(module_key) => {
-                            let module = module_key.split('#').next().unwrap_or(module_key);
-                            let old = vars.live_value(&k).map(str::to_string);
-                            let r = ipc.set_class(module, old.as_deref(), &v).await;
-                            if r.is_ok() {
-                                stats.style_sets += 1;
-                            }
-                            r
-                        }
-                        None => ipc.var_set(&k, &v).await,
-                    };
-                    match result {
-                        Ok(()) => { vars.ack(&k); stats.var_sets += 1; }
-                        Err(e) => { stats.ipc_errors += 1; eprintln!("mango-bard: ipc error setting {k}: {e}"); break; }
-                    }
-                }
+                flush_vars(&mut vars, &mut ipc, &mut stats).await;
                 dirty_since = if vars.has_dirty() { Some(Instant::now()) } else { None };
             }
 
             _ = sigterm.recv() => {
                 eprintln!("mango-bard: SIGTERM, shutting down");
+                // FOCUS.md §5.3: a dead daemon must not leave every
+                // notification silenced indefinitely — release unconditionally,
+                // a no-op (makoctl mode -r on a mode that isn't active) if
+                // nothing had DND on.
+                pomo_fd.get_ref().release_dnd().await;
                 // A silent `mmsg watch` never takes SIGPIPE and leaks
                 // forever (mango.rs: Watch::kill doc comment) — kill_on_drop
                 // alone isn't enough since nothing drops `mango` before exit.
@@ -624,5 +1215,199 @@ async fn run() -> Result<(), String> {
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(bar: &str, widget: &str) -> (String, String) {
+        (bar.to_string(), widget.to_string())
+    }
+
+    #[test]
+    fn enter_then_exit_before_the_delay_elapses_cancels_the_pending_open() {
+        let mut pending = None;
+        let mut due = None;
+        let mut open = None;
+        let mut hide_due = None;
+        let hide = hover_enter(
+            key("bar-eDP-1", "cpu"),
+            &mut pending,
+            &mut due,
+            &mut open,
+            &mut hide_due,
+        );
+        assert_eq!(hide, None);
+        assert_eq!(pending, Some(key("bar-eDP-1", "cpu")));
+        assert!(due.is_some());
+
+        hover_exit(
+            key("bar-eDP-1", "cpu"),
+            &mut pending,
+            &mut due,
+            &open,
+            &mut hide_due,
+        );
+        assert_eq!(pending, None);
+        assert_eq!(due, None);
+        assert_eq!(open, None);
+        assert_eq!(
+            hide_due, None,
+            "never opened, so there is nothing to grace-hide"
+        );
+    }
+
+    #[test]
+    fn enter_while_a_different_widget_is_open_hides_the_old_one_and_pends_the_new() {
+        let mut pending = None;
+        let mut due = None;
+        let mut open = Some(key("bar-eDP-1", "cpu"));
+        // T-popup-hold: a stale grace-hide (e.g. left over from the widget
+        // this Enter is about to replace) must be cancelled unconditionally.
+        let mut hide_due = Some(Instant::now());
+
+        let hide = hover_enter(
+            key("bar-eDP-1", "battery"),
+            &mut pending,
+            &mut due,
+            &mut open,
+            &mut hide_due,
+        );
+        assert_eq!(
+            hide,
+            Some("bar-eDP-1".to_string()),
+            "the previously open widget's bar must be hidden"
+        );
+        assert_eq!(open, None);
+        assert_eq!(pending, Some(key("bar-eDP-1", "battery")));
+        assert!(due.is_some());
+        assert_eq!(hide_due, None);
+    }
+
+    #[test]
+    fn exit_on_an_already_open_popup_arms_the_grace_hide() {
+        // T-popup-hold: no immediate hide — the pointer may be headed into
+        // the popup itself (see hover_exit's own doc comment). hover_open
+        // stays put; only a grace deadline gets armed.
+        let mut pending = None;
+        let mut due = None;
+        let open = Some(key("bar-eDP-1", "docker"));
+        let mut hide_due = None;
+
+        hover_exit(
+            key("bar-eDP-1", "docker"),
+            &mut pending,
+            &mut due,
+            &open,
+            &mut hide_due,
+        );
+        assert_eq!(open, Some(key("bar-eDP-1", "docker")), "still showing");
+        assert!(hide_due.is_some(), "grace-hide must be armed");
+    }
+
+    #[test]
+    fn re_entering_the_already_open_widget_is_a_no_op() {
+        // A re-hover of the same pill must not restart the delay or touch
+        // hover_open — but it must still cancel any grace-hide the matching
+        // Exit had already armed (the whole point of the grace window).
+        let mut pending = None;
+        let mut due = None;
+        let mut open = Some(key("bar-eDP-1", "volume"));
+        let mut hide_due = Some(Instant::now());
+
+        let hide = hover_enter(
+            key("bar-eDP-1", "volume"),
+            &mut pending,
+            &mut due,
+            &mut open,
+            &mut hide_due,
+        );
+        assert_eq!(hide, None);
+        assert_eq!(pending, None, "no pending open should be armed");
+        assert_eq!(due, None);
+        assert_eq!(open, Some(key("bar-eDP-1", "volume")));
+        assert_eq!(hide_due, None);
+    }
+
+    #[test]
+    fn exit_on_an_unrelated_widget_touches_nothing() {
+        let mut pending = Some(key("bar-eDP-1", "cpu"));
+        let mut due = Some(Instant::now());
+        let open = None;
+        let mut hide_due = None;
+
+        hover_exit(
+            key("bar-eDP-1", "bluetooth"),
+            &mut pending,
+            &mut due,
+            &open,
+            &mut hide_due,
+        );
+        assert_eq!(pending, Some(key("bar-eDP-1", "cpu")));
+        assert!(due.is_some());
+        assert_eq!(hide_due, None);
+    }
+
+    #[test]
+    fn hold_cancels_the_grace_hide_for_the_open_bar() {
+        let open = Some(key("bar-eDP-1", "cpu"));
+        let mut hide_due = Some(Instant::now());
+        hover_hold("bar-eDP-1", &open, &mut hide_due);
+        assert_eq!(hide_due, None);
+    }
+
+    #[test]
+    fn hold_on_a_different_bar_than_the_open_one_touches_nothing() {
+        // Defensive cross-check (HoverPopup carries no widget name) — a
+        // stale/mismatched bar must not cancel another bar's grace-hide.
+        let open = Some(key("bar-eDP-1", "cpu"));
+        let mut hide_due = Some(Instant::now());
+        hover_hold("bar-default", &open, &mut hide_due);
+        assert!(hide_due.is_some());
+    }
+
+    #[test]
+    fn release_arms_the_grace_hide_for_the_open_bar() {
+        let open = Some(key("bar-eDP-1", "cpu"));
+        let mut hide_due = None;
+        hover_release("bar-eDP-1", &open, &mut hide_due);
+        assert!(hide_due.is_some());
+    }
+
+    #[test]
+    fn release_on_a_different_bar_than_the_open_one_touches_nothing() {
+        let open = Some(key("bar-eDP-1", "cpu"));
+        let mut hide_due = None;
+        hover_release("bar-default", &open, &mut hide_due);
+        assert_eq!(hide_due, None);
+    }
+
+    #[test]
+    fn hover_refresh_topic_maps_lazy_detail_and_alias_widgets() {
+        assert_eq!(hover_refresh_topic("cpu"), Some("cpu-detail"));
+        assert_eq!(hover_refresh_topic("memory"), Some("mem-detail"));
+        assert_eq!(hover_refresh_topic("clock"), Some("clock-detail"));
+        assert_eq!(hover_refresh_topic("date"), Some("date-detail"));
+        assert_eq!(hover_refresh_topic("claudebar"), Some("claude"));
+        assert_eq!(hover_refresh_topic("battery"), Some("battery"));
+        assert_eq!(hover_refresh_topic("volume"), Some("volume"));
+        assert_eq!(hover_refresh_topic("docker"), Some("docker"));
+        assert_eq!(hover_refresh_topic("hotspot"), Some("hotspot")); // T15
+                                                                     // T19
+        assert_eq!(hover_refresh_topic("wifi"), Some("wifi-detail"));
+        assert_eq!(hover_refresh_topic("eth"), Some("eth-detail"));
+        assert_eq!(hover_refresh_topic("netsec"), Some("sec-detail"));
+    }
+
+    #[test]
+    fn hover_refresh_topic_skips_bluetooth_and_workspace_pills() {
+        // bluetooth: native module, no daemon-tracked ironvar to refresh.
+        // workspace pills: already kept fresh by mango.apply()'s own event
+        // stream. Neither should fall through to the generic full resync.
+        assert_eq!(hover_refresh_topic("bluetooth"), None);
+        assert_eq!(hover_refresh_topic("ws-eDP-1-1"), None);
+        assert_eq!(hover_refresh_topic("pomo"), None); // handled separately
     }
 }

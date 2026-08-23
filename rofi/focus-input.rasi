@@ -1,0 +1,96 @@
+/* One-line input prompt shared by focus-task.sh, focus-note.sh,
+   focus-resume.sh and focus-review.sh's own loop picker. Same inputbar/
+   entry look as config.rasi, minus the listview — a plain capture prompt
+   needs no candidate list. Themed via matugen — colors.rasi is regenerated
+   on every wallpaper switch, this file is the static layout and stays put. */
+configuration {
+	font: "IBM Plex Sans 11";
+}
+
+@import "colors.rasi"
+
+* {
+	background-color: transparent;
+}
+
+window {
+	background-color: @background;
+	border: 1px;
+	border-color: @border-color;
+	border-radius: 18px;
+	width: 480px;
+	location: center;
+	padding: 10px;
+}
+
+mainbox {
+	padding: 4px;
+}
+
+/* Unlike config.rasi's drun/run prompts (generic "Launch", replaced by a
+   plain search icon there — see that file's own comment), each script here
+   passes a specific `-p` label ("Focus on", "Parking lot", the resume
+   task) that is worth reading, so the text `prompt` widget stays instead
+   of an icon-only glyph. */
+inputbar {
+	children: [ "prompt", "entry" ];
+	padding: 10px 14px;
+	spacing: 10px;
+	border-radius: 14px;
+	background-color: @surface-high;
+	text-color: @foreground;
+}
+
+prompt {
+	expand: false;
+	margin: 0px 0.5em 0px 0px;
+	text-color: @accent;
+}
+
+entry {
+	placeholder: "…";
+	placeholder-color: @muted;
+	text-color: @foreground;
+}
+
+/* focus-review.sh's own use of this theme pipes real candidates (the open
+   parking-lot loops) through the same prompt — style the listview too, in
+   case it renders, matching config.rasi's own element rules. */
+listview {
+	padding: 8px 0px 0px;
+	spacing: 2px;
+	border: 0;
+	scrollbar: false;
+}
+
+element {
+	padding: 8px 12px;
+	border-radius: 10px;
+	background-color: transparent;
+}
+
+element normal.normal, element alternate.normal {
+	background-color: transparent;
+	text-color: @foreground;
+}
+
+element selected.normal {
+	background-color: @accent-soft;
+	text-color: @on-accent-soft;
+}
+
+element-text {
+	background-color: inherit;
+	text-color: inherit;
+}
+
+message {
+	border: 0;
+	padding: 2px 12px 8px;
+	background-color: transparent;
+}
+
+message textbox {
+	font: "IBM Plex Sans 9";
+	text-color: @outline;
+}

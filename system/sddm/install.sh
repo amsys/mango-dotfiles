@@ -48,6 +48,17 @@ echo "==> sudoers rule -> /etc/sudoers.d/sddm-theme-sync"
 visudo -c -q -f "$SRC_DIR/sudoers.d-sddm-theme-sync"
 install -m 0440 -o root -g root "$SRC_DIR/sudoers.d-sddm-theme-sync" /etc/sudoers.d/sddm-theme-sync
 
+echo "==> crash-resilient session entry -> /usr/local/share/wayland-sessions/mango.desktop"
+# Shadows the package's /usr/share/wayland-sessions/mango.desktop: /usr/local
+# precedes /usr/share in SDDM's SessionDir search, and pacman never touches
+# /usr/local, so this survives a mangowm-git upgrade. Same file name, so
+# SDDM's remembered-last-session still resolves it with no action needed at
+# the greeter. Exec launches mango through mango/scripts/session.sh, which
+# restarts the compositor in place instead of dropping to this login screen
+# on a crash — see plans/iterative-watching-spring.md.
+install -D -m 0644 -o root -g root "$SRC_DIR/mango.desktop" \
+	/usr/local/share/wayland-sessions/mango.desktop
+
 echo "==> /etc/sddm.conf"
 [ -f /etc/sddm.conf ] && cp -a /etc/sddm.conf "/etc/sddm.conf.bak.$STAMP"
 install -m 0644 -o root -g root "$SRC_DIR/sddm.conf" /etc/sddm.conf
@@ -60,5 +71,7 @@ Installed. Next:
   sddm-greeter-qt6 --test-mode --theme $THEME_DIR      # look at it before trusting it
   sudo systemctl restart sddm                          # with a TTY available
 
-Rollback: sudo cp /etc/sddm.conf.bak.$STAMP /etc/sddm.conf
+Rollback:
+  sudo cp /etc/sddm.conf.bak.$STAMP /etc/sddm.conf
+  sudo rm /usr/local/share/wayland-sessions/mango.desktop
 EOF

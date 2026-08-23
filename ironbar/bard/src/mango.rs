@@ -245,6 +245,58 @@ fn class_key(mon: &str, tag: u64) -> String {
     format!("{CLASS_PREFIX}{}", ws_module(mon, tag))
 }
 
+/// Cap on the dots drawn under a workspace pill's number — see [`tag_label`].
+/// A ring/dot count past this stops reading as countable at pill size, same
+/// reasoning the old dashed-ring `count_class` used for its own "dash-4plus"
+/// bucket.
+const MAX_DOTS: usize = 5;
+
+/// Two-line Pango label for a workspace pill: the tag number, then a small
+/// centred dot row underneath, one dot per window, capped at [`MAX_DOTS`].
+/// Replaces the T9 dashed-ring `count_class`/`count_class_key` pair — a
+/// literal dot count reads at a glance without needing a
+/// `@class/<module>#count` CSS slot at all, so this rides the pill's own
+/// `bar` label var instead of a class.
+///
+/// T16: the dot row is now emitted even at zero windows (one dot,
+/// `alpha="1%"`, effectively invisible — Pango rejects a literal `0%`)
+/// instead of collapsing to a bare one-line number. A tag with no windows
+/// used to render a shorter block than a tag with windows, so GTK centred
+/// each at a different height inside the pill and no single `.ws` padding
+/// value in style.css could line both up with the clock text next to them.
+/// A constant two-line block makes the padding correction constant too.
+///
+/// T20: three lines now, not two. The two-line block put the number above
+/// the vertical centre of the pill's oval — the dot row's height hung off
+/// the bottom only, and style.css compensated with an asymmetric
+/// screenshot-tuned top padding that centred the block against its
+/// neighbours but never centred the number inside its own oval. A mirror
+/// line above the number (same glyphs, always `alpha="1%"`) makes the
+/// block symmetric: the number is the block's exact centre, so one plain
+/// symmetric `.ws` padding centres it in the oval and against the row at
+/// the same time. No tuned constant left to drift.
+pub fn tag_label(n: u64, win_count: usize) -> String {
+    let dots = win_count.min(MAX_DOTS);
+    let glyphs: String = "\u{2022}".repeat(dots.max(1));
+    let alpha = if dots == 0 { "1%" } else { "45%" };
+    format!(
+        "<span size=\"38%\" alpha=\"1%\">{glyphs}</span>\n{n}\n<span size=\"38%\" alpha=\"{alpha}\">{glyphs}</span>"
+    )
+}
+
+/// Static label for the `.ws-overview` pill — same three-line shape as
+/// [`tag_label`] (invisible mirror line, content, invisible mirror line),
+/// so the overview pill's height matches a numbered pill's exactly. Without
+/// this, a bare one-line "overview" label made GTK size the overview oval
+/// shorter than the pills it replaces, since ovals in the same row don't
+/// otherwise share a forced height. Both mirror lines are always invisible
+/// (`alpha="1%"`, `win_count = 0`'s case in `tag_label`) — the overview
+/// pill has no window count of its own to show a real dot row for.
+pub fn overview_label() -> String {
+    let dot = "\u{2022}";
+    format!("<span size=\"38%\" alpha=\"1%\">{dot}</span>\noverview\n<span size=\"38%\" alpha=\"1%\">{dot}</span>")
+}
+
 pub fn var_tags(slug: &str) -> String {
     format!("ws_{slug}_tags")
 }
@@ -255,6 +307,13 @@ pub fn var_ov(slug: &str) -> String {
 
 pub fn var_tip(slug: &str, tag: u64) -> String {
     format!("ws_{slug}_{tag}_tip")
+}
+
+/// The pill's own two-line `bar` label var — see [`tag_label`]. Named next
+/// to `var_tip` since both are set from the same `apply()` loop and both
+/// need a matching `ironvar_defaults` entry in genconfig.rs.
+pub fn var_lbl(slug: &str, tag: u64) -> String {
+    format!("ws_{slug}_{tag}_lbl")
 }
 
 // ---------------------------------------------------------------- watch
@@ -485,6 +544,11 @@ impl Mango {
                     continue;
                 };
                 vars.set(&class_key(name, tag), class.css());
+                vars.set(&var_lbl(slug, tag), tag_label(tag, wins.len()));
+                // The popup body already *is* the window list — a
+                // "right-click: window list" footer told the user to do the
+                // thing they were already looking at, so it's dropped
+                // rather than ported through set_tip's HINTS mechanism.
                 vars.set(&var_tip(slug, tag), crate::tooltip::window_list(&wins));
             }
         }
@@ -549,6 +613,60 @@ mod tests {
         assert_eq!(feed(2, "").unwrap().0, Class::Active);
         assert_eq!(feed(3, "").unwrap().0, Class::Urgent);
         assert_eq!(feed(4, "").unwrap().0, Class::Empty);
+    }
+
+    #[test]
+    fn tag_label_dots_cap_at_five_and_stay_invisible_at_zero() {
+        // T16/T20: zero windows still renders a full block (one dot,
+        // alpha 1%) so the block height is constant regardless of
+        // window count, and a mirror line above the number keeps the
+        // number at the block's centre — see tag_label's own doc comment.
+        assert_eq!(
+            tag_label(3, 0),
+            "<span size=\"38%\" alpha=\"1%\">\u{2022}</span>\n3\n<span size=\"38%\" alpha=\"1%\">\u{2022}</span>"
+        );
+        assert_eq!(
+            tag_label(3, 1),
+            "<span size=\"38%\" alpha=\"1%\">\u{2022}</span>\n3\n<span size=\"38%\" alpha=\"45%\">\u{2022}</span>"
+        );
+        assert_eq!(
+            tag_label(3, 9),
+            format!(
+                "<span size=\"38%\" alpha=\"1%\">{d}</span>\n3\n<span size=\"38%\" alpha=\"45%\">{d}</span>",
+                d = "\u{2022}".repeat(5)
+            )
+        );
+    }
+
+    #[test]
+    fn overview_label_matches_tag_labels_line_count_for_height_parity() {
+        // T-next (item 5): `.ws-overview` must be the same height as a `.ws`
+        // pill, or the overview oval and the numbered pills it replaces
+        // don't line up. Same three-line shape as tag_label's zero-window
+        // case (one invisible dot both mirror lines), just "overview" where
+        // the number goes.
+        assert_eq!(
+            overview_label(),
+            "<span size=\"38%\" alpha=\"1%\">\u{2022}</span>\noverview\n<span size=\"38%\" alpha=\"1%\">\u{2022}</span>"
+        );
+        assert_eq!(
+            overview_label().matches('\n').count(),
+            tag_label(1, 0).matches('\n').count()
+        );
+    }
+
+    #[test]
+    fn tag_one_dots_match_its_window_count() {
+        // T9/T-next: feed(1, "") has 2 windows (kitty, firefox) per
+        // tag_one_window_rows_match above.
+        let (_, wins) = feed(1, "").unwrap();
+        assert_eq!(
+            tag_label(1, wins.len()),
+            format!(
+                "<span size=\"38%\" alpha=\"1%\">{d}</span>\n1\n<span size=\"38%\" alpha=\"45%\">{d}</span>",
+                d = "\u{2022}\u{2022}"
+            )
+        );
     }
 
     #[test]

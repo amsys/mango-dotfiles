@@ -69,12 +69,20 @@ copy_if_absent() {
 ((DRY_RUN)) && log "(dry run — no changes will be made)"
 
 log "-- symlinking config --"
-for dir in mango waybar kitty rofi matugen wlogout fish fontconfig git; do
+for dir in mango kitty rofi matugen wlogout fish fontconfig git hypr; do
 	log "$dir/"
 	link_tree "$REPO/$dir" "$XDG_CONFIG_HOME/$dir"
 done
 log "starship.toml"
 link "$REPO/starship.toml" "$XDG_CONFIG_HOME/starship.toml"
+log
+
+# ironbar/scripts, not the whole ironbar/ dir — that would also symlink the
+# mango-bard crate's Rust sources into ~/.config/ironbar/, which the
+# generated config.json (built fresh by start.sh on every login, never
+# checked in) already keeps clear of by design.
+log "ironbar/scripts/"
+link_tree "$REPO/ironbar/scripts" "$XDG_CONFIG_HOME/ironbar/scripts"
 log
 
 log "-- per-machine files (created once, never overwritten) --"
@@ -118,14 +126,14 @@ log
 # state-error, state-warning, state-offline, state-pause — with an empty
 # IconThemePath *and* an empty IconPixmap (confirmed still true on 34.0.1), so
 # the tray host has nothing to fall back on but the name. Those names ship
-# only in breeze/breeze-icons; under Adwaita waybar cannot resolve them and
-# draws a generic placeholder instead. Alias them onto the branded icons
-# nextcloud-client already installs. hicolor is the target because every GTK
-# icon theme falls back to it, so this works whatever icon theme is set
-# later. offline/pause have no branded artwork, so they land on the plain
-# cloud alongside ok. 24x24 has no sync/error/warning artwork upstream — the
-# `[[ -f ]]` guard below just skips those, and waybar falls back to the
-# nearest size it does have (16 or 32).
+# only in breeze/breeze-icons; under Adwaita the tray host cannot resolve
+# them and draws a generic placeholder instead. Alias them onto the branded
+# icons nextcloud-client already installs. hicolor is the target because
+# every GTK icon theme falls back to it, so this works whatever icon theme
+# is set later. offline/pause have no branded artwork, so they land on the
+# plain cloud alongside ok. 24x24 has no sync/error/warning artwork
+# upstream — the `[[ -f ]]` guard below just skips those, and the tray host
+# falls back to the nearest size it does have (16 or 32).
 NC_ICONS=/usr/share/icons/hicolor
 ICON_DEST="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
 log "-- Nextcloud tray icon names --"
@@ -146,11 +154,11 @@ log
 
 # GTK3 hardcodes its first-hover tooltip delay to 500ms at compile time
 # (gtktooltip.c HOVER_TIMEOUT) — no setting, gsettings key or CSS reaches it.
-# waybar/fast-tooltips.c is an LD_PRELOAD shim that intercepts the exported
+# ironbar/fast-tooltips.c is an LD_PRELOAD shim that intercepts the exported
 # gdk_threads_add_timeout_full() symbol and shortens just that one case.
 # Source is tracked; the compiled .so is machine-local build output, so it is
 # rebuilt here rather than shipped.
-SHIM_SRC="$REPO/waybar/fast-tooltips.c"
+SHIM_SRC="$REPO/ironbar/fast-tooltips.c"
 SHIM_SO="$HOME/.local/lib/mango/fast-tooltips.so"
 log "-- fast-tooltips LD_PRELOAD shim --"
 if ! command -v cc >/dev/null 2>&1; then
@@ -174,11 +182,56 @@ else
 fi
 log
 
+# mango-bard: the daemon behind the bar's dynamic content (IRONBAR.md).
+# Rebuilt only when a source file changed since the last build — same
+# staleness check as the fast-tooltips shim above, for the same reason
+# (skip the ~20s rebuild on every login when nothing changed).
+BARD_DIR="$REPO/ironbar/bard"
+BARD_BIN="$BARD_DIR/target/release/mango-bard"
+log "-- mango-bard --"
+if ! command -v cargo >/dev/null 2>&1; then
+	log "  skip:   cargo not installed"
+elif [[ -x "$BARD_BIN" && -z "$(find "$BARD_DIR/src" -name '*.rs' -newer "$BARD_BIN")" ]]; then
+	log "  keep:   $BARD_BIN (up to date)"
+elif ((DRY_RUN)); then
+	log "  (dry run) would run: cargo build --release (in $BARD_DIR)"
+else
+	if (cd "$BARD_DIR" && cargo build --release); then
+		log "  build:  $BARD_BIN"
+	else
+		log "  WARNING: mango-bard build failed — the bar will have no dynamic content."
+	fi
+fi
+if [[ -x "$BARD_BIN" ]]; then
+	log "  link:   ~/.local/bin/mango-bard -> $BARD_BIN"
+	((DRY_RUN)) || { mkdir -p "$HOME/.local/bin"; ln -sf "$BARD_BIN" "$HOME/.local/bin/mango-bard"; }
+fi
+log
+
+# systemd user unit — the self-healing restart waybar's own process
+# supervision gave the old bar for free (mango-bard.service's own
+# Description=). Linked via link(), not link_tree(), since it is the only
+# regular file under ironbar/ that is not source: install-config.sh keeps no
+# separate "units" list, so it is named explicitly here instead.
+log "-- mango-bard.service --"
+link "$REPO/ironbar/mango-bard.service" "$XDG_CONFIG_HOME/systemd/user/mango-bard.service"
+if ((DRY_RUN)); then
+	log "  (dry run) would run: systemctl --user daemon-reload && enable mango-bard.service"
+elif command -v systemctl >/dev/null 2>&1; then
+	systemctl --user daemon-reload
+	systemctl --user enable mango-bard.service
+	log "  enabled (starts at the next graphical-session.target, or now via"
+	log "  'systemctl --user start mango-bard.service')"
+else
+	log "  skip:   systemctl not available"
+fi
+log
+
 log "-- materializing matugen output --"
 if ((DRY_RUN)); then
 	log "  (dry run) would run: mango/scripts/switchwall.sh --noswitch"
 elif ! command -v matugen >/dev/null 2>&1; then
-	log "  WARNING: matugen not installed — skipping. Generated files (waybar"
+	log "  WARNING: matugen not installed — skipping. Generated files (ironbar"
 	log "  style, kitty theme, swaylock config, rofi colors, ...) won't exist"
 	log "  until you install matugen and run switchwall.sh yourself."
 else

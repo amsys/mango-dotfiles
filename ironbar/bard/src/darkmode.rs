@@ -1,4 +1,4 @@
-//! Dark/light indicator glyph. Ports src/waybar/scripts/darkmode.sh's status
+//! Dark/light indicator glyph. Ports src/ironbar/scripts/darkmode.sh's status
 //! half (its `--toggle` half stays shell — it re-runs switchwall.sh's whole
 //! matugen pipeline, not something to duplicate here).
 //!
@@ -6,19 +6,28 @@
 //! (`org.gnome.desktop.interface color-scheme`), written only by
 //! switchwall.sh. This collector never watches for changes itself — per
 //! IRONBAR.md T6b decision D3, switchwall.sh gains one `mango-bard refresh
-//! darkmode` line next to its existing `pkill -SIGUSR2 waybar`
-//! (switchwall.sh:120), rather than the daemon running its own `gsettings
-//! monitor` child (measured ~22 ctxt-switches/min idle — worse than every
-//! other watcher in this daemon, all of which measure 0/min).
+//! darkmode` line after every matugen regen, rather than the daemon running
+//! its own `gsettings monitor` child (measured ~22 ctxt-switches/min idle —
+//! worse than every other watcher in this daemon, all of which measure
+//! 0/min). T8: switchwall.sh's own `pkill -SIGUSR2 waybar` alongside that
+//! poke is gone with waybar — ironbar hot-loads its CSS on change and never
+//! needed a reload signal at all.
 
 use crate::vars::Vars;
 use tokio::process::Command;
 
 /// darkmode.sh:25 — shown while dark (click goes light).
-const IC_LIGHT_MODE: char = '\u{e518}';
+/// T8b: U+E518 (Material Symbols "light_mode") -> U+F0599 (sun, JetBrainsMono
+/// Nerd Font) — GTK4 cannot correctly rasterize Material Symbols Rounded's
+/// variable font on this system; see IRONBAR.md's T8b entry.
+const IC_LIGHT_MODE: char = '\u{f0599}';
 /// darkmode.sh:27 — shown while light (click goes dark). Icon shows the
 /// action, not the state (darkmode.sh:22-23's own comment).
-const IC_DARK_MODE: char = '\u{e51c}';
+/// T8b: U+E51C (Material Symbols "dark_mode") -> U+F186 (moon, JetBrainsMono
+/// Nerd Font Font Awesome) — same reason as IC_LIGHT_MODE above.
+/// T19: U+F186 -> U+F0594 (md-weather_night) — one-icon-family sweep
+/// (IRONBAR.md T19); now pairs with IC_LIGHT_MODE's own md-weather_sunny.
+const IC_DARK_MODE: char = '\u{f0594}';
 
 /// darkmode.sh:9-11 `is_dark()`: an unset or failed gsettings read counts as
 /// dark — the shell's `!= *prefer-light*` test is true for anything that

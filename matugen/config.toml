@@ -29,13 +29,14 @@ output_path = '~/.config/hypr/hyprland/colors.conf'
 input_path = '~/.config/matugen/templates/mango/colors.conf'
 output_path = '~/.config/mango/colors.conf'
 
-[templates.waybar]
-input_path = '~/.config/matugen/templates/waybar/style.css'
-output_path = '~/.config/waybar/style.css'
-
-[templates.claudebar]
-input_path = '~/.config/matugen/templates/waybar/claudebar.sh'
-output_path = '~/.config/waybar/scripts/claudebar.sh'
+# T8a: ironbar's own bar tracks the wallpaper palette, instead of the
+# T2-era stub's hardcoded One Dark hex (see IRONBAR.md). T8: waybar's own
+# `[templates.waybar]` and `[templates.claudebar]` (the claudebar.sh color/
+# icon-flag wrapper) are gone with waybar itself — mango-bard execs the
+# `claudebar` binary bare, per T6c, needing none of the wrapper's flags.
+[templates.ironbar]
+input_path = '~/.config/matugen/templates/ironbar/style.css'
+output_path = '~/.config/ironbar/style.css'
 
 [templates.hyprlock]
 input_path = '~/.config/matugen/templates/hyprland/hyprlock-colors.conf'

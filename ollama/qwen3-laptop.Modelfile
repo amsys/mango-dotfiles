@@ -1,0 +1,16 @@
+# Rebuild: ollama create qwen3-laptop -f src/ollama/qwen3-laptop.Modelfile
+#
+# FROM references the already-installed tag, so TEMPLATE, LICENSE, and every
+# other PARAMETER (num_ctx 65536, num_gpu 99, ...) are inherited unchanged —
+# only num_batch is overridden below. Confirm inheritance before trusting a
+# rebuild: `ollama show qwen3-laptop --modelfile` should still show num_ctx
+# 65536 and num_gpu 99 afterward.
+#
+# num_batch 128 (was 512): shrinks each GPU submission on the shared iGPU
+# (rcs0) so it preempts inside i915's timeout instead of running long enough
+# to trigger a GPU HANG + GT reset, which killed the compositor on
+# 2026-08-12 — see plans/iterative-watching-spring.md. Context length is
+# untouched; only work-per-submission changes. Generation speed (batch-1) is
+# unaffected — only prefill throughput drops slightly from the smaller batch.
+FROM qwen3-laptop:latest
+PARAMETER num_batch 128

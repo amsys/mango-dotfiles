@@ -53,7 +53,7 @@ cat <<EOF
 
 Installed. Next:
 
-  waybar/scripts/battery.sh | jq -r .tooltip   # "Where it goes" section should now appear
+  ironbar var get bat_tip                      # "Power" row should now show real watts
   sudo -n -l /usr/bin/powertop                 # must print the path with no password prompt
   sudo powertop --calibrate                    # once, on battery — teaches powertop the per-device power model
 

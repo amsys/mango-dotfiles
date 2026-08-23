@@ -10,10 +10,9 @@
 //! and `pactl -f json list sinks`/`sources`/`sink-inputs`. `jq` disappears
 //! entirely; `serde_json` (already a dependency) does the parsing.
 
+use crate::mango::CLASS_PREFIX;
 use crate::net::MonitorChild;
-use crate::tooltip::{
-    bad, bar, barico, dim, esc, good, grade, row, rule, sect, title, C_EMPTY, C_GOOD,
-};
+use crate::tooltip::{bad, bar, barico, dim, esc, good, grade, row, sect, set_titled, C_EMPTY, C_GOOD};
 use crate::vars::Vars;
 use serde_json::Value;
 use tokio::process::Command;
@@ -30,7 +29,15 @@ const IC_APP: char = '\u{f075a}'; // md-music-note
 /// config.jsonc:317 `format-source-muted` — waybar's own built-in
 /// `pulseaudio#source` module, unrelated to volume.sh, printed unwrapped
 /// (no `barico()`), matching that module's plain-glyph format string.
-const IC_MIC_MUTED: char = '\u{e02b}';
+/// T8b: U+E02B (waybar's own Material Symbols "mic_off") -> U+F131
+/// (mic-off, JetBrainsMono Nerd Font Font Awesome) — GTK4 cannot correctly
+/// rasterize Material Symbols Rounded's variable font on this system; see
+/// IRONBAR.md's T8b entry. Unlike IC_OUT/IC_MIC/IC_APP/ic_vol() above
+/// (all mdi-range Nerd Font glyphs baked into the static JBNF font file,
+/// confirmed rendering correctly), this one specifically needed a swap.
+/// T19: U+F131 -> U+F036D (md-microphone_off) — one-icon-family sweep
+/// (IRONBAR.md T19), same reasoning as genconfig.rs's colorpicker/snip swap.
+const IC_MIC_MUTED: char = '\u{f036d}';
 
 /// volume.sh:27-34 — the bar glyph, matching the ramp waybar's
 /// `format-icons` used. 0 and `<34` share a glyph in the original, so the
@@ -44,6 +51,23 @@ pub fn ic_vol(pct: i64, muted: bool) -> char {
         '\u{f0580}'
     } else {
         '\u{f057e}'
+    }
+}
+
+/// T9: opacity-by-level class (`.volume.quiet/mid/loud`, `style.css`),
+/// requested alongside dropping the bar text's `NN%` suffix so the icon
+/// alone still hints at the level. `muted` gets no separate bucket — the
+/// glyph itself already swaps (`ic_vol()` above), so no opacity trick is
+/// needed on top of that.
+pub fn volume_class(pct: i64, muted: bool) -> &'static str {
+    if muted {
+        "muted"
+    } else if pct < 34 {
+        "quiet"
+    } else if pct < 67 {
+        "mid"
+    } else {
+        "loud"
     }
 }
 
@@ -199,9 +223,6 @@ pub fn event_matches(line: &str) -> bool {
 /// every trailing newline from the final result regardless.
 fn build_tip(dev: &Dev, mic: Option<&Dev>, apps: &[App]) -> String {
     let mut tip = String::new();
-    tip.push_str(&title("Volume"));
-    tip.push_str(&rule(38));
-
     tip.push_str(&sect(&IC_OUT.to_string(), "Output"));
     tip.push_str(&row(&format!(
         "{:>3}%  {}",
@@ -314,17 +335,21 @@ impl Audio {
             None => {
                 // volume.sh:102-105 — no sink at all: plain text, no markup.
                 vars.set("vol_text", "");
-                vars.set("vol_tip", "No audio sink");
+                set_titled(vars, "vol_tip", "Volume", "No audio sink".to_string());
             }
             Some(d) => {
                 let sink_inputs =
                     parse_json(&run("pactl", &["-f", "json", "list", "sink-inputs"]).await);
                 let apps = app_lines(&sink_inputs);
+                // T9: icon only — the percentage moved into the popup this
+                // pill already opens on click, to stop crowding the
+                // wifi/eth/netsec trio next to it.
+                vars.set("vol_text", barico(ic_vol(d.pct, d.muted)));
                 vars.set(
-                    "vol_text",
-                    format!("{} {}%", barico(ic_vol(d.pct, d.muted)), d.pct),
+                    &format!("{CLASS_PREFIX}volume"),
+                    volume_class(d.pct, d.muted),
                 );
-                vars.set("vol_tip", build_tip(d, mic.as_ref(), &apps));
+                set_titled(vars, "vol_tip", "Volume", build_tip(d, mic.as_ref(), &apps));
             }
         }
     }
@@ -392,6 +417,18 @@ mod tests {
         assert_eq!(ic_vol(50, false), '\u{f0580}');
         assert_eq!(ic_vol(90, false), '\u{f057e}');
         assert_eq!(ic_vol(90, true), '\u{f075f}');
+    }
+
+    #[test]
+    fn volume_class_shares_ic_vol_thresholds_plus_a_muted_bucket() {
+        // T9: same 34/67 split as ic_vol()'s own ramp, but muted always
+        // wins regardless of pct (mirrors ic_vol's own precedence).
+        assert_eq!(volume_class(0, false), "quiet");
+        assert_eq!(volume_class(33, false), "quiet");
+        assert_eq!(volume_class(50, false), "mid");
+        assert_eq!(volume_class(90, false), "loud");
+        assert_eq!(volume_class(90, true), "muted");
+        assert_eq!(volume_class(0, true), "muted");
     }
 
     #[test]
@@ -479,7 +516,13 @@ mod tests {
             profile: "".into(),
         };
         let tip = build_tip(&dev, None, &[]);
-        assert!(tip.starts_with("<span"), "title markup expected: {tip}");
+        // T-popup-vert: "Volume" moved out of the body into its own
+        // `vol_tip_title` ironvar (see genconfig.rs::popup()) — the body
+        // now opens straight on the Output section.
+        assert!(
+            tip.trim_start().starts_with("<span"),
+            "section markup expected: {tip}"
+        );
         assert!(tip.contains("Output"));
         assert!(tip.contains("Playing"));
         assert!(!tip.contains("Microphone"), "no mic section without a Dev");

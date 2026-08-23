@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Root-owned power-mode helper. The only thing in this repo that writes CPU
 # EPP, the ACPI platform profile, turbo, PCI/NVMe runtime PM, snd_hda power
-# save, or vm.laptop_mode/dirty_writeback. Everything else about the two
-# power modes — deciding which mode to be in, brightness, docker, waybar
-# intervals — is userspace (mango/scripts/powermode.sh) and never needs root.
+# save, vm.laptop_mode/dirty_writeback, or the battery charge ceiling.
+# Everything else about the two power modes — deciding which mode to be in,
+# brightness, docker, waybar intervals — is userspace
+# (mango/scripts/powermode.sh) and never needs root.
 #
 # mango/powermode.conf, which this indirectly acts on, is a user-writable
 # file. This script never sources or reads it, and never reads a path out of
@@ -27,6 +28,7 @@ VM_LM="${MANGO_PM_VM_LM:-/proc/sys/vm/laptop_mode}"
 VM_WB="${MANGO_PM_VM_WB:-/proc/sys/vm/dirty_writeback_centisecs}"
 WIFI_DEV="${MANGO_WIFI_DEV:-wlo1}"
 BASELINE="${MANGO_PM_BASELINE:-/run/mango-powermode.baseline}"
+BAT_ROOT="${MANGO_PM_BAT_ROOT:-/sys/class/power_supply}"
 
 # ---------------------------------------------------------------- validation
 
@@ -59,6 +61,7 @@ valid() { # key value
 		esac
 		;;
 	WIFI_POWERSAVE) case "$2" in on | off) return 0 ;; esac ;;
+	CHARGE_LIMIT) case "$2" in 60 | 80 | 100) return 0 ;; esac ;;
 	esac
 	return 1
 }
@@ -140,6 +143,17 @@ apply_snd_hda() { # value
 apply_vm_laptop_mode() { writef "$VM_LM" "$1"; }
 apply_vm_dirty_wb() { writef "$VM_WB" "$1"; }
 
+# Charge ceiling. Not every battery/EC exposes this (charge_control_end_threshold
+# is asus_wmi-backed here; absent on machines/kernels without the quirk) — the
+# glob plus [ -e ] guard makes that silent rather than an error, same shape as
+# apply_profile()'s missing-PROFILE_FILE guard.
+apply_charge_limit() { # value
+	for f in "$BAT_ROOT"/BAT*/charge_control_end_threshold; do
+		[ -e "$f" ] && writef "$f" "$1"
+	done
+	return 0
+}
+
 apply_wifi_powersave() { # on|off
 	command -v iw > /dev/null 2>&1 || return 0
 	[ -d "/sys/class/net/$WIFI_DEV" ] || return 0
@@ -166,6 +180,8 @@ if [ "${1:-}" = test ]; then
 	valid SND_HDA_POWERSAVE baseline || { echo "SND_HDA_POWERSAVE baseline should be valid"; exit 1; }
 	valid VM_DIRTY_WB 50 && { echo "VM_DIRTY_WB below range should be refused"; exit 1; }
 	valid WIFI_POWERSAVE on || { echo "WIFI_POWERSAVE on should be valid"; exit 1; }
+	valid CHARGE_LIMIT 80 || { echo "CHARGE_LIMIT 80 should be valid"; exit 1; }
+	valid CHARGE_LIMIT 55 && { echo "CHARGE_LIMIT 55 should be refused (not in the closed set)"; exit 1; }
 	valid BOGUS_KEY anything && { echo "an unknown key must never validate"; exit 1; }
 
 	# --- EPP across multiple policies ---
@@ -215,6 +231,15 @@ if [ "${1:-}" = test ]; then
 	apply_snd_hda baseline
 	[ "$(cat "$SND_HDA_PARAM")" = 10 ] || { echo "apply_snd_hda baseline should restore 10"; exit 1; }
 
+	# --- charge limit: written when present, silent when the battery lacks it ---
+	mkdir -p "$T/bat/BAT0"
+	printf '100\n' > "$T/bat/BAT0/charge_control_end_threshold"
+	BAT_ROOT="$T/bat"
+	apply_charge_limit 80
+	[ "$(cat "$T/bat/BAT0/charge_control_end_threshold")" = 80 ] || { echo "apply_charge_limit should write the value"; exit 1; }
+	BAT_ROOT="$T/no-battery"
+	apply_charge_limit 80 || { echo "apply_charge_limit must not error when the attribute is absent"; exit 1; }
+
 	echo "ok"
 	exit 0
 fi
@@ -238,6 +263,7 @@ while IFS='=' read -r k v; do
 	VM_LAPTOP_MODE) apply_vm_laptop_mode "$v" ;;
 	VM_DIRTY_WB) apply_vm_dirty_wb "$v" ;;
 	WIFI_POWERSAVE) apply_wifi_powersave "$v" ;;
+	CHARGE_LIMIT) apply_charge_limit "$v" ;;
 	MODE) : ;; # informational only, no direct action
 	esac
 done

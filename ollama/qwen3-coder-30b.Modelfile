@@ -1,0 +1,7 @@
+# Rebuild: ollama create qwen3-coder:30b -f src/ollama/qwen3-coder-30b.Modelfile
+#
+# num_gpu 0: keeps this 18GB model off the iGPU entirely — see
+# qwen3-14b.Modelfile for why. The largest model on this machine is the
+# worst-case GPU-hang risk of the three.
+FROM qwen3-coder:30b
+PARAMETER num_gpu 0

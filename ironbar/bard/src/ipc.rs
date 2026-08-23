@@ -77,6 +77,43 @@ impl IronbarIpc {
         Ok(())
     }
 
+    /// Opens `widget`'s popup on `bar`.
+    ///
+    /// **Sends `show_popup`, reverted from a `toggle_popup` substitution.**
+    /// The earlier `"Module has no popup functionality"` error for every
+    /// `custom`-type module (cpu, memory, docker, battery, volume,
+    /// claudebar, clock, date, pomo, the workspace pills) was never a
+    /// `show_popup` routing problem — it was `genconfig.rs` giving every
+    /// popup-bearing module a `label` bar widget, and ironbar's own
+    /// `src/modules/custom/label.rs`/`button.rs` (v0.19.0) show only
+    /// `ButtonWidget` ever registers a popup anchor button
+    /// (`context.popup_buttons`). A `label`-only module reaches
+    /// `ipc/server/bar.rs::show_popup`'s `popup.buttons.first()` with an
+    /// empty vec and correctly reports no popup functionality — the
+    /// response was accurate. `toggle_popup` "worked" only because
+    /// `BarCommandType::TogglePopup`'s handler calls `show_popup` and
+    /// **discards its `Response`**, always returning `Response::Ok` — a
+    /// false positive that hid the real bug and gave up `show_popup`'s
+    /// genuine error reporting for nothing. Now that every popup-bearing
+    /// module's bar widget is a `button` (see `genconfig.rs`), `show_popup`
+    /// succeeds and correctly errors if it doesn't. Wire format read from
+    /// ironbar's own source (`src/ipc/commands.rs`, GitHub, v0.19.0), not
+    /// guessed: same shape as `style_cmd`'s `command":"style"` pair, one
+    /// level up (`"command":"bar"`).
+    pub async fn show_popup(&self, bar: &str, widget: &str) -> io::Result<()> {
+        self.request(&bar_cmd("show_popup", bar, Some(widget)))
+            .await
+    }
+
+    /// Closes whatever popup is open on `bar`, unconditionally — no
+    /// `widget_name` field, matching ironbar's own `hide_popup` subcommand
+    /// (it hides the bar's one open popup, not a specific widget's). This is
+    /// what fixes T9's bluetooth-autohide gap for real: hover-exit always
+    /// calls this, regardless of which popup GTK thinks is showing.
+    pub async fn hide_popup(&self, bar: &str) -> io::Result<()> {
+        self.request(&bar_cmd("hide_popup", bar, None)).await
+    }
+
     /// One request/response round trip, per the module doc's rule: connect,
     /// write, read, close, always, with a hard timeout so a stuck peer can
     /// never wedge the caller.
@@ -115,4 +152,24 @@ fn style_cmd(subcommand: &str, module: &str, class: &str) -> String {
         json_escape(module),
         json_escape(class),
     )
+}
+
+/// `{"command":"bar","name":...,"subcommand":"show_popup"|"hide_popup"[,"widget_name":...]}\n`
+/// — `show_popup` carries `widget_name`, `hide_popup` does not (ironbar's own
+/// `src/ipc/commands.rs` types `hide_popup` with no widget field: it hides
+/// whatever is open on the bar).
+fn bar_cmd(subcommand: &str, bar: &str, widget: Option<&str>) -> String {
+    match widget {
+        Some(w) => format!(
+            "{{\"command\":\"bar\",\"name\":\"{}\",\"subcommand\":\"{}\",\"widget_name\":\"{}\"}}\n",
+            json_escape(bar),
+            subcommand,
+            json_escape(w),
+        ),
+        None => format!(
+            "{{\"command\":\"bar\",\"name\":\"{}\",\"subcommand\":\"{}\"}}\n",
+            json_escape(bar),
+            subcommand,
+        ),
+    }
 }

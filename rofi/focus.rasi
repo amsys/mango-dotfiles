@@ -1,0 +1,43 @@
+/* Full-screen break/focus overlay — FOCUS.md §4.3: a blocking, screen-
+   filling banner instead of a small notification you learn to ignore.
+   Used only via `rofi -e "<message>"` (focus-break.sh) — message mode has
+   no listview/entry, just the text, dismissed with Esc or Enter. Themed
+   via matugen — colors.rasi is regenerated on every wallpaper switch, this
+   file is the static layout and stays put. */
+configuration {
+	font: "IBM Plex Sans 32";
+}
+
+@import "colors.rasi"
+
+* {
+	background-color: transparent;
+}
+
+window {
+	background-color: @background;
+	width: 100%;
+	height: 100%;
+	location: center;
+	border: 0;
+	border-radius: 0px;
+	padding: 0;
+}
+
+mainbox {
+	children: [ "message" ];
+	padding: 0;
+}
+
+message {
+	border: 0;
+	background-color: transparent;
+	padding: 0;
+}
+
+textbox {
+	background-color: transparent;
+	text-color: @foreground;
+	horizontal-align: 0.5;
+	vertical-align: 0.5;
+}

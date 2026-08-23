@@ -33,9 +33,7 @@
 use crate::mango::CLASS_PREFIX;
 use crate::net::MonitorChild;
 use crate::powermode;
-use crate::tooltip::{
-    bad, bar, barico, dim, esc, grade, hdur, kv, kvsub, mono, rule, title, C_GOOD,
-};
+use crate::tooltip::{bad, bar, barico_label, esc, grade, hdur, kv, kvsub, mono, set_titled, C_GOOD};
 use crate::vars::Vars;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -50,22 +48,50 @@ fn class_key(module: &str) -> String {
 // printf byte sequences (battery.sh:46,66 — decoded and named here instead,
 // same idiom as net.rs's icon table).
 
-/// battery_charging_full, U+E1A3.
-const IC_CHG: char = '\u{e1a3}';
-/// energy_savings_leaf, U+EC1A — the eco-mode marker on the bar icon.
-const IC_LEAF: char = '\u{ec1a}';
+/// battery_charging_full, was U+E1A3 (Material Symbols).
+/// T8b: -> U+F1E6 (plug, JetBrainsMono Nerd Font Font Awesome) — GTK4
+/// cannot correctly rasterize Material Symbols Rounded's variable font on
+/// this system; see IRONBAR.md's T8b entry. The first two replacements
+/// tried (U+F0E7 and U+F427, both bolt/lightning glyphs) rendered as wrong
+/// CJK tofu live in ironbar despite being genuine Nerd Font codepoints —
+/// only U+F1E6 was confirmed working by an actual live-ironbar screenshot.
+/// T19: U+F1E6 -> U+F06A5 (md-power_plug) — one-icon-family sweep
+/// (IRONBAR.md T19); it no longer needs to also stand in for net.rs's
+/// `IC_ETH`, which kept its own distinct md-ethernet glyph throughout.
+const IC_CHG: char = '\u{f06a5}';
+/// energy_savings_leaf, was U+EC1A — the eco-mode marker on the bar icon.
+/// T8b: -> U+F1BB (mountain/tree, Nerd Font Font Awesome) — U+F06C (a
+/// literal leaf) rendered as wrong CJK tofu live in ironbar; U+F1BB was
+/// confirmed working by an actual live-ironbar screenshot. See IC_CHG's
+/// comment above and IRONBAR.md's T8b entry for why a Nerd Font source
+/// alone doesn't guarantee a correct GTK4 render.
+/// T19: U+F1BB -> U+F032A (md-leaf, an actual leaf rather than a mountain)
+/// — one-icon-family sweep (IRONBAR.md T19).
+const IC_LEAF: char = '\u{f032a}';
 
 /// battery.sh:47-57 — battery_0_bar..battery_6_bar are not contiguous
 /// codepoints, hence the table rather than an offset.
+///
+/// T8b: the seven Material Symbols "battery_N_bar" glyphs this used to
+/// return all render as wrong CJK substitutes under GTK4 on this system
+/// (see IRONBAR.md's T8b entry). JetBrainsMono Nerd Font's Font Awesome
+/// range had only five distinct battery-level glyphs, so two adjacent
+/// buckets shared a glyph (1/2 and 5/6) — the actual `pct` was always shown
+/// as text next to the icon, so that lost only the icon's own resolution,
+/// not the underlying data.
+///
+/// T19: full resolution restored — `nf-md` has a complete seven-step
+/// battery ramp, so each of the seven `(pct+8)/17` buckets now gets its own
+/// glyph. Part of the one-icon-family sweep (IRONBAR.md T19).
 pub fn ic_bat(pct: i64) -> char {
     match (pct + 8) / 17 {
-        0 => '\u{ebdc}',
-        1 => '\u{f09c}',
-        2 => '\u{f09d}',
-        3 => '\u{f09e}',
-        4 => '\u{f09f}',
-        5 => '\u{f0a0}',
-        _ => '\u{f0a1}',
+        0 => '\u{f008e}', // md-battery_outline
+        1 => '\u{f007a}', // md-battery_10
+        2 => '\u{f007c}', // md-battery_30
+        3 => '\u{f007e}', // md-battery_50
+        4 => '\u{f0080}', // md-battery_70
+        5 => '\u{f0082}', // md-battery_90
+        _ => '\u{f0079}', // md-battery (full)
     }
 }
 
@@ -695,7 +721,7 @@ impl Power {
 
     fn emit_absent(&self, vars: &mut Vars) {
         vars.set("bat_text", "");
-        vars.set("bat_tip", "No battery");
+        set_titled(vars, "bat_tip", "Battery", "No battery".to_string());
         vars.set(&class_key("battery"), "absent");
     }
 
@@ -756,7 +782,7 @@ impl Power {
         } else {
             String::new()
         };
-        let text = format!("{} {charge}%{leaf}", barico(icon));
+        let text = format!("{} {charge}%{leaf}", barico_label(icon));
 
         let secs = remaining(lv.now, lv.full, lv.rate, &status);
         let total_w = watts_num(lv.rate, voltage.unwrap_or(0), lv.unit);
@@ -812,7 +838,6 @@ impl Power {
             });
 
         let tip = build_tip(
-            model.as_deref(),
             charge,
             health,
             &lv,
@@ -835,8 +860,13 @@ impl Power {
             pm_mode,
         );
 
+        let title_text = match model.as_deref() {
+            Some(m) => format!("Battery · {m}"),
+            None => "Battery".to_string(),
+        };
+
         vars.set("bat_text", text);
-        vars.set("bat_tip", tip);
+        set_titled(vars, "bat_tip", &title_text, tip);
         vars.set(&class_key("battery"), class);
     }
 }
@@ -854,7 +884,6 @@ impl Default for Power {
 /// once `$()` strips it.
 #[allow(clippy::too_many_arguments)]
 fn build_tip(
-    model: Option<&str>,
     charge: i64,
     health: i64,
     lv: &Levels,
@@ -877,12 +906,6 @@ fn build_tip(
     pm_mode: powermode::Mode,
 ) -> String {
     let mut tip = String::new();
-    tip.push_str(&title(&match model {
-        Some(m) => format!("Battery · {m}"),
-        None => "Battery".to_string(),
-    }));
-    tip.push_str(&rule(44));
-
     tip.push_str(&kv(
         "Charge",
         &format!(
@@ -944,7 +967,7 @@ fn build_tip(
     tip.push_str(&kv("Power", &pdet));
 
     if let Some(h) = &history {
-        let glyphs = crate::tooltip::heatbar(&h.buckets, 70, 90);
+        let glyphs = crate::tooltip::heatbar(&h.buckets, 70, 90, 0);
         tip.push_str(&kvsub(&format!(
             "{glyphs}  {:.1}–{:.1} W over 1h, {:.1} W avg",
             h.min, h.max, h.avg
@@ -984,9 +1007,9 @@ fn build_tip(
         tip.push_str(&kv("Mode", &format!("{} · {ac}", pm_mode.as_str())));
     }
 
-    tip.push_str(&dim(
-        "click to toggle mode  ·  right-click for a powertop report",
-    ));
+    // No in-body gesture line here — the HINTS footer ("click: toggle
+    // power mode · right-click: powertop") already said this; a body line
+    // repeating it was a duplicate, not a fallback.
     tip
 }
 
@@ -1123,10 +1146,18 @@ mod tests {
 
     #[test]
     fn ic_bat_walks_the_whole_table() {
-        assert_eq!(ic_bat(0), '\u{ebdc}');
-        assert_eq!(ic_bat(100), '\u{f0a1}');
-        assert_eq!(ic_bat(50), '\u{f09e}');
-        assert_ne!(ic_bat(43), ic_bat(90));
+        assert_eq!(ic_bat(0), '\u{f008e}');
+        assert_eq!(ic_bat(100), '\u{f0079}');
+        assert_eq!(ic_bat(50), '\u{f007e}');
+        // T19: every bucket now has its own glyph — regression guard against
+        // the old shared-glyph buckets (was 1/2 and 5/6, see ic_bat's doc
+        // comment). One representative pct per bucket 0..=6.
+        let all: Vec<char> = [0, 17, 34, 51, 68, 85, 100]
+            .into_iter()
+            .map(ic_bat)
+            .collect();
+        let unique: std::collections::HashSet<char> = all.iter().copied().collect();
+        assert_eq!(unique.len(), 7, "expected 7 distinct glyphs: {all:?}");
     }
 
     #[test]

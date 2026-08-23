@@ -117,11 +117,12 @@ main() {
 	# Regenerates every matugen template in ~/.config/matugen/config.toml, including
 	# the mango colors.conf and kitty theme.conf targets.
 	matugen "${matugen_args[@]}"
-	pkill -SIGUSR2 waybar 2>/dev/null || true
-	# darkmode.rs has no watcher of its own (IRONBAR.md T6b decision D3 — a
-	# gsettings monitor child measured ~22 ctxt-switches/min idle, worse than
-	# every other watcher this daemon runs); this poke is its only refresh
-	# path, exactly like the waybar pkill right above it.
+	# No reload poke for ironbar itself — it hot-loads its CSS file on
+	# change (confirmed live, IRONBAR.md T8a), unlike waybar, which needed
+	# the SIGUSR2 this used to also send. darkmode.rs has no watcher of its
+	# own though (IRONBAR.md T6b decision D3 — a gsettings monitor child
+	# measured ~22 ctxt-switches/min idle, worse than every other watcher
+	# this daemon runs), so its ironvar still needs this explicit poke.
 	mango-bard refresh darkmode 2>/dev/null || true
 
 	# Qt/KDE + GTK3: matugen just wrote the palette into kdeglobals/gtk.css, but

@@ -1,0 +1,28 @@
+# Installed to /etc/udev/rules.d/ by system/i915/install.sh.
+#
+# Long Vulkan compute batches (llama.cpp / Ollama, `-ngl 99`) share the render
+# engine (rcs0) with the compositor — this iGPU has no separate compute
+# engine and no SR-IOV VF partitioning (sriov_totalvfs=7 but numvfs=0; i915
+# does not enable VFs on this consumer part, and VFs target VM passthrough
+# regardless). On 2026-08-12 a 65536-context prefill ran longer than
+# preempt_timeout_ms, i915 declared a GPU HANG, and the resulting GT reset
+# destroyed the compositor's renderer context — see
+# plans/iterative-watching-spring.md for the full chain.
+#
+# Stock: preempt_timeout_ms=7500. This gives the engine more room to preempt
+# a long compute batch before i915 gives up on it.
+#
+# heartbeat_interval_ms is deliberately NOT touched here. i915 only warns
+# ("heartbeat interval adjusted to a non-default value which may downgrade
+# individual engine resets to full GPU resets!") when heartbeat_interval_ms
+# is changed AND ends up under 2x the current preempt_timeout_ms — i.e. any
+# heartbeat change made here would need to reach 40000ms+ to stay safe, which
+# trades away real hang detection for no benefit: preempt_timeout_ms alone
+# already gives the extra headroom this rule exists for, with no such
+# tradeoff (confirmed by reading intel_engine_heartbeat.c — the warning check
+# keys only on heartbeat_interval_ms, not preempt_timeout_ms).
+#
+# Keyed on the PCI driver, not a card number — card numbering is not stable
+# across boots.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", SUBSYSTEMS=="pci", DRIVERS=="i915", \
+  ATTR{engine/rcs0/preempt_timeout_ms}="20000"

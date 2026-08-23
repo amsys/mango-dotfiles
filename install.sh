@@ -40,7 +40,7 @@ log "  - Login screen: sudo system/sddm/install.sh  (installs the mango-sddm the
 log "    the root-owned colour sync tool and its sudoers rule; nothing under"
 log "    system/ is symlinked, so this is the only way it lands)"
 log "  - Battery power attribution: sudo system/rapl/install.sh  (group-readable"
-log "    RAPL energy counters + NOPASSWD powertop for waybar's battery tooltip)"
+log "    RAPL energy counters + NOPASSWD powertop for the bar's battery popup)"
 log "  - Power modes: sudo system/powermode/install.sh  (root helper for CPU EPP,"
 log "    turbo, platform profile, PCI/NVMe runtime PM — everything else about"
 log "    full/eco mode is userspace and needs no install; see README.md)"

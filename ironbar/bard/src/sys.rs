@@ -88,6 +88,56 @@ impl ClockTimer {
         Ok(())
     }
 
+    /// Arms a one-shot absolute wakeup at `epoch_secs` (`it_interval` zero —
+    /// unlike `arm_next_minute`, phase lengths vary, so the caller re-arms
+    /// explicitly at the next boundary rather than repeating on a fixed
+    /// period). Same `TFD_TIMER_CANCEL_ON_SET` guard: a manual clock set
+    /// during a phase does not silently retarget the deadline, it just
+    /// forces the same re-arm-on-ECANCELED path `drain()` already documents.
+    pub fn arm_at(&self, epoch_secs: i64) -> io::Result<()> {
+        let spec = libc::itimerspec {
+            it_interval: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: libc::timespec {
+                tv_sec: epoch_secs as libc::time_t,
+                tv_nsec: 0,
+            },
+        };
+        // SAFETY: `self.fd` is a valid timerfd for this process; `spec` is a
+        // fully-initialized itimerspec; old_value out-param is null.
+        check(unsafe {
+            libc::timerfd_settime(
+                self.fd.as_raw_fd(),
+                TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET,
+                &spec,
+                std::ptr::null_mut(),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Disarms without closing the fd (`it_value` zero, per
+    /// `timerfd_settime(2)`) — used when a pomodoro is paused or reset, so
+    /// the phase-boundary fd goes quiet exactly like `PollTimer`'s own
+    /// zero-period disarm.
+    pub fn disarm(&self) -> io::Result<()> {
+        let zero = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let spec = libc::itimerspec {
+            it_interval: zero,
+            it_value: zero,
+        };
+        // SAFETY: same as `arm_at` above.
+        check(unsafe {
+            libc::timerfd_settime(self.fd.as_raw_fd(), 0, &spec, std::ptr::null_mut())
+        })?;
+        Ok(())
+    }
+
     /// Drains the expiration counter. `Ok(None)` means the clock was reset
     /// (ECANCELED) and the timer is now disarmed — caller must re-arm.
     pub fn drain(&self) -> io::Result<Option<u64>> {

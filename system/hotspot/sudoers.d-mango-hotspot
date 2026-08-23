@@ -1,0 +1,10 @@
+# Installed to /etc/sudoers.d/mango-hotspot (0440) by system/hotspot/install.sh.
+#
+# Lets waybar/scripts/hotspot.sh bring the p2p0 vif, hostapd, dnsmasq and the
+# NAT/ufw rules up and down without a password prompt. Two fixed verbs, no
+# free arguments — up's SSID/PSK/band/channel payload travels on stdin, which
+# sudoers cannot see or restrict, so mango-hotspot itself re-validates every
+# value against a closed set before writing anything. Same reasoning as
+# sudoers.d-mango-powermode.
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-hotspot up
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-hotspot down

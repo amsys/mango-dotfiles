@@ -284,7 +284,7 @@ To restyle: edit `matugen/templates/swaylock/config`, run
 | Charger chime | `mango/scripts/ac-watch.sh` | `MANGO_AC_DIR`/`MANGO_BAT_DIR`, the same pair `battery.sh` and `battery-guard.sh` use — all three glob `A[CD]*`/`BAT*` if unset |
 | Power menu size | `mango/scripts/powermenu.sh` | set `MANGO_POWERMENU_SIZE` to `WIDTHxHEIGHT` in pixels (default `760x430`); the margins that centre it are derived from the active monitor, not hardcoded |
 | What counts as "busy" | `mango/scripts/busy.sh` | set `MANGO_DOWNLOAD_DIR` (default `~/Downloads`), `MANGO_DOWNLOAD_FRESH_MIN` (default `5`, so an abandoned `.part` stops blocking suspend), `MANGO_PACMAN_LCK` |
-| First-hover tooltip delay | `waybar/fast-tooltips.c` | set `MANGO_TOOLTIP_DELAY_MS` (default `80`); only takes effect if the LD_PRELOAD shim built, see "The system indicators" below |
+| First-hover tooltip delay | `waybar/fast-tooltips.c` | set `MANGO_TOOLTIP_DELAY_MS` (default `80`); only takes effect if the LD_PRELOAD shim built, see "The system indicators" below. Applies to waybar only — ironbar's hover popups (IRONBAR.md) carry no GTK tooltip at all and use their own `HOVER_DELAY` constant in `mango-bard`'s `main.rs` (80ms, not env-configurable) |
 | Screenshot save directory | `mango/scripts/screenshot.sh` | set `env=MANGO_SCREENSHOT_DIR,/path` in `mango/local.conf` (default `~/Pictures/Screenshots`); a leading `~/` is expanded, mango's `env=` does not do it itself |
 
 `mango/config.conf` ends with `source=./local.conf`, installed once from
@@ -457,7 +457,7 @@ on the left because the left pill has the room and the right one was crowded.
 | `custom/cpu` | `cpu.sh` | Per-core sparkline, load, package temperature, top processes, anything wedged in `D`/`Z` state for 20s+ (kernel threads excluded — i915's flip worker sits in `D` permanently), and **recent peaks from atop**. `atopsar` takes ~1.3s on a day's log, which stalled waybar's main loop, so it is refreshed into `$XDG_RUNTIME_DIR/waybar-cpu-atop` in the background every 5 minutes and the tooltip renders from the cache. Click opens `btop`. |
 | `custom/memory` | `memory.sh` | RAM/cache/dirty, **swap folded in** (it used to be its own pill and read a permanent 0%), minor/major page-fault rates, top processes by RSS, and DIMM details from the install-time `dmidecode` cache. Click opens `btop`. |
 | `custom/battery` | `battery.sh` | Charge and **health against design capacity** as meters, cycle count, draw in watts, time to empty/full. Handles both `charge_*` (µAh) and `energy_*` (µWh) batteries. |
-| `custom/clock` | `clock.sh` | Replaces the built-in `clock`, which can scroll through timezones but cannot show several at once. Tooltip is the local time large, then the world zones **three to a row** with the city and the offset under each, plus the pomodoro. The enlarged time row is padded in its own cells (`T_W`/`T_GAP` against `COL_W`/`COL_GAP`) so the columns still line up — the self-check asserts the two widths match. Left-click starts/pauses a pomodoro, right-click resets; signal 14 refreshes it immediately after a click. |
+| `custom/clock` | `clock.sh` | Replaces the built-in `clock`, which can scroll through timezones but cannot show several at once. Tooltip is the local time large, then the world zones **three to a row** with the city and the offset under each, plus the pomodoro. The enlarged time row is padded in its own cells (`T_W`/`T_GAP` against `COL_W`/`COL_GAP`) so the columns still line up — the self-check asserts the two widths match. Left-click starts/pauses a pomodoro, middle-click mutes it for 30 min (also `SUPER+SHIFT+M`), right-click resets; signal 14 refreshes it immediately after a click. |
 | `custom/date` | `clock.sh --date` | Replaces `clock#date`, and is a separate module because waybar hangs the tooltip and the clicks off the module. Tooltip is the current month from `cal -m` drawn as a **bordered table** with today highlighted; the cells are read off `cal`'s fixed 3-character columns rather than matching the number, which would also hit the 2 inside 12. Borders are `C_EMPTY`, deliberately darker than both the day numbers and the weekday header. The table is 36 cells wide, flush left and carries no `rule()` — it is the widest line, so *it* pins the tooltip width and the CSS `tooltip label` padding is the only margin; the self-check asserts every line is that same width. Click focuses the calendar app (`clock.sh --calendar` → `mmsg dispatch focusid`, which switches tag *and* monitor and un-minimizes) and remotes `-calendar` into it rather than starting a second window. |
 | `custom/volume` | `volume.sh` | Replaces the built-in `pulseaudio` module — its tooltip can only print waybar's own placeholders, so the active port, the card profile, the mic and the per-app streams had nowhere to go. Left-click opens `pavucontrol-qt`, right-click its Configuration tab, scroll adjusts via `wpctl`. Signal 21, raised by `custom/volwatch` (`volume.sh --watch`) blocking on `pactl subscribe` — never a poll. |
 | `custom/ws#1`..`#9` | `workspace.sh N [monitor]` | Nine per-tag pills replacing `ext/workspaces`, which has no `tooltip` option at all. Each bar passes its own output name, so the pills filter `all-tags` and `all-clients` by `.monitor` and every screen shows *its* tags — see "One bar per monitor" above for where that name comes from. Hover lists that tag's windows (`*` focused, `!` urgent, `_` minimized). Click dispatches `mmsg dispatch view,N,0`, which lands on the right screen because the press itself moved `selmon` there. Signal 20, raised by `custom/wswatch` (`workspace.sh --watch`) off `mmsg watch all-tags` — one stream covers every monitor. The `#N` suffix is what keeps the CSS to one rule set: waybar names all nine widgets `custom-ws` and turns the suffix into a style class. |
@@ -469,9 +469,26 @@ if that changes.
 
 The pomodoro has no daemon: waybar's 1s poll of `clock.sh` *is* the tick, and
 the state is four fields in `$XDG_RUNTIME_DIR/mango-pomodoro`. Phase changes
-beep through `paplay` and fire a mako notification that replaces its predecessor
-rather than stacking. Kill waybar mid-pomodoro and the phase change fires late,
-when it comes back.
+beep through `paplay` and fire a **critical** mako notification (sticks until
+dismissed) that replaces its predecessor rather than stacking. Kill waybar
+mid-pomodoro and the phase change fires late, when it comes back.
+
+Three guardrails sit on top, all in the same file and all env-overridable:
+
+- **Auto-start on unlock.** `hypr/hypridle.conf`'s `before_sleep_cmd` runs
+  swaylock; `clock.sh` notices it was locked (`$XDG_RUNTIME_DIR/mango-pomodoro-lock`)
+  and, if no pomodoro is already running, starts a fresh focus block the
+  first poll after swaylock exits.
+- **Mute for calls.** Middle-click the clock (or `SUPER+SHIFT+M`) silences
+  sound and notifications for `MANGO_POMODORO_MUTE` minutes (default 30);
+  the timer itself keeps running. A dim bell-off glyph shows in the bar
+  while muted.
+- **Break warning.** A `hypridle` listener writes `$XDG_RUNTIME_DIR/mango-idle`
+  after 30s of no input and removes it on the next keypress. If a break is
+  still running 45s in and that flag is absent, `clock.sh` fires a sticky
+  "Still working" notification and repeats it every 60s; after 5 minutes of
+  being ignored it adds a soft sound. Going idle at any point clears the
+  warning clock, so a real break never escalates.
 
 Each self-checks: `cpu.sh test`, `memory.sh test`, `battery.sh test`,
 `clock.sh test`, and `sh tooltip.sh tooltip-selftest` for the shared meters.
@@ -898,7 +915,6 @@ changes nothing about the provenance above.
 
 Things this desktop depends on that aren't tracked here:
 
-- [ ] `hypridle.conf` — mango `exec-once`s it; no idle-lock/DPMS/suspend without it
 - [ ] `systemctl enable --now atop.service atopacct.service` — the CPU tooltip's
       "recent peaks" section reads `/var/log/atop/atop_YYYYMMDD`, which only
       exists while these run (already enabled on this machine)
@@ -924,6 +940,9 @@ Things this desktop depends on that aren't tracked here:
       the `resume` hook in `mkinitcpio.conf` — then the button works and the
       guard's action can be switched over
 - [ ] `~/.config/environment.d/{claude,ssh-agent}.conf`
+- [ ] `~/.config/environment.d/paseo.conf` — `PASEO_LISTEN=0.0.0.0:6767`, so the
+      Paseo daemon is reachable over `wg_hetzner`; safe only because ufw's
+      `deny incoming` restricts port 6767 to that interface (see `~/brain/firewall.md`)
 - [ ] `~/.config/mimeapps.list` + custom `~/.local/share/applications/*.desktop`
 - [ ] `dolphinrc`, `kiorc`, `filetypesrc`, `darklyrc`, `konsolerc`
 - [ ] `gtk-3.0/bookmarks` (check for sensitive paths first)

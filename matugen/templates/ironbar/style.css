@@ -1,0 +1,764 @@
+/*
+* Ironbar colors generated with Matugen — T8a visual-parity pass.
+* Palette, selector intent and comments ported from
+* matugen/templates/waybar/style.css (the top bar's own matugen template),
+* so the two bars track the same wallpaper instead of drifting apart. See
+* IRONBAR.md's T8a entry for the Phase-0 measurement that motivated this
+* (waybar's active-workspace accent `#bebdfa` vs. the old ironbar stub's
+* hardcoded One Dark `#61afef` — two different colors, by construction,
+* until this file existed).
+*
+* This replaces the old `src/ironbar/style.css` (a T2-era stub with
+* hardcoded One Dark hex and no bar/pill/popup/cursor styling at all).
+*/
+
+@define-color bar_bg {{colors.surface.default.hex}};
+@define-color bar_fg {{colors.on_surface.default.hex}};
+@define-color bar_fg_dim {{colors.on_surface_variant.default.hex}};
+@define-color pill_bg {{colors.surface_container_low.default.hex}};
+@define-color pill_bg_hi {{colors.surface_container_high.default.hex}};
+@define-color accent {{colors.primary.default.hex}};
+@define-color accent_fg {{colors.on_primary.default.hex}};
+@define-color urgent {{colors.error.default.hex}};
+@define-color urgent_fg {{colors.on_error.default.hex}};
+@define-color warn {{colors.tertiary.default.hex}};
+@define-color separator {{colors.outline_variant.default.hex}};
+
+/* Deliberately NOT matugen-derived — same reasoning as the waybar template:
+   the network-security lock's "safe"/"degraded" colors must not change
+   meaning with the wallpaper. */
+@define-color ok #a6da95;
+@define-color caution #eed49f;
+
+/* T8b: text font first, no icon font here. Icon-bearing modules get their
+ * own stack below.
+ *
+ * CORRECTED mid-T8b, after the first fix (reordering Material Symbols
+ * Rounded ahead of JetBrainsMono Nerd Font, mirroring waybar's own
+ * font-family order) made rendering WORSE, not better: several pills that
+ * previously showed a plausible-looking glyph broke into CJK tofu.
+ * Investigation (isolating to Material-Symbols-only, forcing
+ * `GSK_RENDERER=cairo`, pinning `font-variation-settings` explicitly, and
+ * cross-checking with `pango-view` outside GTK4) found the real cause:
+ * **GTK4 cannot correctly rasterize any glyph from the installed Material
+ * Symbols Rounded variable font on this system, full stop** — not a
+ * font-family ordering problem at all. `pango-view` (pure Pango/Cairo/
+ * FreeType, no GTK) renders the exact same font and codepoints correctly,
+ * and so does waybar (GTK3). Fontconfig's charset coverage report is not
+ * evidence of a correct render under GTK4 — it only proves the font *claims*
+ * a mapped glyph, not that GTK4 can draw it.
+ *
+ * Fix actually shipped: every Material-Symbols-sourced codepoint on this bar
+ * (spark, cpu, colorpicker, darkmode, snip, inhibit, wifi/eth/netsec +
+ * their state icons, battery + charging + leaf, hotspot, mic-muted) was
+ * swapped in the Rust source for a JetBrainsMono Nerd Font equivalent —
+ * each one individually verified with `pango-view` before being wired in.
+ * See each `IC_*` constant's own doc comment for its old/new codepoint.
+ * Material Symbols Rounded is dropped from this rule entirely — it is not
+ * a safe fallback, it is an active source of wrong glyphs.
+ */
+* {
+	font-family: "IBM Plex Sans", "Rubik", sans-serif;
+	font-size: 15px;
+	min-height: 0;
+}
+
+/* `window` qualifier matters: GTK4's `GtkPopover` also carries the bare
+ * `.background` class (gtkpopover.c: "popover.background... This node does
+ * not have any background" — it's meant to stay invisible). An unqualified
+ * `.background` selector painted every popup's outer root with this near-
+ * black bar colour, showing as a square frame around the rounded popup
+ * card drawn by `popover > contents` below. `window` restricts this to
+ * GtkWindow's own CSS node name, i.e. only the real bar window.
+ */
+window.background,
+#bar {
+	background-color: @bar_bg;
+	color: @bar_fg;
+}
+
+/* Icon-bearing pills. T17: the bare class selectors matched only the
+ * module CONTAINER. The `*` rule above matches every node, including each
+ * label. In GTK4 CSS, a direct match always wins over an inherited value,
+ * so no label ever got this font stack — labels rendered with the `*`
+ * stack, and each icon codepoint went to fontconfig per-char fallback.
+ * Most codepoints fell through to a Nerd Font glyph by luck. U+F303 and
+ * U+E732 did not: IBM Plex Sans TC claims them (legacy CJK PUA mapping)
+ * and outranks JetBrains in the fallback sort, so they drew CJK glyphs.
+ * That fallback, not GTK4 rasterization, was T15's "wrong glyph" bug.
+ * The `label` descendant selectors below match the label node directly
+ * with class specificity, which beats `*`.
+ *
+ * T18: "JetBrainsMono Nerd Font" swapped for the "... Propo" variant.
+ * `fontTools` against the installed files found the plain variant gives
+ * every glyph a fixed one-terminal-cell advance (600/1000 em = 9px @15px)
+ * while keeping full-size ink — up to 8.3px of ink spills past the
+ * advance box (measured: wifi arcs and the coffee cup both 8.3px, the
+ * claude robot 4.8px, eth-off 8.3px, arch 6.0px). `ICO_GAP`
+ * (tooltip.rs) is only ~5.3px, so the spill ate the whole gap and then
+ * some: the robot touched the claude percentage, the wifi arcs touched
+ * "70%", eth-off's ink ran into the netsec lock, and every icon-only
+ * button's ink sat off-centre in its hover circle. The Propo variant
+ * gives each glyph an advance equal to its own ink width (verified:
+ * arch 1000/1000, wifi 1154/1154, robot 918/918 — zero spill) while
+ * leaving plain Latin/box-drawing characters at the normal 600, so
+ * popup meters stay column-aligned. No GTK4 rasterization bug here —
+ * same lesson as T17, a font-selection problem, not a renderer one. */
+.spark, .spark label, .win, .win label, .cpu, .cpu label,
+.memory, .memory label, .music, .music label, .clock, .clock label,
+.date, .date label, .colorpicker, .colorpicker label,
+.darkmode, .darkmode label, .snip, .snip label,
+.inhibit, .inhibit label, .battery, .battery label,
+.volume, .volume label, .mic, .mic label, .wifi, .wifi label,
+.eth, .eth label, .netsec, .netsec label, .hotspot, .hotspot label,
+.bluetooth, .bluetooth label, .docker, .docker label,
+.power, .power label, .claudebar, .claudebar label,
+/* T19: was missing entirely — pomo's IC_TIMER/IC_MUTED glyphs (pomo.rs)
+ * fell through to fontconfig per-character fallback, the exact T17 bug this
+ * selector list exists to prevent for every other icon-bearing pill. */
+.pomo, .pomo label {
+	font-family: "IBM Plex Sans", "JetBrainsMono Nerd Font Propo", sans-serif;
+}
+
+/* CONFIRMED DEAD, T8b: GTK4 removed the CSS `cursor` property outright.
+ * Live proof, ironbar's own stderr: `Theme parser error: style.css:53:2-8:
+ * No property named "cursor"`. `gtk_widget_set_cursor()` exists but is
+ * API-only — ironbar never calls it, and no schema option
+ * (`--print-schema`) exposes it either. T8a's claim that GTK 4.22 registers
+ * `cursor` as a real CSS property was a `strings`-grep false positive, not a
+ * verified property registry lookup. There is no config-side or CSS-side fix
+ * on ironbar 0.19.0 / GTK 4.22 — only an upstream patch would close this.
+ * The hand-on-hover parity gap against waybar's GtkButton-backed modules is
+ * real and stays open; the rule that claimed to fix it is deleted rather
+ * than left in place logging a parser warning on every reload.
+ */
+
+/* Group pills — T8a Phase 2 finding, recorded in full in IRONBAR.md: ironbar
+ * has no working equivalent of waybar's four `group/*` boxes. A `custom`
+ * module's `bar` can nest a `box` widget, and that box CAN nest further
+ * modules, and the config validates — but each nested module's own popup
+ * becomes unaddressable: `ironbar bar <bar> show-popup <name>` answers
+ * "Invalid module name" for anything nested this way (probed live against
+ * a running ironbar 0.19.0, both as a direct CLI call and by reading the
+ * daemon's own debug log for the registration). Since cpu/memory/battery/
+ * docker/volume/hotspot/workspace pills all open their popups by shelling
+ * out to that exact command (`on_click_left`/`on_click_right` in
+ * genconfig.rs), nesting them would silently break every popup on the bar.
+ *
+ * Fallback taken instead (pre-agreed at planning): style ironbar's own
+ * flat row containers directly — `#bar #start`, `#bar #center`,
+ * `#bar #end` (ironbar's own selector table, "Styling guide.md") — as one
+ * pill each, rather than waybar's four separate ones. `#start` (spark +
+ * window) stayed unstyled at first, matching waybar's own `modules-left`
+ * (no `group/*` wrapper there either) — see the T-next comment right below
+ * for why that stopped being true.
+ *
+ * T9: `tray` moved from `start` into `end` (genconfig.rs's own
+ * `end_modules()` doc comment has the full reasoning — its lack of any
+ * popup means the box-nesting risk above never applied to it). It now
+ * shares this pill's background, a disclosed cosmetic deviation from
+ * waybar's unstyled `#tray` — not worth re-opening the nesting risk above
+ * to avoid one shared background color.
+ */
+/* T-next (item 3): `#start` joins this rule. `center` used to hold cpu/
+ * memory/docker/battery/claudebar/music ahead of the workspace pills, which
+ * is why only `center`/`end` had the pill background before — that group
+ * moved to `start` (genconfig.rs::leftcenter_modules, so the pill centring
+ * fix wouldn't shift with pomodoro/music text width; see that function's
+ * own doc comment), and an unstyled `start` next to two styled pills would
+ * have read as a visible break in the bar's own row treatment. */
+#bar #start,
+#bar #center,
+#bar #end {
+	background-color: @pill_bg;
+	border-radius: 12px;
+	margin: 4px 0;
+	padding: 0 5px;
+}
+#bar #start > *,
+#bar #center > *,
+#bar #end > * {
+	margin: 0 2px;
+}
+/* T-next (item 4): resource-monitor group (cpu, memory, docker, battery,
+ * claudebar) — these five live in `start` now (T-next item 3; originally
+ * `center`, confirmed against the live generated config both times, not
+ * assumed from the name).
+ *
+ * These five are `custom` modules: ironbar's own `.custom button { padding:
+ * 0; }` (further down this file) zeroes the inner GtkButton's padding, and
+ * this outer box (the node `.cpu`/etc actually selects — a `custom`
+ * module's container, distinct from its nested button) carried no padding
+ * of its own either. The only gap between pills was `#bar #start > *`'s
+ * shared `margin: 0 2px` — half of what `.inhibit`/`.snip`/`.colorpicker`/
+ * `.darkmode` get: those are single-node native/icon-button modules with
+ * their own `padding: 0 6px` (the icon-button rule below) stacking with
+ * their own `margin: 0 2px`, for 2+6+6+2 = 16px between neighbours versus
+ * these five's 2+2 = 4px. `padding: 0 6px` here matches that box model
+ * directly (2 ID selectors + 1 class outranks the shared `#bar #start > *`
+ * margin rule, same override pattern already used for `.ws`/network pills
+ * — see the T14/T18 comments on those); a `margin-left` bodge is no longer
+ * needed, so it's replaced rather than kept alongside. */
+#bar #start > .cpu,
+#bar #start > .memory,
+#bar #start > .docker,
+#bar #start > .battery,
+#bar #start > .claudebar {
+	padding: 0 6px;
+}
+
+/* T9: symmetric ~10px edge gap for the two outermost icons (launcher,
+ * power) — replaces whatever unstated default gap previously put them at
+ * ~30px/~13px from their respective edges (measured live, not derived from
+ * any CSS rule that existed before this one).
+ *
+ * T-next (item 3): `#start` gained the shared `padding: 0 5px` above (it
+ * had none before), so `.spark`'s margin is halved — 10px -> 5px — to keep
+ * the same ~10px total from the bar's raw edge instead of stacking to
+ * ~15px. `.power` needed no matching change: `#end` already carried that
+ * padding when its own 2px was tuned, so its total is unaffected here.
+ */
+.spark {
+	margin-left: 5px;
+}
+.power {
+	margin-right: 2px;
+}
+
+/* Workspace pills — ported from waybar/style.css:268-311. T-next: the T9
+ * dashed-ring border (`.ws.dash-*`, keyed on `@class/<ws-pill>#count`) is
+ * replaced by a literal dot row inside the pill's own two-line label
+ * (mango.rs::tag_label) — an exact count needs no CSS per-bucket rule at
+ * all, and it frees the border for the pill's own shape again. Widened back
+ * out to a clear oval (30px min-width, 5px padding -> ~40x32px, vs waybar's
+ * near-round 34x32) now that the border isn't carrying a second signal.
+ * `border: 2px solid transparent` and `valign: center` are both dropped:
+ * the border rule is dead weight with no ring left to draw, and `valign` is
+ * not a real GTK4 property — it logged a theme parser error on every
+ * reload (confirmed live, same class of dead rule as the `cursor` one T8b
+ * removed) and never did anything, on this or any prior stage.
+ *
+ * T14: this rule's own `margin: 0 2px` was dead on arrival — `#bar #center
+ * > *` above is two ID selectors and always outranked it, so the real gap
+ * was 4px each side, not 2px, since the day this rule was written. Moved
+ * to `#bar #center > .ws` below so it actually applies, and shrunk
+ * further (30px min-width, 5px padding) to close the wasted space the
+ * dead rule was hiding.
+ *
+ * T15/T16 (superseded by T20): a screenshot-tuned asymmetric top padding
+ * used to compensate for the two-line label (number + dot row) hanging its
+ * dot row off the bottom only — that centred the block against the row's
+ * neighbours but left the number above the centre of its own oval.
+ *
+ * T20: `tag_label` now emits a symmetric three-line block (an invisible
+ * mirror of the dot row above the number), so the number is the block's
+ * exact centre and plain symmetric padding centres it in the oval and
+ * against the row at once. The tuned `8px 4px 0 4px` is gone with the
+ * asymmetry that needed it.
+ */
+.ws {
+	min-width: 24px;
+	padding: 0 4px;
+	background: transparent;
+	color: alpha(@bar_fg_dim, 0.90);
+	border-radius: 9999px;
+}
+#bar #center > .ws {
+	margin: 0 2px;
+}
+/* T19: `min-width` above sizes the `.ws` module container, but its child
+ * button has hexpand=false, so GTK packs it at the container's start and
+ * leaves the surplus on the right — measured live: the tag number's ink
+ * sat ~5px from the pill's left edge and ~20px from its right. The T18 dot-
+ * row centring (nested LabelWidget, `justify: "center"`) was correct; the
+ * whole block just was not centred in its own container. Sizing the button
+ * itself to the same 24px makes it fill the container's content box, and
+ * the label inside it centres on its own justify. Total pill width is
+ * unchanged (24px + 2*4px padding = 32px, same as before).
+ */
+/* T20: T19's button rule alone was not enough — live-measured again, the
+ * digit ink still centred 7.5px left of the oval. The button fills the
+ * container, but the label inside the button keeps its natural width and
+ * start alignment, so the whole text block sits at the button's left edge.
+ * Sizing the label too makes the label box fill the button; the Pango
+ * layout then centres inside it (xalign default) and `justify: center`
+ * keeps the lines centred on each other. */
+.ws button,
+.ws button label {
+	min-width: 24px;
+}
+.ws:hover {
+	background: alpha(@bar_fg_dim, 0.10);
+}
+.ws.empty {
+	color: alpha(@bar_fg_dim, 0.40);
+}
+.ws.active {
+	background: @accent;
+	color: @accent_fg;
+}
+.ws.urgent {
+	background: @urgent;
+	color: @urgent_fg;
+}
+/* Sized to the row it replaces, recalculated for T14's tighter `.ws` box
+ * model: TAG_COUNT (mango.rs) is 9, not 8 — the "8 pills" this comment
+ * used to say was already wrong before T14 touched it. 9 pills * 36px each
+ * (24 min-width + 2*4 padding + 2*2 margin) = 324px, minus this pill's own
+ * 16px padding (no margin of its own) = 308px — so the group's total width
+ * doesn't jump when overview toggles. Measured/derived, not literal CSS
+ * math GTK performs — verify against a live screenshot if `.ws`'s box
+ * model above ever changes again.
+ */
+.ws-overview {
+	min-width: 308px;
+	padding: 0 8px;
+	background: @accent;
+	color: @accent_fg;
+	/* T-next (item 5): oval, matching every `.ws` pill's own rounding
+	 * instead of the sharp GTK4 default rectangle — same radius as `.ws`
+	 * above, not a bare 9999px coincidence. */
+	border-radius: 9999px;
+}
+
+/* Window title / brightness scroll target. */
+.win {
+	color: @bar_fg;
+	padding: 0 10px;
+}
+
+/* Clock + date. T15: padding tightened 8px -> 4px — the tag pills sit
+ * immediately to this pill's left, and 8px read as a dead gap against T14's
+ * already-tightened `.ws` spacing. */
+.pill {
+	color: @bar_fg;
+	padding: 0 4px;
+}
+
+/* Pomodoro (T7c, see pomo.rs) — `@class/pomo` carries idle/work/short/long/
+ * paused. Ported from matugen/templates/waybar/style.css's own
+ * `#custom-clock.work`/`.paused` rule and its comment: "focus borrows the
+ * accent, breaks stay quiet, paused reads dimmer than idle so a forgotten
+ * timer looks forgotten" — short/long intentionally get no rule of their
+ * own here either, same as that comment describes, falling through to
+ * `.pill`'s plain `@bar_fg`.
+ */
+.pomo.work {
+	color: @accent;
+}
+.pomo.paused {
+	color: @bar_fg_dim;
+}
+
+/* Spinner: one glyph, CSS-rotated — see genconfig.rs's net_modules() doc and
+ * IRONBAR.md's T3 decision 3.
+ */
+.net-spinner, .net-spinner label {
+	font-family: "JetBrainsMono Nerd Font Propo", monospace;
+	animation: net-spinner-spin 0.9s linear infinite;
+}
+@keyframes net-spinner-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* T-next (item 5/A): the "negative spacing" report was real but not a
+ * literal negative margin — none exists anywhere in this file for these
+ * three pills; they only ever inherited the shared `#bar #end > *`
+ * 4px-each-side rule. Measured live (scoped `grim -g "0,1040 1920x40"`,
+ * full-height column brightness scan, not a single row — a one-row sample
+ * undercounts an edge this thin, same lesson T9 already recorded for the
+ * spark/power gap): every other adjacent end-row pair sits ~8-9px apart,
+ * but eth's disconnected icon (net.rs `IC_ETHOFF`) and netsec's icon
+ * measured ~0px apart, ink touching — `barico`'s glyph in JetBrainsMono
+ * Nerd Font has a narrower Pango advance width than its visual ink for this
+ * codepoint, so the inherited 4px+4px margin is technically applied but
+ * visually eaten. Extra margin on all three network pills, not only eth —
+ * wifi/netsec's own icons vary by state and could hit the same
+ * narrow-advance issue on a verdict this measurement didn't happen to
+ * catch.
+ *
+ * T14: same dead-rule bug as `.ws` above — `#bar #end > *` outranked this
+ * bare-class margin, so the 6px never actually applied and eth/netsec's
+ * ink-touching gap was never fixed. Requalified under `#bar #end >` so it
+ * wins, needed now more than before since T14 also shrinks the shared
+ * row margin these three pills would otherwise fall back to.
+ *
+ * T18: this was compensating for the icon-pill rule's font ink spilling
+ * past its advance box (see that rule's own T18 comment) — not a real
+ * gap requirement of these three pills specifically. With the Propo
+ * font swap removing the spill, `#bar #end > *`'s shared 4px+4px reads
+ * the same as every other end-row pair on a live screenshot; this
+ * compensator is dead weight and removed rather than left stacking a
+ * second gap on top of a spill that no longer exists.
+ */
+
+/* Wi-Fi / ethernet state colors: dim = normal, warn = degraded. Ported from
+ * waybar/style.css:339-355.
+ */
+.wifi.weak,
+.eth.linked {
+	color: @warn;
+}
+.wifi.good,
+.wifi.excellent,
+.eth.connected,
+.wifi.disconnected,
+.eth.disconnected {
+	color: @bar_fg_dim;
+}
+
+/* The security lock — ported from waybar/style.css:367-403. */
+.netsec.secure {
+	color: @ok;
+}
+.netsec.dnsleak,
+.netsec.conflict {
+	color: @caution;
+}
+.netsec.exposed {
+	color: @urgent;
+}
+.netsec.offline {
+	color: @bar_fg_dim;
+}
+@keyframes netsec-pulse {
+	to {
+		color: @bar_fg_dim;
+	}
+}
+.netsec.open,
+.netsec.portal {
+	color: @urgent;
+	animation: netsec-pulse 1.1s ease-in-out infinite alternate;
+}
+/* eco (also carried in battery mode, see net.rs): static, not pulsing —
+ * `.netsec.eco.open` outranks `.netsec.open` by specificity, same reasoning
+ * as the waybar template.
+ */
+.netsec.eco.open,
+.netsec.eco.portal {
+	color: @urgent;
+	animation: none;
+}
+
+/* Battery, cpu, memory, docker warning colors — ported from
+ * waybar/style.css:313-325.
+ */
+.battery.critical,
+.cpu.warning,
+.memory.warning,
+.docker.warning {
+	color: @urgent;
+}
+.memory.swapping {
+	color: @warn;
+}
+
+/* Claude usage pill (T6c, see claude.rs). claude.rs sets all four of
+ * low/mid/high/critical.
+ *
+ * T15: all four states get their own color, not just the top two — three
+ * matugen hues (primary/tertiary/error) plus an inverted chip for critical,
+ * so the limit state reads at a glance without opening the popup. No new
+ * `@define-color` needed — all four tokens are already defined above.
+ */
+.claudebar.low {
+	color: @accent;
+}
+.claudebar.mid {
+	color: @warn;
+}
+.claudebar.high {
+	color: @urgent;
+}
+.claudebar.critical {
+	background-color: @urgent;
+	color: @urgent_fg;
+	border-radius: 9999px;
+	padding: 0 6px;
+}
+
+/* Hotspot — ported from waybar/style.css:357-365. */
+.hotspot.active {
+	color: @bar_fg_dim;
+}
+.hotspot.vpn {
+	color: @accent;
+}
+
+/* Volume opacity-by-level, `@class/volume` (audio.rs::volume_class) — T9.
+ * The bar text dropped its `NN%` suffix (icon only now), so the icon's own
+ * opacity is the only at-a-glance level signal left; `muted` needs none —
+ * `ic_vol()` already swaps to a distinct crossed-speaker glyph.
+ */
+.volume.quiet {
+	opacity: 0.55;
+}
+.volume.mid {
+	opacity: 0.8;
+}
+.volume.loud {
+	opacity: 1;
+}
+
+/* Icon-only static buttons (spark/colorpicker/snip/power) and tray/music/
+ * bluetooth/inhibit/darkmode — the T8a additions. Same circular hover
+ * target as waybar's CircleUtilButton set (style.css:233-248), so a hover
+ * reads the same way it does on the top bar.
+ *
+ * T15: `.bluetooth` joins this group — with its native button's chrome now
+ * reset (see `.custom button` block above), it needs the same circular
+ * padding/hover as its `.power` neighbour to actually match it, not just to
+ * stop being wider.
+ */
+.spark,
+.colorpicker,
+.snip,
+.darkmode,
+.inhibit,
+.bluetooth {
+	border-radius: 9999px;
+	padding: 0 6px;
+}
+.spark:hover,
+.colorpicker:hover,
+.snip:hover,
+.darkmode:hover,
+.inhibit:hover,
+.bluetooth:hover {
+	background-color: alpha(@bar_fg, 0.08);
+}
+/* Unlike waybar's idle_inhibitor (a plain on/off toggle), ironbar's native
+ * `inhibit` module has no documented on/off CSS state class — its docs
+ * (docs/modules/Inhibit.md, fetched from upstream) describe only
+ * `format_on`/`format_off` text, no class hook. So the same coffee-cup
+ * glyph in both states (config.jsonc's own "CSS pill carries the state"
+ * design) carries over; the accent-filled "activated" pill waybar's
+ * `#idle_inhibitor.activated` rule adds does not, for lack of a selector
+ * to hang it on. Documented gap, not a porting miss.
+ */
+
+/* The one destructive target on the bar — reads as one on hover rather than
+ * the neutral tint every other icon button uses. Ported from
+ * waybar/style.css:139-148.
+ */
+.power {
+	border-radius: 9999px;
+	padding: 0 6px;
+}
+.power:hover {
+	background-color: alpha(@urgent, 0.18);
+	color: @urgent;
+}
+
+/* T21: user-reported the net cluster (wifi/eth/netsec) too tight and
+ * bluetooth/power too far apart. Live ink measurement confirmed both:
+ * wifi-eth-netsec at 5px (no padding rule, bare 4px row margin only),
+ * netsec-bluetooth and bluetooth-power at 15-17px (`.power`'s own 6px
+ * padding above, stacked on the same 4px margin).
+ *
+ * An `#bar #end > *`-scoped rule (2 ID selectors) was tried first to carry
+ * both fixes from one declaration, on the assumption an ID selector
+ * outranks a bare class the way it does in W3C CSS. Live-verified false in
+ * this engine with a `load-css` probe: a bare `.power { background: red }`
+ * painted over an `#bar #end > * { background: lime }` loaded after it —
+ * the bare class won regardless of order, and padding measured live
+ * afterward had gone UP (stacked with `.power`'s existing 6px, not
+ * overridden by it) instead of down. Bare class beats `#bar #id > *` here,
+ * opposite of the W3C model — a new entry in this file's own run of
+ * specificity surprises (T14, T18). Fixed with bare classes only, which
+ * `.power`'s own working rule already proved reaches the real node.
+ */
+.wifi, .eth, .netsec {
+	padding: 0 4px;
+}
+.bluetooth, .power {
+	padding: 0 3px;
+}
+/* `mic` (genconfig.rs) renders an empty label whenever the source isn't
+ * muted (audio.rs::refresh sets `mic_text` to ""), but a zero-width widget
+ * still takes the row's own 4px margin — closed so the unmuted case (the
+ * common one) contributes nothing between volume and wifi.
+ */
+.mic {
+	margin: 0;
+}
+
+/* T8d: compressed. The real width cost was never the 2px margin below —
+ * it was GTK4's default `button` padding/min-width/min-height baked onto
+ * every `.tray .item` (Adwaita: ~4px 9px padding, 16px/24px min-width/
+ * height), which nothing here reset before this pass. `.tray .item` is
+ * ironbar's own documented selector (docs/modules/Tray.md) for the actual
+ * icon button — `.tray > *` targets the same node, so the two rules merge
+ * into one.
+ */
+.tray {
+	padding: 0 4px;
+}
+/* T21: user-reported the seven tray icons as crammed (2px ink-to-ink,
+ * against the 1px margin below giving 2px). +1px each side widens that to
+ * 4px, still tighter than the rest of the row (tray is one group, not
+ * separate pills) but no longer touching. */
+.tray .item {
+	padding: 0 1px;
+	min-width: 0;
+	min-height: 0;
+	margin: 0 1px;
+}
+.tray .item.urgent {
+	background-color: @urgent;
+	border-radius: 6px;
+}
+
+/* T-popup-fix: every popup-bearing pill's bar widget changed from `label`
+ * to `button` (see genconfig.rs and IRONBAR.md) — only a `gtk::Button` ever
+ * registers a popup anchor in this ironbar version; a `label` widget never
+ * does, which is why no custom-module popup had ever rendered before this
+ * fix. Same GTK4 Adwaita chrome problem T8d already found and reset for
+ * `.tray .item` above (default padding/min-width/min-height/background),
+ * now on every pill built from a button instead of a label.
+ *
+ * T14: the reset above never touched font-weight, and GTK4's built-in
+ * theme carries `button { font-weight: bold; }` (confirmed in the
+ * compiled stylesheet inside libgtk-4.so.1) — so every one of these 12
+ * pills rendered bold next to their label-backed neighbours, which never
+ * did. `clock.rs`'s own `font_weight="600"` big-time span is Pango markup
+ * on a nested `<span>` and still outranks this — the clock keeps its
+ * deliberate weight.
+ *
+ * T15: `.bluetooth button`/`.inhibit button` added. Both are *native*
+ * modules (`type: "bluetooth"`/`"inhibit"` in genconfig.rs, not `custom`),
+ * so `.custom button` above never reached their own `GtkButton` — it still
+ * carried GTK4 Adwaita's default `padding: 4px 9px`/`min-width: 16px`,
+ * which is why bluetooth rendered wider than every other icon button on
+ * the bar. Same defect class T8d already found and fixed for `.tray .item`.
+ *
+ * T18: the T15 fix above still never matched. ironbar's own source puts
+ * the class straight on the `GtkButton`, not on a wrapper the button
+ * descends from — `src/modules/inhibit/mod.rs`: `let button =
+ * Button::new(); button.add_css_class("inhibit");`, and
+ * `src/modules/bluetooth/mod.rs` builds its `Button` the same way. So
+ * `.inhibit button`/`.bluetooth button` selected nothing, and Adwaita's
+ * theme `button` rule (an element selector) still supplied a background,
+ * border and box-shadow the icon-button rule below never set — that was
+ * the "unnecessary background". Added the bare classes here to reach the
+ * button node directly. `padding` is deliberately NOT reset for these
+ * two: the icon-button rule below already gives `.inhibit`/`.bluetooth`
+ * `padding: 0 6px` at equal (class) specificity, and this rule sits
+ * later in the file — a shared `padding: 0` here would win the
+ * source-order tiebreak and flatten that padding back to nothing, so it
+ * stays on its own line scoped to `.custom button` only.
+ */
+.custom button,
+.bluetooth, .bluetooth button,
+.inhibit, .inhibit button {
+	min-width: 0;
+	min-height: 0;
+	background: none;
+	border: none;
+	box-shadow: none;
+	font-weight: normal;
+}
+.custom button {
+	padding: 0;
+}
+
+/* Popups — since ironbar 0.18 a popup is a native GTK4 `GtkPopover`
+ * (`src/popup.rs`), not a separate window. The node tree is
+ * `popover > contents > box.popup > <widgets>`; `.popup` is the *child*
+ * box, so it can never reach `contents`, which is what the GTK4 theme
+ * paints: adw-gtk3-dark's `libadwaita.css` gives `popover > contents`
+ * `padding: 8px`, `border-radius: 15px`, a 1px black border and
+ * `background-color: @popover_bg_color` — #35343a in dark, from our own
+ * matugen gtk-4.0 template. That 8px frame was the black border around
+ * every popup. The surface therefore lives on `contents`, the same node
+ * ironbar's own example themes target. `:not(.menu)` spares the tray's
+ * `GtkPopoverMenu` (`src/modules/tray/interface.rs`), the only other
+ * popover in the process, leaving it at theme default.
+ *
+ * The colour stays deliberately non-matugen One Dark, as before: a
+ * generated light surface could go light under text that assumes dark.
+ *
+ * No box-shadow: this popover is an `xdg_popup` under Wayland, not a
+ * layer-shell surface. GTK4's own `box-shadow` rendered as a solid near-
+ * black rectangle instead of a soft translucent shadow — this compositor
+ * (mango) never allocates a real alpha-blended backing surface for a
+ * plain `xdg_popup`'s shadow region, unlike its layer-shell/toplevel
+ * client paths (confirmed in mango's own source: `wlr_scene_shadow_create`
+ * is called from `src/manage/layer.h` for `LayerSurface` and
+ * `src/manage/client.h` for `Client`, never from the `xdg_popup`
+ * create/commit path). A compositor-side shadow would need ironbar to
+ * promote popups back to layer-shell surfaces — out of scope for a drop
+ * shadow. The 1px border carries the edge instead.
+ */
+popover:not(.menu) > contents {
+	background-color: #21252b;
+	background-image: none;
+	border: 1px solid #3e4451;
+	border-radius: 12px;
+	padding: 0;
+	box-shadow: none;
+}
+.popup {
+	background-color: transparent;
+	border: none;
+	padding: 0;
+	margin: 0;
+}
+/* Bluetooth's popup is a native module — it builds its own header/device
+ * rows directly (`src/modules/bluetooth/mod.rs`), never through the
+ * `.popup` box every `custom` module's popup content sits in, so the
+ * `.popup label` padding below never reaches it (an exact class-token
+ * match — `.popup-bluetooth` is a different token from `.popup`, not a
+ * variant of it). The popup container itself gets `.popup-bluetooth`
+ * (`src/modules/mod.rs`: `popup.container.add_css_class(&format!(
+ * "popup-{part}"))`), which is why this pill's popup carried no inset at
+ * all — `popover > contents` above resets `padding: 0`, and nothing
+ * downstream ever set it back. One inset on the container gives it the
+ * same edge padding every other popup gets, without touching row
+ * spacing this ask didn't raise.
+ */
+.popup-bluetooth {
+	padding: 10px 14px;
+}
+/* T-popup-sep: the footer gesture hint used to be pango `─` characters
+ * appended into the tip body (tooltip.rs's old `set_tip`) — never actually
+ * 100% of the popup's real width, just however wide `rule(30)` happened to
+ * measure. `genconfig.rs::popup()` now appends this as a real GTK box, a
+ * sibling widget of the body label inside `.popup`, so `margin: 6px 0`
+ * (no horizontal margin) reaches both edges exactly. */
+.popup-sep {
+	min-height: 1px;
+	background-color: #32363e;
+	margin: 6px 0;
+}
+/* `label` selector, not bare class, to outrank `.popup label` below (same
+ * specificity trap already documented on `.ws`/network pills — T14/T18). */
+.popup label.popup-hint {
+	padding: 4px 14px 10px 14px;
+}
+/* T-popup-vert: the title sits right above its own `.popup-sep`, so it
+ * carries the same tighter-bottom treatment `.popup-hint` gets against the
+ * sep above it — same reasoning, mirrored top/bottom. */
+.popup label.popup-title {
+	padding: 10px 14px 4px 14px;
+}
+.popup label {
+	color: #abb2bf;
+	padding: 10px 14px;
+	/* T8b: popups are GTK popovers, so they only ever inherited the
+	 * bare `*` rule above. Ported from waybar/style.css:207-211; the
+	 * trailing monospace keeps bar()/heatbar() meters column-aligned.
+	 * Material Symbols Rounded is deliberately NOT listed — see the T8b
+	 * comment on the bar's icon rule above for why it produces wrong
+	 * glyphs under GTK4 on this system rather than acting as a safe
+	 * fallback. Known consequence, not yet closed: tooltip.rs's own
+	 * icon vocabulary (sect()/dot()) and cpu.rs's popup-only icons
+	 * (IC_TOP/IC_STUCK/IC_HIST/IC_LOAD/IC_CORES) still pass Material
+	 * Symbols codepoints — those now render as honest tofu instead of a
+	 * wrong CJK glyph, until a follow-up pass gives them the same
+	 * Nerd Font swap the bar pills got in T8b. */
+	font-family: "IBM Plex Sans", "JetBrainsMono Nerd Font", monospace;
+}

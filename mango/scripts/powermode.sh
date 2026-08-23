@@ -18,6 +18,8 @@
 #   mango-powermode.weak      weak-charger latch, set by battery-guard.sh
 #   mango-powermode.drain     pid of the running drain loop (see below)
 #   mango-powermode.ollama    model names unloaded on eco entry
+#   mango-powermode.charge    charge-limit override (e.g. before travel);
+#                              absent -> PM_CHARGE_LIMIT from powermode.conf
 #
 #   powermode.sh auto      recompute mode from AC + battery % (no-op if manual)
 #   powermode.sh cable     AC plug/unplug edge — clear markers, then auto
@@ -26,9 +28,15 @@
 #   powermode.sh low       force eco, e.g. battery fell under PM_BAT_ECO_PCT
 #   powermode.sh weak      force eco, latch weak (idempotent)
 #   powermode.sh unweak    clear the weak latch, then auto     (recovery)
+#   powermode.sh charge N  set the charge ceiling override, then reapply
+#                          (N == PM_CHARGE_LIMIT clears the override instead)
 #   powermode.sh drain     internal: the eco wait/pause loop, see set_mode()
 #   powermode.sh status    print the current mode + markers
 #   powermode.sh test      assert the decision table, no hardware touched
+#
+# The charge ceiling (mango-powermode.charge, PM_CHARGE_LIMIT) is orthogonal
+# to full/battery/eco: cable() and weak()/unweak() never touch it, so
+# unplugging or a weak-charger latch never discards a travel override.
 #
 # Eco entry pauses hermes right away, then waits for any open omp/pi
 # coding-agent session to go idle before touching docker/paseo/ollama — see
@@ -41,9 +49,9 @@ MODE_FILE="$RUN/mango-powermode"
 MANUAL_FILE="$RUN/mango-powermode.manual"
 BRIGHT_FILE="$RUN/mango-powermode.bright"
 WEAK_FILE="$RUN/mango-powermode.weak"
-BARS_PID="$RUN/mango-bars.pid"
 DRAIN_PID="$RUN/mango-powermode.drain"
 OLLAMA_FILE="$RUN/mango-powermode.ollama"
+CHARGE_FILE="$RUN/mango-powermode.charge"
 
 CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
 AC="${MANGO_AC_DIR:-}"
@@ -87,10 +95,14 @@ PM_ECO_DRAIN_IDLE_CPU=${PM_ECO_DRAIN_IDLE_CPU:-1}
 PM_ECO_DRAIN_FORCE_PCT=${PM_ECO_DRAIN_FORCE_PCT:-40}
 PM_ECO_PASEO_ROOM=${PM_ECO_PASEO_ROOM-power}
 PM_ECO_OLLAMA_RESTORE=${PM_ECO_OLLAMA_RESTORE:-0}
+PM_CHARGE_LIMIT=${PM_CHARGE_LIMIT:-80}
 
 # ---------------------------------------------------------------- primitives
 
 current_mode() { [ -r "$MODE_FILE" ] && cat "$MODE_FILE" 2> /dev/null || printf full; }
+
+# The travel override in $CHARGE_FILE, if any, else PM_CHARGE_LIMIT.
+charge_limit() { [ -r "$CHARGE_FILE" ] && cat "$CHARGE_FILE" 2> /dev/null || printf '%s' "$PM_CHARGE_LIMIT"; }
 
 payload() { # mode -> KEY=value lines for mango-powermode apply
 	case "$1" in
@@ -120,6 +132,7 @@ SND_HDA_POWERSAVE=$snd
 VM_LAPTOP_MODE=$lm
 VM_DIRTY_WB=$wb
 WIFI_POWERSAVE=$wifi
+CHARGE_LIMIT=$(charge_limit)
 EOF
 }
 
@@ -341,9 +354,8 @@ ollama_restore() {
 	done
 }
 
-# Verified against /proc/<pid>/comm, not just "a pid is in the file" — same
-# stale-pid guard as bars_restart below, for the same reason: a recycled pid
-# must never be signalled.
+# Verified against /proc/<pid>/comm, not just "a pid is in the file" — a
+# recycled pid must never be signalled.
 drain_stop() {
 	[ -n "${MANGO_PM_TEST:-}" ] && return 0
 	[ -r "$DRAIN_PID" ] || return 0
@@ -397,22 +409,9 @@ drain() {
 	ollama_unload
 }
 
-# USR1, not HUP: bars.sh traps USR1 rather than HUP because a HUP-preignoring
-# parent (nohup among others) makes HUP permanently untrappable in bash — see
-# the matching comment in bars.sh.
-bars_restart() {
-	[ -n "${MANGO_PM_TEST:-}" ] && return 0
-	[ -r "$BARS_PID" ] || return 0
-	pid=$(cat "$BARS_PID" 2> /dev/null)
-	[ -n "$pid" ] || return 0
-	# bars.sh's degraded-launch path used to be able to leave this file naming
-	# waybar itself rather than bars.sh — guarded there now too, but cheap
-	# insurance here: waybar's own SIGUSR1 default is "toggle visibility", not
-	# reload, so signalling it by mistake hides the bar until the next real
-	# toggle rather than just delaying one.
-	[ "$(cat "/proc/$pid/comm" 2> /dev/null)" = bars.sh ] || return 0
-	kill -USR1 "$pid" 2> /dev/null
-}
+# bars_restart() (waybar's own reload poke, USR1-to-bars.sh) is gone with
+# waybar itself — mango-bard inotify-watches $MODE_FILE directly (T1) and
+# needs no signal to pick up a mode change.
 
 notify_mode() { # mode, detail
 	[ -n "${MANGO_PM_TEST:-}" ] && return 0
@@ -445,8 +444,6 @@ set_mode() { # mode
 		docker_unpause
 		ollama_restore
 	fi
-	bars_restart
-	[ -n "${MANGO_PM_TEST:-}" ] || pkill -RTMIN+11 waybar 2> /dev/null
 }
 
 online() {
@@ -499,11 +496,24 @@ unweak() {
 	auto
 }
 
+# Sets the override and reapplies the current mode's payload — the ceiling is
+# not itself a mode, so it doesn't touch $MODE_FILE. n == PM_CHARGE_LIMIT
+# clears the override rather than storing a redundant copy, so a later
+# powermode.conf edit is picked up on the next apply instead of being shadowed
+# by a stale runtime file.
+charge() { # n
+	if [ "$1" = "$PM_CHARGE_LIMIT" ]; then rm -f "$CHARGE_FILE"
+	else printf '%s' "$1" > "$CHARGE_FILE"
+	fi
+	apply_root "$(current_mode)"
+}
+
 status() {
 	printf 'mode:   %s\n' "$(current_mode)"
 	printf 'manual: %s\n' "$([ -f "$MANUAL_FILE" ] && echo yes || echo no)"
 	printf 'weak:   %s\n' "$([ -f "$WEAK_FILE" ] && echo yes || echo no)"
 	printf 'AC:     %s\n' "$([ "$(online)" = 1 ] && echo online || echo offline)"
+	printf 'charge: %s%%\n' "$(charge_limit)"
 }
 
 # ---------------------------------------------------------------- self-check
@@ -513,8 +523,8 @@ if [ "${1:-}" = test ]; then
 	T=$(mktemp -d)
 	trap 'rm -rf "$T"' EXIT
 	RUN="$T"
-	MODE_FILE="$RUN/mode" MANUAL_FILE="$RUN/manual" BRIGHT_FILE="$RUN/bright" WEAK_FILE="$RUN/weak" BARS_PID="$RUN/bars.pid"
-	DRAIN_PID="$RUN/drain.pid" OLLAMA_FILE="$RUN/ollama"
+	MODE_FILE="$RUN/mode" MANUAL_FILE="$RUN/manual" BRIGHT_FILE="$RUN/bright" WEAK_FILE="$RUN/weak"
+	DRAIN_PID="$RUN/drain.pid" OLLAMA_FILE="$RUN/ollama" CHARGE_FILE="$RUN/charge"
 
 	mkdir -p "$T/ac" "$T/bat"
 	AC="$T/ac"
@@ -590,6 +600,20 @@ if [ "${1:-}" = test ]; then
 	printf '%s\n' "$P" | grep -qx "NO_TURBO=$PM_BAT_NO_TURBO" || { echo "battery payload should use PM_BAT_NO_TURBO"; exit 1; }
 	printf '%s\n' "$P" | grep -qx "PCI_PM=$PM_ECO_PCI_PM" || { echo "battery payload should reuse eco's I/O-side PCI_PM"; exit 1; }
 
+	# charge ceiling: config default with no override, then the travel override,
+	# present in every mode's payload since it's emitted outside the case
+	printf '%s\n' "$(payload full)" | grep -qx "CHARGE_LIMIT=$PM_CHARGE_LIMIT" || { echo "payload should default to PM_CHARGE_LIMIT with no override"; exit 1; }
+	charge 100
+	[ "$(cat "$CHARGE_FILE")" = 100 ] || { echo "charge 100 should write the override file"; exit 1; }
+	printf '%s\n' "$(payload eco)" | grep -qx 'CHARGE_LIMIT=100' || { echo "payload should reflect the override in every mode"; exit 1; }
+	# an unplug/replug must not discard a travel override
+	cable
+	[ "$(cat "$CHARGE_FILE")" = 100 ] || { echo "cable edge must not clear the charge override"; exit 1; }
+	# setting it back to the config value clears the override file instead of
+	# storing a redundant copy
+	charge "$PM_CHARGE_LIMIT"
+	[ -f "$CHARGE_FILE" ] && { echo "charge back to PM_CHARGE_LIMIT should clear the override"; exit 1; }
+
 	# agent_busy_filter: claude's own daemon/bg-pty-host/bg-spare infra must not
 	# read as a session, a real --session-id process must
 	AGENT_IDLE='claude claude daemon run --origin transient --spawned-by {"label":"claude","cwd":"/home/martin/src/crema","pid":3201856}
@@ -648,10 +672,11 @@ battery) force battery ;;
 low) force eco 'battery low' ;;
 weak) weak ;;
 unweak) unweak ;;
+charge) charge "${2:?usage: powermode.sh charge N}" ;;
 drain) drain ;;
 status) status ;;
 *)
-	echo "usage: powermode.sh auto|cable|toggle|eco|full|battery|low|weak|unweak|drain|status|test" >&2
+	echo "usage: powermode.sh auto|cable|toggle|eco|full|battery|low|weak|unweak|charge N|drain|status|test" >&2
 	exit 1
 	;;
 esac

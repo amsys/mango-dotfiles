@@ -1,4 +1,4 @@
-//! Hotspot pill: up/down + tooltip. Ports src/waybar/scripts/hotspot.sh
+//! Hotspot pill: up/down + tooltip. Ports src/ironbar/scripts/hotspot.sh
 //! `--status` (lines 121-144) only — `--menu`/`--toggle`/`do_up`/`do_down`
 //! stay shell (goal 4: click-driven menus cost nothing at idle, only the
 //! polling half moves into the daemon). See IRONBAR.md T6b decision D2.
@@ -25,15 +25,27 @@
 //! while the hotspot is up.
 
 use crate::mango::CLASS_PREFIX;
-use crate::tooltip::{barico, kv, rule, sect, title};
+use crate::tooltip::{barico, kv, sect, set_titled};
 use crate::vars::Vars;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-/// wifi_tethering, Material Symbols Rounded — hotspot.sh:142's own comment
-/// flags this codepoint as carried over unverified from the classic Material
-/// Icons PUA mapping; same byte sequence ported here regardless.
-const IC_HOTSPOT: char = '\u{e1d9}';
+/// wifi_tethering, was Material Symbols Rounded U+E1D9 — hotspot.sh:142's
+/// own comment flags this codepoint as carried over unverified from the
+/// classic Material Icons PUA mapping.
+/// T8b: -> U+F1EB (the same wifi-fan glyph net.rs's `arc()` used to return
+/// for every bucket) — GTK4 cannot correctly rasterize Material Symbols
+/// Rounded's variable font on this system, and the first replacement tried
+/// (U+F012, signal bars) also rendered as wrong CJK tofu live in ironbar;
+/// U+F1EB was confirmed working by an actual live-ironbar screenshot
+/// (already proven for the wifi pill itself). See IRONBAR.md's T8b entry.
+/// T19: U+F1EB -> U+F0003 (md-access_point) — one-icon-family sweep
+/// (IRONBAR.md T19). `arc()` (net.rs) now returns four distinct signal-
+/// strength glyphs instead of one shared constant, so the old "reuse the
+/// wifi pill's own confirmed glyph" argument for the shared codepoint no
+/// longer holds either — an access-point glyph reads more precisely for
+/// "broadcasting", not "receiving", a wifi signal.
+const IC_HOTSPOT: char = '\u{f0003}';
 
 fn class_key(module: &str) -> String {
     format!("{CLASS_PREFIX}{module}")
@@ -133,6 +145,7 @@ impl Hotspot {
         if !self.up {
             vars.set("hotspot_text", "");
             vars.set("hotspot_tip", "");
+            vars.set("hotspot_tip_title", "");
             vars.set(&class_key("hotspot"), "");
             return;
         }
@@ -143,15 +156,22 @@ impl Hotspot {
         let clients = client_count();
 
         let mut tip = String::new();
-        tip.push_str(&title("Hotspot"));
-        tip.push_str(&rule(30));
         tip.push_str(&sect("", &format!("{ssid}  \u{b7}  ch {chan}")));
         tip.push_str(&kv("Password", &psk));
         tip.push_str(&kv("Uplink", uplink));
         tip.push_str(&kv("Clients", &format!("{clients} connected")));
 
         vars.set("hotspot_text", barico(IC_HOTSPOT));
-        vars.set("hotspot_tip", tip.trim_end_matches('\n').to_string());
+        // T15: hotspot's static tooltip is gone (see genconfig.rs's
+        // hotspot_module doc comment) — its gesture hint lives in
+        // tooltip::HINTS now, so the popup needs the same set_titled() path
+        // every other converted module uses to append it.
+        set_titled(
+            vars,
+            "hotspot_tip",
+            "Hotspot",
+            tip.trim_end_matches('\n').to_string(),
+        );
         vars.set(
             &class_key("hotspot"),
             if uplink == "NordVPN" { "vpn" } else { "active" },
