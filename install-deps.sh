@@ -17,8 +17,8 @@ CORE_PKGS=(mangowm-git ironbar kitty rofi-wayland mako wlogout swaylock hypridle
 TOOL_PKGS=(grim slurp swappy hyprpicker tesseract tesseract-data-eng
 	wf-recorder
 	brightnessctl playerctl wireplumber networkmanager nm-connection-editor
-	iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs kdialog
-	atop btop dmidecode)
+	iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs
+	atop btop dmidecode imagemagick python-gobject wayvnc kdeconnect)
 LOOK_PKGS=(fish starship eza ttf-jetbrains-mono-nerd adw-gtk-theme-git
 	breeze-plus kde-cli-tools ttf-ibm-plex ttf-material-symbols-variable-git)
 # Referenced directly by fish/config.fish and git/config. Not cosmetic: without

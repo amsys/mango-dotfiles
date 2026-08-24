@@ -208,20 +208,52 @@ if [[ -x "$BARD_BIN" ]]; then
 fi
 log
 
-# systemd user unit — the self-healing restart waybar's own process
-# supervision gave the old bar for free (mango-bard.service's own
-# Description=). Linked via link(), not link_tree(), since it is the only
-# regular file under ironbar/ that is not source: install-config.sh keeps no
-# separate "units" list, so it is named explicitly here instead.
-log "-- mango-bard.service --"
-link "$REPO/ironbar/mango-bard.service" "$XDG_CONFIG_HOME/systemd/user/mango-bard.service"
+# systemd user units. Linked via link(), not link_tree(): each is the only
+# regular file in its source directory that is not itself source (bar data,
+# sleep handling), so listing them here is simpler than a directory for one
+# file each.
+UNITS=(
+	"ironbar/mango-bard.service:mango-bard.service"
+	"systemd/mango-sleep-lock.service:mango-sleep-lock.service"
+)
+# Linked but never enabled: started/stopped only from a bar toggle, never
+# at login — wayvnc/kdeconnectd from the remote-access toggle
+# (ironbar/scripts/remote.sh), mango-keepawake from the keep-awake toggle
+# (ironbar/scripts/keepawake.sh) — see each unit's own comment.
+LINK_ONLY_UNITS=(
+	"systemd/wayvnc.service:wayvnc.service"
+	"systemd/kdeconnectd.service:kdeconnectd.service"
+	"systemd/mango-keepawake.service:mango-keepawake.service"
+)
+log "-- kdeconnect autostart override --"
+# /etc/xdg/autostart/org.kde.kdeconnect.daemon.desktop has no OnlyShowIn
+# filter and runs kdeconnectd on every login unconditionally (live-confirmed:
+# systemd-xdg-autostart-generator turns it into
+# app-org.kde.kdeconnect.daemon@autostart.service). Without this override
+# kdeconnectd is always on regardless of the remote-access bar toggle
+# (systemd/kdeconnectd.service) — see kdeconnect/org.kde.kdeconnect.daemon.desktop's
+# own comment.
+link "$REPO/kdeconnect/org.kde.kdeconnect.daemon.desktop" "$XDG_CONFIG_HOME/autostart/org.kde.kdeconnect.daemon.desktop"
+log
+
+log "-- systemd user units --"
+for entry in "${UNITS[@]}" "${LINK_ONLY_UNITS[@]}"; do
+	src="${entry%%:*}"
+	unit="${entry#*:}"
+	link "$REPO/$src" "$XDG_CONFIG_HOME/systemd/user/$unit"
+done
 if ((DRY_RUN)); then
-	log "  (dry run) would run: systemctl --user daemon-reload && enable mango-bard.service"
+	log "  (dry run) would run: systemctl --user daemon-reload && enable each unit above (except LINK_ONLY_UNITS)"
 elif command -v systemctl >/dev/null 2>&1; then
 	systemctl --user daemon-reload
-	systemctl --user enable mango-bard.service
-	log "  enabled (starts at the next graphical-session.target, or now via"
-	log "  'systemctl --user start mango-bard.service')"
+	for entry in "${UNITS[@]}"; do
+		systemctl --user enable "${entry#*:}"
+	done
+	log "  enabled (start at the next login, via mango's config.conf; or now"
+	log "  via 'systemctl --user start <unit>')"
+	log "  linked, not enabled: wayvnc.service kdeconnectd.service"
+	log "  mango-keepawake.service (toggle from the bar, or"
+	log "  'systemctl --user start <unit>')"
 else
 	log "  skip:   systemctl not available"
 fi

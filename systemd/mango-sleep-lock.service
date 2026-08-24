@@ -1,0 +1,16 @@
+[Unit]
+Description=mango-sleep-lock — lock the screen and pause the pomodoro before sleep
+# Once hypridle.conf's before_sleep_cmd is gone (see that file's own
+# comment), this is the only thing in the session that locks before sleep —
+# Restart=always, not on-failure, since it must never sit dead.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.config/mango/scripts/sleep-lock.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

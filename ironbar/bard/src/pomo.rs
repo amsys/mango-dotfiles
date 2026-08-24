@@ -484,7 +484,8 @@ impl Pomo {
     }
 
     /// Control-socket verbs: `pomo start [task] | toggle | click | reset |
-    /// mute [min] | note | resume <text> | idle 0|1 | unlock | status`.
+    /// mute [min] | note | resume <text> | idle 0|1 | unlock | pause |
+    /// unpause | status`.
     pub async fn control(&mut self, verb: &str, arg: Option<&str>, vars: &mut Vars) -> String {
         let n = now();
         match verb {
@@ -585,6 +586,33 @@ impl Pomo {
                 }
                 "ok".into()
             }
+            // mango-sleep-lock's pre-suspend call. `CLOCK_REALTIME` (see
+            // sys.rs's `ClockTimer`) advances across a suspend, so a block
+            // left running would surface as a `catch_up` phantom-phase
+            // cascade on wake — see the module doc's `catch_up` comment.
+            // Unlike `toggle`, only pauses an already-*running* timer and
+            // reports whether it did (`"ok"` vs `"noop"`), so a caller that
+            // fires this unconditionally before every sleep can tell "I
+            // paused it" from "it was already idle/paused" and knows
+            // whether `unpause` should undo it again on wake.
+            "pause" => {
+                if self.state != Run::Running {
+                    return "noop".into();
+                }
+                self.pause_now(n, vars).await;
+                "ok".into()
+            }
+            // The other half of `pause` — resumes a block *this caller*
+            // paused. No-op if the user had already paused it by hand (or
+            // nothing is running), so it is safe to call unconditionally
+            // rather than tracking whether the matching `pause` fired.
+            "unpause" => {
+                if self.state != Run::Pause {
+                    return "noop".into();
+                }
+                self.resume_now(n, vars).await;
+                "ok".into()
+            }
             "status" => self.status_line(n),
             _ => "unknown pomo verb".into(),
         }
@@ -595,24 +623,36 @@ impl Pomo {
     async fn toggle_run_pause(&mut self, n: i64, vars: &mut Vars) {
         match self.state {
             Run::Idle => self.begin_work(n, None, vars).await,
-            Run::Running => {
-                self.until -= n; // becomes "seconds left"
-                self.state = Run::Pause;
-                // FOCUS.md §5.3: DND covers an active work block, not a
-                // paused one — stepping away mid-block should not also
-                // silence everything else indefinitely.
-                if self.phase == Phase::Work {
-                    self.release_dnd().await;
-                }
-            }
-            Run::Pause => {
-                self.until += n; // becomes a deadline again
-                self.state = Run::Running;
-                let _ = self.timer.arm_at(self.until);
-                if self.phase == Phase::Work {
-                    self.enable_dnd().await;
-                }
-            }
+            Run::Running => self.pause_now(n, vars).await,
+            Run::Pause => self.resume_now(n, vars).await,
+        }
+    }
+
+    /// Running -> Pause. Split out of `toggle_run_pause` so the `pause`
+    /// control verb (mango-sleep-lock's pre-suspend call) can reach the same
+    /// state change directly, guarded by its own `state == Run::Running`
+    /// check in `control()` rather than `toggle`'s blind flip.
+    async fn pause_now(&mut self, n: i64, vars: &mut Vars) {
+        self.until -= n; // becomes "seconds left"
+        self.state = Run::Pause;
+        // FOCUS.md §5.3: DND covers an active work block, not a paused
+        // one — stepping away mid-block should not also silence everything
+        // else indefinitely.
+        if self.phase == Phase::Work {
+            self.release_dnd().await;
+        }
+        self.save();
+        self.refresh(vars);
+    }
+
+    /// Pause -> Running. The `unpause` half of `pause_now`, see its doc
+    /// comment.
+    async fn resume_now(&mut self, n: i64, vars: &mut Vars) {
+        self.until += n; // becomes a deadline again
+        self.state = Run::Running;
+        let _ = self.timer.arm_at(self.until);
+        if self.phase == Phase::Work {
+            self.enable_dnd().await;
         }
         self.save();
         self.refresh(vars);
@@ -1001,5 +1041,67 @@ mod tests {
 
         p.nag(460).await; // 300s after the first warning: escalates
         assert_eq!(p.nag_last, Some(460));
+    }
+
+    // `pause` must move a running block into `Pause` and report "ok" — the
+    // sleep-lock daemon relies on this reply to know it must `unpause` on
+    // wake.
+    #[tokio::test]
+    async fn pause_stops_a_running_block() {
+        let mut p = pomo();
+        let mut vars = Vars::new();
+        p.state = Run::Running;
+        p.phase = Phase::Work;
+        p.until = 2000;
+        let reply = p.control("pause", None, &mut vars).await;
+        assert_eq!(reply, "ok");
+        assert_eq!(p.state, Run::Pause);
+    }
+
+    // Idle and already-paused must both report "noop" and leave state
+    // untouched — this is how the caller tells "I paused it" from "there
+    // was nothing to pause", so it knows whether to `unpause` on wake.
+    #[tokio::test]
+    async fn pause_is_a_noop_while_idle_or_already_paused() {
+        let mut p = pomo();
+        let mut vars = Vars::new();
+        assert_eq!(p.control("pause", None, &mut vars).await, "noop");
+        assert_eq!(p.state, Run::Idle);
+
+        p.state = Run::Pause;
+        p.until = 300;
+        assert_eq!(p.control("pause", None, &mut vars).await, "noop");
+        assert_eq!(p.state, Run::Pause);
+        assert_eq!(p.until, 300, "must not touch the stored remaining time");
+    }
+
+    // `unpause` must move a paused block back to `Running` and report "ok".
+    #[tokio::test]
+    async fn unpause_resumes_a_paused_block() {
+        let mut p = pomo();
+        let mut vars = Vars::new();
+        p.state = Run::Pause;
+        p.phase = Phase::Work;
+        p.until = 300; // seconds left, per the Pause-state convention
+        let reply = p.control("unpause", None, &mut vars).await;
+        assert_eq!(reply, "ok");
+        assert_eq!(p.state, Run::Running);
+    }
+
+    // Idle and already-running must both report "noop" — a manually-paused
+    // block that the sleep-lock daemon never touched must not be resumed by
+    // a stray `unpause` call, and an idle daemon has nothing to resume.
+    #[tokio::test]
+    async fn unpause_is_a_noop_while_idle_or_already_running() {
+        let mut p = pomo();
+        let mut vars = Vars::new();
+        assert_eq!(p.control("unpause", None, &mut vars).await, "noop");
+        assert_eq!(p.state, Run::Idle);
+
+        p.state = Run::Running;
+        p.until = 2000;
+        assert_eq!(p.control("unpause", None, &mut vars).await, "noop");
+        assert_eq!(p.state, Run::Running);
+        assert_eq!(p.until, 2000, "must not touch the deadline");
     }
 }
