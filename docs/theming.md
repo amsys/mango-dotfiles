@@ -79,9 +79,6 @@ scheme and reruns `switchwall.sh --noswitch`.
 
 "State dir" is `~/.local/state/mango/generated/`.
 
-Three templates remain from earlier stacks and have no consumer: `hyprland`,
-`hyprlock`, and `fuzzel`. They are harmless.
-
 `[config.custom_colors]` seeds the ANSI terminal colors from a gruvbox-dark
 base with `blend = true`, so the terminal palette shifts toward the
 wallpaper's hue instead of staying fixed.

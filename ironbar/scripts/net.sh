@@ -1,99 +1,27 @@
 #!/bin/sh
-# Network security lock + detailed Wi-Fi / Ethernet indicators for ironbar.
+# Network security lock click handler + selftest for ironbar.
 #
-# Six modes:
-#   --sec        custom/netsec exec  — grade the whole path, emit JSON
+# Three modes:
 #   --sec-click  on-click (left)     — captive portal login, else the VPN picker
 #   --sec-edit   on-click-right      — nm-connection-editor on the active tunnel
-#   --wifi       custom/wifi exec    — RSSI / radio / link-quality detail
-#   --eth        custom/eth exec     — link / addressing / counter detail
 #   --selftest   assert classify() against canned inputs (no network access)
 #
-# ponytail: "is DNS encrypted" collapses to "does the resolver route through a
-# tunnel". systemd-resolved is disabled on this box, so there is no DoT or
-# DNSSEC status to read and no API that answers the real question. If resolved
-# or dnscrypt-proxy ever comes back, resolver_dev() is where the real check goes.
+# The `netsec`/`wifi`/`eth` exec pollers that used to live here (grading the
+# path, RSSI/link detail) moved to mango-bard's net.rs at the T8 cutover —
+# see IRONBAR.md. genconfig.rs's netsec pill has no `exec` key, only the two
+# click handlers below.
 set -u
 
 WIFI_DEV="${MANGO_WIFI_DEV:-wlo1}"
 ETH_DEV="${MANGO_ETH_DEV:-eno2}"
 
-# wifi-menu.sh drops its pid here while it blocks on a rescan; see wifi_emit().
-SCAN_FLAG="${XDG_RUNTIME_DIR:-/tmp}/wifi-scan"
-
 # Vendor apps regenerate their profiles behind your back; the picker only
 # offers tunnels you imported yourself. Matched against the profile name.
 EXCLUDE_RE='(ProtonVPN|Nord|NordLynx|PVPN)'
 
-# FIB probe targets — `ip route get` is a pure lookup, no packets are sent.
-PROBE4=1.1.1.1
-PROBE6=2606:4700:4700::1111
-
 TAB=$(printf '\t')
 
-# Palette, meters and the JSON emitter are shared with cpu/memory/battery/clock.
-. "$(dirname "$0")/tooltip.sh"
-
 notify() { notify-send -a mango-bard "Network" "$1"; }
-
-# The icon fonts are private-use area, so every glyph is invisible in an editor
-# — written as escapes and named here instead. Material Symbols Rounded for the
-# lock states (matches every other bar module), the same four Nerd Font arcs
-# the old `network` module used for signal strength.
-ic_offline() { printf '\xee\x8b\x81'; } # cloud_off        U+E2C1
-ic_portal() { printf '\xee\xa9\xb7'; }  # login            U+EA77
-ic_open() { printf '\xef\x80\xbf'; }    # no_encryption    U+F03F
-ic_exposed() { printf '\xee\xa2\x98'; } # lock_open        U+E898
-ic_lock() { printf '\xee\xa2\x99'; }    # lock             U+E899
-ic_conflict() { printf '\xef\x86\x84'; } # alt_route       U+F184
-ic_wifioff() { printf '\xee\x99\x88'; } # signal_wifi_off  U+E648
-ic_eth() { printf '\xee\xac\xaf'; }     # lan              U+EB2F
-ic_ethoff() { printf '\xee\x85\xaf'; }  # cable_off        U+E16F
-arc() { # 0..100 -> one of the four signal arcs
-	case "$1" in
-	100 | 9? | 8? | 7[5-9]) printf '\xee\x98\xbe' ;;  # U+E63E
-	7? | 6? | 5?) printf '\xee\xaf\xa1' ;;            # U+EBE1
-	4? | 3? | 2[5-9]) printf '\xee\xaf\x96' ;;        # U+EBD6
-	*) printf '\xee\xaf\xa4' ;;                       # U+EBE4
-	esac
-}
-
-# ---------------------------------------------------------------- primitives
-
-# rx-bytes rx-errs rx-drop tx-bytes tx-errs tx-drop
-counters() {
-	awk -v d="$1" '{
-		sub(/^ +/, ""); split($0, a, ":"); gsub(/ /, "", a[1])
-		if (a[1] == d) { split(a[2], b, " "); print b[1], b[3], b[4], b[9], b[11], b[12] }
-	}' /proc/net/dev
-}
-
-# Rates come from the elapsed time recorded in the state file, so they stay
-# correct no matter what `interval` waybar is using.
-throughput() { # iface -> "↓ 1.2 MB/s  ↑ 340 kB/s"
-	_f="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-$1"
-	_now=$(awk '{print $1}' /proc/uptime)
-	# shellcheck disable=SC2046  # deliberate word-split of counter fields
-	set -- $(counters "$1")
-	[ $# -ge 4 ] || { printf '↓ —  ↑ —'; return; }
-	_rx=$1 _tx=$4 _drx=0 _dtx=0
-	if [ -r "$_f" ]; then
-		_pt=""
-		read -r _pt _prx _ptx <"$_f" 2>/dev/null || _pt=""
-		if [ -n "$_pt" ]; then
-			# shellcheck disable=SC2046  # deliberate word-split of awk output
-			set -- $(awk -v t="$_now" -v p="$_pt" -v r="$_rx" -v pr="$_prx" -v x="$_tx" -v px="$_ptx" 'BEGIN {
-				d = t - p
-				# counters reset on reboot or an iface flap -> report 0, not a spike
-				if (d < 0.2 || r < pr || x < px) print 0, 0
-				else print int((r - pr) / d), int((x - px) / d)
-			}')
-			_drx=$1 _dtx=$2
-		fi
-	fi
-	printf '%s %s %s\n' "$_now" "$_rx" "$_tx" >"$_f"
-	printf '↓ %s  ↑ %s' "$(human "$_drx")" "$(human "$_dtx")"
-}
 
 # ------------------------------------------------------------- network facts
 
@@ -149,10 +77,6 @@ tunnel_rows() {
 			printf '%s\t%s\t%s\n' "$dev" "$kind" "$_nm"
 		done
 }
-
-# iface carrying general traffic for a family, "" when the family has no route
-route_dev() { ip -j route get "$1" 2>/dev/null | jq -r '.[0].dev // empty' 2>/dev/null; }
-gw_for() { ip -j "$2" route show default 2>/dev/null | jq -r --arg d "$1" '[.[] | select(.dev == $d)][0].gateway // empty' 2>/dev/null; }
 
 # Pairwise prefix-overlap scan of the routing table.
 #
@@ -220,40 +144,6 @@ conflict_scan() {
 	}'
 }
 
-route_conflicts() {
-	{
-		ip -j -4 route show 2>/dev/null | jq -r '.[] | select(.dev != "lo") | "4\t\(.dst)\t\(.dev)\t\(.metric // 0)"' 2>/dev/null
-		ip -j -6 route show 2>/dev/null | jq -r '.[] | select(.dev != "lo") | "6\t\(.dst)\t\(.dev)\t\(.metric // 0)"' 2>/dev/null
-	} | conflict_scan
-}
-
-nameservers() { awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null; }
-searchdomains() { awk '/^search/ {$1 = ""; print substr($0, 2)}' /etc/resolv.conf 2>/dev/null; }
-
-# Which interface a resolver is reached through. A loopback address is some
-# local stub (dnscrypt-proxy, stubby, a container resolver) whose upstream is
-# invisible from here — reported as "local" and counted as satisfied.
-resolver_dev() {
-	case "$1" in 127.* | ::1) printf 'local'; return ;; esac
-	ip -j route get "$1" 2>/dev/null | jq -r '.[0].dev // "-"' 2>/dev/null
-}
-
-wifi_row() { nmcli -t -f ACTIVE,SECURITY,SSID dev wifi 2>/dev/null | awk -F: '$1 == "yes" {print; exit}'; }
-wifi_ssid() { printf '%s' "$1" | sed 's/^yes:[^:]*://; s/\\:/:/g'; }
-wifi_seclabel() { printf '%s' "$1" | cut -d: -f2; }
-
-# open | wep | wpa | wired | none — the encryption of the physical uplink, not
-# of whatever tunnel rides on top of it.
-link_sec() {
-	case "$(wifi_seclabel "$1")" in
-	'' | '--') [ -n "$1" ] && { printf 'open'; return; } ;;
-	*WEP*) printf 'wep'; return ;;
-	*) printf 'wpa'; return ;;
-	esac
-	[ "$(cat "/sys/class/net/$ETH_DEV/carrier" 2>/dev/null)" = 1 ] && { printf 'wired'; return; }
-	printf 'none'
-}
-
 # ------------------------------------------------------- the state machine
 #
 # Pure function: no commands, no globals, everything arrives as arguments so
@@ -305,193 +195,17 @@ classify() {
 	printf 'secure'
 }
 
-# --------------------------------------------------------------- --sec
-
-is_tun_dev() {
-	[ -n "$1" ] || return 1
-	for t in $TUNS; do [ "$1" = "$t" ] && return 0; done
-	return 1
+# NM device states that mean "mid-transition": 40 prepare, 50 config,
+# 60 need-auth, 70 ip-config, 80 ip-check, 90 secondaries, 110 deactivating.
+# The number is never localized; the parenthetical name is, so don't read it.
+wifi_busy() { # "<code> (<name>)"
+	case "${1%% *}" in
+	40 | 50 | 60 | 70 | 80 | 90 | 110) return 0 ;;
+	*) return 1 ;;
+	esac
 }
 
-sec_emit() {
-	CONN=$(nmcli -t -f CONNECTIVITY general 2>/dev/null | head -1)
-	WROW=$(wifi_row)
-	SEC=$(link_sec "$WROW")
-	V4=$(route_dev "$PROBE4")
-	V6=$(route_dev "$PROBE6")
-	TROWS=$(tunnel_rows)
-	TUNS=$(printf '%s\n' "$TROWS" | cut -f1 | grep -v '^$' | tr '\n' ' ')
-	case "$SEC" in
-	open | wep | wpa) UPLINK=$WIFI_DEV ;;
-	wired) UPLINK=$ETH_DEV ;;
-	*) UPLINK=${V4:-$WIFI_DEV} ;;
-	esac
-	DNS=$(nameservers)
-	DNSDEVS=""
-	for ns in $DNS; do DNSDEVS="$DNSDEVS $(resolver_dev "$ns")"; done
-	CONF=$(route_conflicts)
-	NCONF=$(printf '%s' "$CONF" | grep -c . || true)
-	CLASS=$(classify "$CONN" "$SEC" "$V4" "$V6" "$TUNS" "$DNSDEVS" "$NCONF")
-
-	case "$CLASS" in
-	offline) HEAD="Offline — no route to the internet"; ICO=$(ic_offline) ;;
-	portal) HEAD="Captive portal — click to sign in"; ICO=$(ic_portal) ;;
-	open) HEAD="Unencrypted link — traffic in the clear"; ICO=$(ic_open) ;;
-	exposed) HEAD="No tunnel — traffic leaves in the clear"; ICO=$(ic_exposed) ;;
-	dnsleak) HEAD="Tunnelled, but DNS leaks"; ICO=$(ic_lock) ;;
-	conflict) HEAD="Encrypted, but routes overlap"; ICO=$(ic_conflict) ;;
-	secure) HEAD="Encrypted end to end"; ICO=$(ic_lock) ;;
-	esac
-
-	# CLASS/ICO above are recomputed every call — that lock icon has to stay
-	# live. The tooltip body (route conflicts, tunnel rows, resolver rows…) is
-	# cached on the state that actually drives it, not a timer: routes,
-	# tunnels and resolvers only change on a real network event, which
-	# net-watch.sh already turns into an immediate re-exec (RTMIN+10). A
-	# time-based TTL would either serve a stale tooltip after a real change
-	# within the same window, or rebuild for no reason when nothing did — this
-	# has zero staleness and a near-total cache hit rate on an idle network.
-	TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-sec-tip"
-	TIP_KEY=$(printf '%s' "$CLASS$CONN$SEC$V4$V6$TROWS$CONF$DNS$DNSDEVS" | tr '\n\t' '  ')
-	if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
-	TIP=$(
-		title "$HEAD"
-		rule 56
-
-		sect "󰌾" "Link"
-		case "$SEC" in
-		open | wep | wpa)
-			row "$(wifi_ssid "$WROW" | esc) · $WIFI_DEV"
-			case "$SEC" in
-			open) row "$(bad "Open — no encryption, anyone nearby can read this")" ;;
-			wep) row "$(bad "WEP — broken, treat it as open")" ;;
-			*) dim "$(wifi_seclabel "$WROW")" ;;
-			esac
-			MFP=$(iw dev "$WIFI_DEV" station dump 2>/dev/null | awk '/MFP:/ {print $2; exit}')
-			dim "Management-frame protection (802.11w): ${MFP:-unknown}"
-			;;
-		wired)
-			row "Ethernet · $ETH_DEV"
-			dim "Wired — the link itself is not encrypted"
-			;;
-		*) dim "no uplink" ;;
-		esac
-
-		sect "󰖟" "Routes"
-		if [ -n "$V4" ]; then
-			GW=$(gw_for "$V4" -4)
-			if is_tun_dev "$V4"; then
-				row "IPv4  $(good ✓)  via $V4${GW:+ → $GW}"
-			else
-				row "IPv4  $(bad ✗)  via $V4${GW:+ → $GW} — not tunnelled"
-			fi
-		else
-			dim "IPv4  no default route"
-		fi
-		if [ -n "$V6" ]; then
-			GW6=$(gw_for "$V6" -6)
-			if is_tun_dev "$V6"; then
-				row "IPv6  $(good ✓)  via $V6${GW6:+ → $GW6}"
-			else
-				row "IPv6  $(bad ✗)  via $V6${GW6:+ → $GW6} — leaking outside the tunnel"
-			fi
-		else
-			# scoped to the physical uplink: a ULA on the tunnel itself is not
-			# evidence that the local network handed us usable IPv6
-			N6=$(ip -j -6 addr show dev "$UPLINK" scope global 2>/dev/null | jq -r '[.[].addr_info[]?] | length' 2>/dev/null)
-			if [ "${N6:-0}" -gt 0 ]; then
-				dim "IPv6  address on $UPLINK but no default route — unused, not leaking"
-			else
-				dim "IPv6  none"
-			fi
-		fi
-
-		# Only rendered when something actually overlaps, so the normal case
-		# stays short. Listed whatever the class is — a conflict under a red
-		# lock still needs to be visible.
-		if [ -n "$CONF" ]; then
-			sect "󰘬" "Route conflicts"
-			printf '%s\n' "$CONF" | while IFS="$TAB" read -r da va ma db vb mb kind; do
-				case "$kind" in
-				tie)
-					row "<tt>$(bad ✗)</tt>  two default routes both at metric $ma"
-					dim "$va and $vb — which one wins is arbitrary, set distinct metrics"
-					;;
-				identical)
-					row "<tt>$(bad ✗)</tt>  $da is announced by both $va and $vb"
-					dim "metric $ma beats $mb, so $vb never sees this traffic"
-					;;
-				*)
-					row "<tt>$(warn !)</tt>  $da via $va sits inside $db via $vb"
-					dim "the more specific route wins, so that range leaves via $va, not $vb"
-					;;
-				esac
-			done
-		fi
-
-		sect "󰦝" "Tunnels"
-		if [ -z "$TROWS" ]; then
-			dim "none active"
-		else
-			printf '%s\n' "$TROWS" | while IFS="$TAB" read -r dv kind nm; do
-				[ -n "$dv" ] || continue
-				case "$kind" in wireguard) TY=WireGuard ;; tun) TY=OpenVPN ;; *) TY=$kind ;; esac
-				if is_tun_dev "$V4" && [ "$dv" = "$V4" ]; then
-					CARRIES=" $(good "— carries the default route")"
-				else
-					CARRIES=""
-				fi
-				row "$(printf '%s · %s · %s%s' "$(printf '%s' "${nm:-unmanaged}" | esc)" "$dv" "$TY" "$CARRIES")"
-			done
-			CARRY=0
-			for d in $V4 $V6; do is_tun_dev "$d" && CARRY=1; done
-			[ "$CARRY" = 1 ] || row "$(warn "split tunnel — carries no default route")"
-		fi
-
-		sect "󰇖" "Resolvers"
-		if [ -z "$DNS" ]; then
-			dim "none configured"
-		else
-			for ns in $DNS; do
-				d=$(resolver_dev "$ns")
-				# <tt> for the address column: Google Sans Flex pads
-				# proportionally, so %-20s alone does not line anything up.
-				# 20 cells covers all but the longest uncompressed IPv6
-				# literals; the old 32 pushed the "plaintext to the local
-				# network" row past the tooltip's wrap width.
-				NSP="<tt>$(printf '%-20s' "$ns")</tt>"
-				if [ "$d" = local ]; then
-					row "$(warn ~)  $NSP local stub"
-				elif is_tun_dev "$d"; then
-					row "$(good ✓)  $NSP $d"
-				else
-					row "$(bad ✗)  $NSP $d — plaintext to the local network"
-				fi
-			done
-			SD=$(searchdomains | esc)
-			[ -n "$SD" ] && dim "search $SD"
-		fi
-
-		if [ "$CLASS" = portal ]; then
-			sect "󰋼" "Portal"
-			dim "connectivity: $CONN — click to open the login page"
-		fi
-	)
-	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
-	else
-		TIP=$(tip_load "$TIP_CACHE")
-	fi
-	# eco is a second, independent class rather than a different CLASS value —
-	# TIP_KEY and the offline/portal/... case above must stay keyed on the
-	# real state, not on which power mode drew it. style.css uses the pair
-	# (.eco.open, .eco.portal) to hold this lock statically red instead of
-	# pulsing: an infinite repaint loop is exactly what eco (and battery,
-	# which gets the same class) exists to cut, and this is the one pill
-	# where "stay red" matters more than "look alive".
-	EMIT_CLASS=$CLASS
-	[ "$(power_mode)" != full ] && EMIT_CLASS="$CLASS eco"
-	emit "$EMIT_CLASS" "$(barico "$ICO")" "$TIP"
-}
+# --------------------------------------------------------------- --sec-click
 
 sec_click() {
 	case "$(nmcli -t -f CONNECTIVITY general 2>/dev/null | head -1)" in
@@ -553,233 +267,6 @@ sec_edit() {
 	else
 		nm-connection-editor &
 	fi
-}
-
-# ------------------------------------------------ shared addressing block
-
-addr_rows() {
-	dev=$1
-	V4A=$(ip -j -4 addr show dev "$dev" 2>/dev/null | jq -r '.[0].addr_info[]? | "\(.local)/\(.prefixlen)"' 2>/dev/null | head -1)
-	GWA=$(gw_for "$dev" -4)
-	V6A=$(ip -j -6 addr show dev "$dev" scope global 2>/dev/null | jq -r '.[0].addr_info[]? | "\(.local)/\(.prefixlen)"' 2>/dev/null | head -1)
-	GW6A=$(gw_for "$dev" -6)
-	MTU=$(cat "/sys/class/net/$dev/mtu" 2>/dev/null)
-	MAC=$(cat "/sys/class/net/$dev/address" 2>/dev/null)
-
-	if [ -n "$V4A" ]; then row "IPv4  $V4A${GWA:+  → $GWA}"; else dim "IPv4  none"; fi
-	if [ -n "$V6A" ]; then row "IPv6  $V6A${GW6A:+  → $GW6A}"; else dim "IPv6  none"; fi
-	dim "MAC ${MAC:-?} · MTU ${MTU:-?}"
-	NS=$(nameservers | paste -sd' ' -)
-	[ -n "$NS" ] && dim "DNS $NS"
-	SD=$(searchdomains | esc)
-	[ -n "$SD" ] && dim "search $SD"
-	return 0
-}
-
-# --------------------------------------------------------------- --wifi
-
-# RSSI in dBm -> 0..100. -90 dBm is unusable, -30 is standing next to the AP.
-rssi_pct() { awk -v r="$1" 'BEGIN { p = (r + 90) * 100 / 60; print (p > 100 ? 100 : (p < 0 ? 0 : int(p))) }'; }
-rssi_label() {
-	awk -v r="$1" 'BEGIN {
-		print (r >= -50 ? "Excellent" : (r >= -60 ? "Good" : (r >= -70 ? "Fair" : (r >= -80 ? "Weak" : "Very weak"))))
-	}'
-}
-
-# NM device states that mean "mid-transition": 40 prepare, 50 config,
-# 60 need-auth, 70 ip-config, 80 ip-check, 90 secondaries, 110 deactivating.
-# The number is never localized; the parenthetical name is, so don't read it.
-wifi_busy() { # "<code> (<name>)"
-	case "${1%% *}" in
-	40 | 50 | 60 | 70 | 80 | 90 | 110) return 0 ;;
-	*) return 1 ;;
-	esac
-}
-
-wifi_emit() {
-	# Whenever custom/netwatch is drawing a spinner in this slot (net-watch.sh),
-	# emit nothing — waybar hides a custom module with empty text — so the
-	# spinner *replaces* the arc instead of appearing next to it. Two causes:
-	# an NM state change, and wifi-menu.sh's rescan, which changes no device
-	# state and so has to announce itself. Its flag holds its pid, so a scan
-	# that died without cleaning up cannot hide the widget forever.
-	SCAN=$(cat "$SCAN_FLAG" 2>/dev/null)
-	if [ -n "$SCAN" ] && kill -0 "$SCAN" 2>/dev/null; then
-		emit busy "" ""
-		return
-	fi
-	# Also skips the ~190ms of `iw` work that has no station to read yet.
-	if wifi_busy "$(nmcli -g GENERAL.STATE device show "$WIFI_DEV" 2>/dev/null)"; then
-		emit busy "" ""
-		return
-	fi
-
-	DUMP=$(iw dev "$WIFI_DEV" station dump 2>/dev/null)
-	LINK=$(iw dev "$WIFI_DEV" link 2>/dev/null)
-
-	if [ -z "$DUMP" ] || [ "${LINK#Not connected}" != "$LINK" ]; then
-		if [ "$(nmcli radio wifi 2>/dev/null)" = disabled ]; then
-			TIP=$(title "Wi-Fi off"; dim "radio disabled — click to enable")
-		else
-			TIP=$(title "Wi-Fi disconnected"; dim "$WIFI_DEV — click to pick a network")
-		fi
-		emit disconnected "$(barico "$(ic_wifioff)")" "$TIP"
-		return
-	fi
-
-	fld() { printf '%s\n' "$DUMP" | awk -v k="$1" -v n="$2" '$0 ~ k { print $n; exit }'; }
-	RSSI=$(fld '^\tsignal:' 2)
-	AVG=$(fld 'signal avg:' 3)
-	BCN=$(fld 'beacon signal avg:' 4)
-	MFP=$(fld 'MFP:' 2)
-	RETRY=$(fld 'tx retries:' 3)
-	FAILED=$(fld 'tx failed:' 3)
-	BLOSS=$(fld 'beacon loss:' 3)
-	RXDROP=$(fld 'rx drop misc:' 4)
-	UPTIME=$(fld 'connected time:' 3)
-	RXRATE=$(printf '%s\n' "$DUMP" | awk '/rx bitrate:/ { sub(/^[^:]*:[ \t]*/, ""); print; exit }')
-	TXRATE=$(printf '%s\n' "$DUMP" | awk '/tx bitrate:/ { sub(/^[^:]*:[ \t]*/, ""); print; exit }')
-	BSSID=$(printf '%s\n' "$LINK" | awk '/^Connected to/ { print $3; exit }')
-	FREQ=$(printf '%s\n' "$LINK" | awk '/^\tfreq:/ { print $2; exit }')
-	SSID=$(printf '%s\n' "$LINK" | awk '/^\tSSID:/ { sub(/^[^:]*:[ \t]*/, ""); print; exit }')
-
-	PCT=$(rssi_pct "${RSSI:--90}")
-	if [ "$PCT" -ge 60 ]; then
-		COL=$C_GOOD CLASS=excellent
-	elif [ "$PCT" -ge 35 ]; then
-		COL=$C_WARN CLASS=good
-	else
-		COL=$C_BAD CLASS=weak
-	fi
-
-	WROW=$(wifi_row)
-	SECRAW=$(link_sec "$WROW")
-
-	# CLASS/PCT/the arc above stay live every call; only the tooltip body is
-	# cached — see the matching comment in sec_emit.
-	TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-wifi-tip"
-	TIP_KEY="$CLASS-$(tip_bucket 30)"
-	if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
-	TIP=$(
-		title "$(printf '%s' "${SSID:-Wi-Fi}" | esc)"
-		rule 50
-
-		sect "󰤨" "Signal"
-		row "$(bar "$PCT" "$COL")  ${RSSI:-?} dBm"
-		dim "$(rssi_label "${RSSI:--90}") · $PCT% · avg ${AVG:-?} dBm · beacon ${BCN:-?} dBm"
-
-		sect "󰌾" "Security"
-		case "$SECRAW" in
-		open) row "$(bad "Open — unencrypted, anyone nearby can read your traffic")" ;;
-		wep) row "$(bad "WEP — broken, treat it as open")" ;;
-		*) row "$(good "$(wifi_seclabel "$WROW")")" ;;
-		esac
-		case "$MFP" in
-		yes) dim "Management-frame protection (802.11w): $(good yes)" ;;
-		*) dim "Management-frame protection (802.11w): $(warn "${MFP:-no}") — deauth attacks possible" ;;
-		esac
-
-		sect "󰖩" "Radio"
-		BAND=$(awk -v m="${FREQ:-0}" 'BEGIN { print (m >= 5925 ? "6 GHz" : (m >= 4900 ? "5 GHz" : "2.4 GHz")) }')
-		CH=$(awk -v m="${FREQ:-0}" 'BEGIN {
-			if (m >= 5925) c = int((m - 5950) / 5)
-			else if (m >= 4900) c = int((m - 5000) / 5)
-			else c = int((m - 2407) / 5)
-			print c
-		}')
-		WIDTH=$(printf '%s' "$RXRATE" | grep -oE '[0-9]+MHz' | head -1)
-		row "$BAND · channel $CH · ${FREQ:-?} MHz${WIDTH:+ · $WIDTH}"
-		dim "BSSID ${BSSID:-?} · $WIFI_DEV"
-
-		sect "󰓅" "Throughput"
-		row "$(throughput "$WIFI_DEV")"
-		dim "link ↓ ${RXRATE:-?}"
-		dim "link ↑ ${TXRATE:-?}"
-
-		sect "󰋼" "Link quality"
-		dim "tx retries ${RETRY:-0} · tx failed ${FAILED:-0}"
-		dim "beacon loss ${BLOSS:-0} · rx drop ${RXDROP:-0}"
-		dim "connected $(awk -v s="${UPTIME:-0}" 'BEGIN {
-			h = int(s / 3600); m = int(s % 3600 / 60)
-			if (h) printf "%dh %dm", h, m; else printf "%dm", m
-		}')"
-
-		sect "󰩟" "Addressing"
-		addr_rows "$WIFI_DEV"
-	)
-	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
-	else
-		TIP=$(tip_load "$TIP_CACHE")
-	fi
-	emit "$CLASS" "$(barico "$(arc "$PCT")") $PCT%" "$TIP"
-}
-
-# ---------------------------------------------------------------- --eth
-
-eth_emit() {
-	CARRIER=$(cat "/sys/class/net/$ETH_DEV/carrier" 2>/dev/null || echo 0)
-	OPER=$(cat "/sys/class/net/$ETH_DEV/operstate" 2>/dev/null || echo down)
-	SPEED=$(cat "/sys/class/net/$ETH_DEV/speed" 2>/dev/null || echo -1)
-	DUPLEX=$(cat "/sys/class/net/$ETH_DEV/duplex" 2>/dev/null || echo unknown)
-	IP4=$(ip -j -4 addr show dev "$ETH_DEV" 2>/dev/null | jq -r '.[0].addr_info[0].local // empty' 2>/dev/null)
-
-	if [ "$CARRIER" != 1 ]; then
-		CLASS=disconnected TEXT='' ICO=$(ic_ethoff)
-	elif [ -z "$IP4" ]; then
-		CLASS=linked TEXT=' no IP' ICO=$(ic_eth)
-	else
-		CLASS=connected TEXT=" $IP4" ICO=$(ic_eth)
-	fi
-
-	# Same reasoning as sec_emit: carrier/speed/IP only change on a real link
-	# event, which net-watch.sh already turns into an immediate re-exec, so
-	# keying on that state beats a timer. The rx/tx counters in "Counters"
-	# below are left out of the key deliberately — those climb every poll on
-	# an active link and would defeat caching entirely if included; they are
-	# the one part of this tooltip that stays only as fresh as the last real
-	# link change or the 60s backstop interval.
-	TIP_CACHE="${XDG_RUNTIME_DIR:-/tmp}/waybar-net-eth-tip"
-	TIP_KEY="$CLASS$CARRIER$OPER$SPEED$DUPLEX$IP4"
-	if tip_stale "$TIP_CACHE" "$TIP_KEY"; then
-	TIP=$(
-		title "Ethernet · $ETH_DEV"
-		rule 34
-
-		sect "󰈀" "Link"
-		if [ "$CARRIER" != 1 ]; then
-			row "$(bad "down — no carrier")"
-			dim "operstate $OPER · click to enable the adapter"
-		else
-			if [ "${SPEED:--1}" -gt 0 ] 2>/dev/null; then
-				row "$(good up) · $SPEED Mbit/s · $DUPLEX duplex"
-			else
-				row "$(good up) · speed unknown"
-			fi
-			dim "operstate $OPER"
-			dim "Wired — the link itself is not encrypted"
-		fi
-
-		sect "󰩟" "Addressing"
-		addr_rows "$ETH_DEV"
-
-		sect "󰓅" "Throughput"
-		row "$(throughput "$ETH_DEV")"
-
-		sect "󰋼" "Counters"
-		# shellcheck disable=SC2046  # deliberate word-split of counter fields
-		set -- $(counters "$ETH_DEV")
-		if [ $# -ge 6 ]; then
-			dim "rx errors $2 · rx drops $3"
-			dim "tx errors $5 · tx drops $6"
-		else
-			dim "unavailable"
-		fi
-	)
-	tip_save "$TIP_CACHE" "$TIP_KEY" "$TIP"
-	else
-		TIP=$(tip_load "$TIP_CACHE")
-	fi
-	emit "$CLASS" "$(barico "$ICO")$TEXT" "$TIP"
 }
 
 # ------------------------------------------------------------ --selftest
@@ -919,8 +406,5 @@ $(R6 ::/0 wg0)"
 case "${1:-}" in
 --sec-click) sec_click ;;
 --sec-edit) sec_edit ;;
---wifi) wifi_emit ;;
---eth) eth_emit ;;
 --selftest) selftest ;;
-*) sec_emit ;;
 esac

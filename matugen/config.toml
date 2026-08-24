@@ -21,10 +21,6 @@ post_hook = 'pkill -USR1 -x kitty || true'
 input_path = '~/.config/matugen/templates/colors.json'
 output_path = '~/.local/state/mango/generated/colors.json'
 
-[templates.hyprland]
-input_path = '~/.config/matugen/templates/hyprland/colors.conf'
-output_path = '~/.config/hypr/hyprland/colors.conf'
-
 [templates.mango]
 input_path = '~/.config/matugen/templates/mango/colors.conf'
 output_path = '~/.config/mango/colors.conf'
@@ -38,17 +34,9 @@ output_path = '~/.config/mango/colors.conf'
 input_path = '~/.config/matugen/templates/ironbar/style.css'
 output_path = '~/.config/ironbar/style.css'
 
-[templates.hyprlock]
-input_path = '~/.config/matugen/templates/hyprland/hyprlock-colors.conf'
-output_path = '~/.config/hypr/hyprlock/colors.conf'
-
 [templates.swaylock]
 input_path = '~/.config/matugen/templates/swaylock/config'
 output_path = '~/.config/swaylock/config'
-
-[templates.fuzzel]
-input_path = '~/.config/matugen/templates/fuzzel/fuzzel_theme.ini'
-output_path = '~/.config/fuzzel/fuzzel_theme.ini'
 
 [templates.rofi]
 input_path = '~/.config/matugen/templates/rofi/colors.rasi'
