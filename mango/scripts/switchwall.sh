@@ -17,14 +17,26 @@ allowed_types=(scheme-content scheme-expressive scheme-fidelity scheme-fruit-sal
 
 cfg() { [ -f "$THEME_FILE" ] && jq -r "$1" "$THEME_FILE" 2>/dev/null; }
 
+# mktemp inside $THEME_FILE's own directory, not a fixed ".tmp" name: two
+# concurrent writers sharing one fixed temp path can interleave their
+# truncate/write/mv and install half-written JSON, which every later cfg()
+# read then silently returns nothing for. Same directory keeps `mv` on one
+# filesystem, so it stays atomic.
+theme_write() { # jq-filter jq-arg...
+	local filter="$1" tmp
+	shift
+	tmp=$(mktemp "$THEME_FILE.XXXXXX") || return 1
+	jq "$@" "$filter" "$THEME_FILE" >"$tmp" && mv "$tmp" "$THEME_FILE" || rm -f "$tmp"
+}
+
 set_wallpaper_path() {
 	[ -f "$THEME_FILE" ] || return 0
-	jq --arg path "$1" '.background.wallpaperPath = $path' "$THEME_FILE" >"$THEME_FILE.tmp" && mv "$THEME_FILE.tmp" "$THEME_FILE"
+	theme_write '.background.wallpaperPath = $path' --arg path "$1"
 }
 
 set_accent_color() {
 	[ -f "$THEME_FILE" ] || return 0
-	jq --arg color "$1" '.appearance.palette.accentColor = $color' "$THEME_FILE" >"$THEME_FILE.tmp" && mv "$THEME_FILE.tmp" "$THEME_FILE"
+	theme_write '.appearance.palette.accentColor = $color' --arg color "$1"
 }
 
 SPAN_DIR="$STATE_DIR/generated/wallpaper"
