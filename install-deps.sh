@@ -15,7 +15,7 @@ log() { printf '%s\n' "$*"; }
 CORE_PKGS=(mangowm-git ironbar kitty rofi-wayland mako wlogout swaylock hypridle
 	matugen swaybg cliphist wl-clipboard)
 TOOL_PKGS=(grim slurp swappy hyprpicker tesseract tesseract-data-eng
-	wf-recorder
+	wf-recorder wlopm
 	brightnessctl playerctl wireplumber networkmanager nm-connection-editor
 	iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs
 	atop btop dmidecode imagemagick python-gobject wayvnc kdeconnect)

@@ -66,7 +66,11 @@ readf() { [ -r "$BAT/$1" ] && cat "$BAT/$1" 2>/dev/null || true; }
 # makes the low-battery notification stick on screen until dismissed. That
 # persistent, error-bordered notification is the visual half of the failsafe.
 notify() { # urgency summary body
-	notify-send -a battery -u "$1" \
+	# `timeout 3`: the 60s emergency-suspend grace loop below fires this up
+	# to six times in sequence; a wedged notification daemon used to stretch
+	# each call indefinitely, eating into the grace window at 3-5% battery —
+	# the same reasoning beep() already backgrounds paplay for.
+	timeout 3 notify-send -a battery -u "$1" \
 		-h string:x-canonical-private-synchronous:battery-guard "$2" "$3"
 }
 
