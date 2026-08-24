@@ -20,6 +20,14 @@
 #   mango-powermode.ollama    model names unloaded on eco entry
 #   mango-powermode.charge    charge-limit override (e.g. before travel);
 #                              absent -> PM_CHARGE_LIMIT from powermode.conf
+#   mango-powermode.lock      flock target serializing every mode-changing
+#                              call below — ac-watch.sh backgrounds a `cable`
+#                              per udev edge, so a bouncing USB-C jack can
+#                              fire several before the first returns; without
+#                              this their set_mode()/enter_dim() writes
+#                              interleave and the machine can end up
+#                              throttled+dimmed while plugged in, or restore
+#                              the wrong pre-dim brightness
 #
 #   powermode.sh auto      recompute mode from AC + battery % (no-op if manual)
 #   powermode.sh cable     AC plug/unplug edge — clear markers, then auto
@@ -52,6 +60,7 @@ WEAK_FILE="$RUN/mango-powermode.weak"
 DRAIN_PID="$RUN/mango-powermode.drain"
 OLLAMA_FILE="$RUN/mango-powermode.ollama"
 CHARGE_FILE="$RUN/mango-powermode.charge"
+LOCK_FILE="$RUN/mango-powermode.lock"
 
 CONF="${MANGO_POWERMODE_CONF:-$HOME/.config/mango/powermode.conf}"
 AC="${MANGO_AC_DIR:-}"
@@ -261,18 +270,34 @@ docker_unpause() {
 	printf '%s\n' "$names" | xargs -r docker unpause > /dev/null 2>&1
 }
 
+# `pkill -f` matches the whole argv as a substring, so the bare pattern used
+# to also catch anything ELSE whose argv happened to contain it — a
+# `vim ~/src/hermes-agent/hermes.py`, a `tail -f` on its log, a grep typed by
+# hand — and freeze it until AC returned. hermes runs under its venv's own
+# python (powermode.conf's own comment), so filtering matches down to a
+# python interpreter's /proc/<pid>/exe rejects those three real examples
+# (vim, tail, grep — none of them python) while still catching the genuine
+# target.
+hermes_pids() {
+	[ -n "$PM_ECO_HERMES_MATCH" ] || return 0
+	for pid in $(pgrep -f "$PM_ECO_HERMES_MATCH" 2> /dev/null); do
+		exe=$(readlink "/proc/$pid/exe" 2> /dev/null) || continue
+		case "$exe" in
+		*/python*) printf '%s\n' "$pid" ;;
+		esac
+	done
+}
+
 # TSTP not STOP: catchable, so a hermes that traps it for its own graceful
 # pause gets the chance to; if it doesn't trap it the default action is the
 # same freeze either way.
 hermes_pause() {
 	[ -n "${MANGO_PM_TEST:-}" ] && return 0
-	[ -n "$PM_ECO_HERMES_MATCH" ] || return 0
-	pkill -TSTP -f "$PM_ECO_HERMES_MATCH" 2> /dev/null
+	hermes_pids | xargs -r kill -TSTP 2> /dev/null
 }
 hermes_resume() {
 	[ -n "${MANGO_PM_TEST:-}" ] && return 0
-	[ -n "$PM_ECO_HERMES_MATCH" ] || return 0
-	pkill -CONT -f "$PM_ECO_HERMES_MATCH" 2> /dev/null
+	hermes_pids | xargs -r kill -CONT 2> /dev/null
 }
 
 # omp and pi both run under an interpreter (bun, node) shared with unrelated
@@ -525,6 +550,7 @@ if [ "${1:-}" = test ]; then
 	RUN="$T"
 	MODE_FILE="$RUN/mode" MANUAL_FILE="$RUN/manual" BRIGHT_FILE="$RUN/bright" WEAK_FILE="$RUN/weak"
 	DRAIN_PID="$RUN/drain.pid" OLLAMA_FILE="$RUN/ollama" CHARGE_FILE="$RUN/charge"
+	LOCK_FILE="$RUN/lock"
 
 	mkdir -p "$T/ac" "$T/bat"
 	AC="$T/ac"
@@ -661,6 +687,23 @@ docker compose -p frappe-version-16 -f /home/martin/src/workbench/tools/docker-f
 fi
 
 # ---------------------------------------------------------------- dispatch
+
+# Every mode-changing verb funnels through set_mode() (auto/cable via
+# mode_for(), toggle/force/weak directly), so one lock acquired here, before
+# any of them run, serializes the whole call — set_mode()'s own MODE_FILE
+# write and its enter_dim()/exit_dim() BRIGHT_FILE first-touch both included.
+# Held for the rest of this process (no explicit unlock: the fd, and so the
+# lock, closes when the script exits), which is exactly the span a bouncing
+# AC edge needs serialized. `drain` is its own detached process
+# (drain_start's `setsid "$0" drain &`) that never calls set_mode again, so
+# it is deliberately not in this list — locking it here would just make the
+# eco wait/pause loop hold the lock for however long it runs, with no payoff.
+case "${1:-}" in
+auto | cable | toggle | eco | full | battery | low | weak | unweak)
+	exec 9> "$LOCK_FILE"
+	flock -x 9
+	;;
+esac
 
 case "${1:-}" in
 auto) auto ;;
