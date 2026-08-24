@@ -45,10 +45,18 @@ if is_recording; then
 	pkill -INT -x wf-recorder
 	saved=$(cat "$STATE" 2>/dev/null)
 	rm -f "$STATE"
-	if [ -n "$saved" ]; then
+	# Flushing the moov atom takes a moment after the signal; wait for
+	# wf-recorder to actually exit (bounded, so a wedged encoder can't hang
+	# the keybind forever) before trusting the file on disk.
+	n=0
+	while is_recording && [ "$n" -lt 30 ]; do
+		sleep 0.1
+		n=$((n + 1))
+	done
+	if [ -n "$saved" ] && [ -s "$saved" ]; then
 		notify "Recording saved" "$(basename "$saved")"
 	else
-		notify "Recording stopped"
+		notify "Recording failed" "No file was written."
 	fi
 	exit 0
 fi
@@ -65,15 +73,24 @@ else
 	[ -n "$geom" ] || exit 0
 fi
 
-printf '%s\n' "$file" >"$STATE"
-notify "Recording started" "Press the same key again to stop"
-
 # Backgrounded and disowned: mango's spawn runs this script and waits, so a
 # foreground wf-recorder would block the compositor's spawn slot for the whole
-# recording.
+# recording. Spawned and checked BEFORE the state file/toast are written: a
+# bad slurp geometry or a full disk otherwise recorded a meeting that never
+# existed, with a confirming "Recording started" toast to match.
 if [ -n "$geom" ]; then
 	wf-recorder -g "$geom" -f "$file" >/dev/null 2>&1 &
 else
 	wf-recorder -f "$file" >/dev/null 2>&1 &
 fi
+pid=$!
 disown
+
+sleep 0.5
+if ! kill -0 "$pid" 2>/dev/null; then
+	notify "Recording failed" "wf-recorder exited immediately."
+	exit 1
+fi
+
+printf '%s\n' "$file" >"$STATE"
+notify "Recording started" "Press the same key again to stop"

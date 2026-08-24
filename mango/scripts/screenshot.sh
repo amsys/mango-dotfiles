@@ -78,12 +78,20 @@ esac
 mkdir -p "$DIR"
 file="$DIR/Screenshot_$(date '+%Y-%m-%d_%H.%M.%S').png"
 
+grim_ok=0
 if [ -n "$geom" ]; then
-	grim -g "$geom" "$file"
+	grim -g "$geom" "$file" || grim_ok=1
 elif [ -n "$mon" ]; then
-	grim -o "$mon" "$file"
+	grim -o "$mon" "$file" || grim_ok=1
 else
-	grim "$file"
+	grim "$file" || grim_ok=1
+fi
+# grim's own exit status (disk full is the realistic failure) gates the
+# "saved" toast — without this a failed capture still copied and confirmed
+# a file that does not exist.
+if [ "$grim_ok" -ne 0 ] || [ ! -s "$file" ]; then
+	notify "Screenshot failed" "$(basename "$file")"
+	exit 1
 fi
 
 wl-copy <"$file"
