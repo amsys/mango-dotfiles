@@ -1322,7 +1322,7 @@ fn wifi_ssid(wifi_row: &str) -> &str {
 /// `bar()`'s colour argument for the wifi Signal section, keyed to the same
 /// three buckets as [`wifi_css_class`] (net.sh:645-651) but returning the
 /// tooltip meter colour, not a CSS class name.
-fn wifi_tip_colour(pct: i32) -> &'static str {
+fn wifi_tip_colour(pct: i32) -> crate::tooltip::Ink {
     if pct >= 60 {
         crate::tooltip::C_GOOD
     } else if pct >= 35 {

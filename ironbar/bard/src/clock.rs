@@ -337,7 +337,7 @@ fn border_row(l: &str, m: &str, r: &str) -> String {
 /// Reading the exact column rather than a digit regex is what clock.sh's
 /// own comment calls out as the reason a two-digit day (e.g. the "2" in
 /// "12") is never mistaken for a different single-digit day.
-fn cell_row(line: &str, colour: &str, bold: bool, today: u32) -> String {
+fn cell_row(line: &str, colour: crate::tooltip::Ink, bold: bool, today: u32) -> String {
     use crate::tooltip::C_TITLE;
 
     let bytes = line.as_bytes();
@@ -496,7 +496,7 @@ mod tests {
         // August 2026 starts on a Saturday, so Monday-first puts the 1st in
         // column 6.
         let c = cal_grid_render(AUG_2026, 12);
-        assert_eq!(c.matches(crate::tooltip::C_TITLE).count(), 1);
+        assert_eq!(c.matches(&crate::tooltip::C_TITLE.to_string()).count(), 1);
         assert!(c.contains("font_weight=\"bold\">12</span>"));
     }
 
@@ -504,7 +504,7 @@ mod tests {
     fn cal_grid_does_not_confuse_a_two_digit_day_with_its_last_digit() {
         // The "2" in 12/21/25 must not be mistaken for the 2nd.
         let c = cal_grid_render(AUG_2026, 2);
-        assert_eq!(c.matches(crate::tooltip::C_TITLE).count(), 1);
+        assert_eq!(c.matches(&crate::tooltip::C_TITLE.to_string()).count(), 1);
     }
 
     #[test]

@@ -777,7 +777,8 @@ impl Power {
         let weak = is_weak_latched();
         let leaf = if pm_mode == powermode::Mode::Eco {
             format!(
-                " <span size=\"115%\" rise=\"-1200\"><span foreground=\"#a6da95\">{IC_LEAF}</span></span>"
+                " <span size=\"115%\" rise=\"-1200\"><span foreground=\"{}\">{IC_LEAF}</span></span>",
+                crate::tooltip::C_GOOD
             )
         } else {
             String::new()

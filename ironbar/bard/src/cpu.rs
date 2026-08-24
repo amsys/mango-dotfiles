@@ -968,7 +968,7 @@ mod tests {
         assert!(lines[0].contains("██████████"));
         assert!(lines[0].contains("100%"));
         assert!(
-            lines[0].contains(C_BAD),
+            lines[0].contains(&C_BAD.to_string()),
             "a pinned core must be red even though the row it shares is idle"
         );
         assert!(lines[1].contains("P1"), "coregrid dropped the odd core");

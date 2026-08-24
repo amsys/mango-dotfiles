@@ -6,6 +6,9 @@
 //! needs. Full parity with tooltip.sh (per-process tables, claudebar's
 //! private copy) is still T7's job — see IRONBAR.md "Tooltips and popups".
 
+use std::fmt;
+use std::sync::{LazyLock, RwLock};
+
 use crate::mango::Win;
 use crate::vars::Vars;
 
@@ -24,24 +27,94 @@ const F_MONO: &str = "JetBrainsMono Nerd Font";
 
 // -------------------------------------------------------------- meters
 
-// One-dark constants, hardcoded rather than matugen colors so tooltips stay
-// legible against the fixed GTK tooltip background (tooltip.sh:13-23).
-pub const C_TITLE: &str = "#61afef";
-// T-popup-sep: dimmed from #5c6370 — the in-body title/section rules were
-// reading too dominant against the surrounding text. #3e4451 is C_EMPTY's
-// value below, the dimmest gray already in this palette.
-const C_RULE: &str = "#3e4451";
+/// Index into [`PALETTE`]. `Copy` + `Display`, so a `C_*` const still drops
+/// straight into a `format!("{C_TITLE}")` capture exactly like the `&str`
+/// literals it replaces — the only call sites that need touching are the
+/// few that pass a colour on as a typed parameter (`grade`/`bar`/`dot`/
+/// `cell_row`). Slots 4-6 (good/warn/bad) are never written by
+/// [`reload_palette`] — see its own comment for why those three stay fixed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ink(usize);
+
+impl fmt::Display for Ink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&PALETTE.read().unwrap()[self.0])
+    }
+}
+
+/// One-dark defaults. Slots 0-3 and 7 are overwritten by [`reload_palette`]
+/// once matugen's `colors.json` exists; a fresh checkout with no matugen run
+/// yet renders identically to before this change. Slots 4-6 are the
+/// permanent good/warn/bad values — semantic colours, exempt from matugen
+/// for the same reason `style.css`'s `@define-color ok`/`caution` are: a
+/// meter that means "fine" must not turn wallpaper-orange.
+const ONE_DARK: [&str; 8] = [
+    "#61afef", // 0 C_TITLE
+    "#3e4451", // 1 C_RULE
+    "#abb2bf", // 2 C_LABEL
+    "#5c6370", // 3 C_DIM
+    "#98c379", // 4 C_GOOD (fixed)
+    "#e5c07b", // 5 C_WARN (fixed)
+    "#e06c75", // 6 C_BAD (fixed)
+    "#3e4451", // 7 C_EMPTY
+];
+
+static PALETTE: LazyLock<RwLock<[String; 8]>> =
+    LazyLock::new(|| RwLock::new(ONE_DARK.map(String::from)));
+
+pub const C_TITLE: Ink = Ink(0);
+const C_RULE: Ink = Ink(1);
 /// pub: clock.rs's `cal_grid` needs this directly for the calendar's day
 /// cells, same reason `C_DIM` is already public for docker.rs.
-pub const C_LABEL: &str = "#abb2bf";
+pub const C_LABEL: Ink = Ink(2);
 /// pub: docker.rs needs this directly for its per-row image-name span
 /// (docker.sh:148 uses `$C_DIM` from tooltip.sh the same way), not just
 /// through a helper defined in this module.
-pub const C_DIM: &str = "#5c6370";
-pub const C_GOOD: &str = "#98c379";
-pub const C_WARN: &str = "#e5c07b";
-pub const C_BAD: &str = "#e06c75";
-pub const C_EMPTY: &str = "#3e4451";
+pub const C_DIM: Ink = Ink(3);
+pub const C_GOOD: Ink = Ink(4);
+pub const C_WARN: Ink = Ink(5);
+pub const C_BAD: Ink = Ink(6);
+pub const C_EMPTY: Ink = Ink(7);
+
+/// `(PALETTE index, colors.json key)` for every ink matugen actually tracks —
+/// slots 4-6 (good/warn/bad) are deliberately absent, see [`ONE_DARK`].
+const MATUGEN_KEYS: [(usize, &str); 5] = [
+    (0, "primary"),
+    (1, "outline_variant"),
+    (2, "on_surface"),
+    (3, "on_surface_variant"),
+    (7, "surface_container_highest"),
+];
+
+/// Re-reads matugen's `colors.json` and swaps the live palette. Called from
+/// `main.rs::dispatch_refresh` on the `colors` topic, which `switchwall.sh`
+/// sends after every wallpaper/mode switch (T6b's `darkmode` topic still
+/// exists and still runs — `colors` falls through to the same full-resync
+/// `_` arm, it just also does this first). Missing file or bad JSON leaves
+/// the current palette untouched rather than blanking it — a stale palette
+/// beats no palette.
+pub fn reload_palette() {
+    // Same XDG_STATE_HOME resolution power.rs::Power::new() already uses.
+    let state_home = std::env::var("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".local/state")
+        });
+    let path = state_home.join("mango/generated/colors.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let mut palette = PALETTE.write().unwrap();
+    for (slot, key) in MATUGEN_KEYS {
+        if let Some(hex) = json.get(key).and_then(|v| v.as_str()) {
+            palette[slot] = hex.to_string();
+        }
+    }
+}
 
 /// tooltip.sh:67 — bold blue title line.
 pub fn title(text: &str) -> String {
@@ -76,7 +149,7 @@ pub fn warn(text: &str) -> String {
 
 /// tooltip.sh:106-109 — good/warn/bad colour for a percentage against two
 /// ascending thresholds.
-pub fn grade(pct: i64, warn_at: i64, bad_at: i64) -> &'static str {
+pub fn grade(pct: i64, warn_at: i64, bad_at: i64) -> Ink {
     if pct >= bad_at {
         C_BAD
     } else if pct >= warn_at {
@@ -90,7 +163,7 @@ pub fn grade(pct: i64, warn_at: i64, bad_at: i64) -> &'static str {
 /// `colour`-background span, then the remainder on an empty-track span, both
 /// `size="55%"` so the run reads as a thin bar. `n = round(pct*cells/100)`,
 /// clamped to `0..=cells`.
-pub fn bar(pct: i64, colour: &str, cells: usize) -> String {
+pub fn bar(pct: i64, colour: Ink, cells: usize) -> String {
     let n = ((pct * cells as i64 + 50) / 100).clamp(0, cells as i64) as usize;
     let filled: String = std::iter::repeat_n(NBSP, n).collect();
     let empty: String = std::iter::repeat_n(NBSP, cells - n).collect();
@@ -209,6 +282,8 @@ pub(crate) const HINTS: &[(&str, &str)] = &[
         "click: toggle power mode · right-click: powertop",
     ),
     ("hotspot_tip", "click: menu · right-click: toggle"),
+    ("remote_tip", "click: toggle VNC + KDE Connect"),
+    ("inhibit_tip", "click: toggle keep-awake"),
     ("docker_tip", "right-click: menu"),
     ("claude_tip", "right-click: settings"),
     (
@@ -246,6 +321,8 @@ pub(crate) const TITLED: &[&str] = &[
     "claude_tip",
     "vol_tip",
     "hotspot_tip",
+    "remote_tip",
+    "inhibit_tip",
     "clk_tip",
     "date_tip",
     "wifi_tip",
@@ -435,7 +512,7 @@ fn winrows(wins: &[Win]) -> Vec<String> {
         .map(|w| {
             let padded = format!("{:<width$}", w.appid, width = width);
             format!(
-                "<span font_family=\"JetBrainsMono Nerd Font\">{} {}</span>  <span foreground=\"#5c6370\">{}</span>",
+                "<span font_family=\"JetBrainsMono Nerd Font\">{} {}</span>  <span foreground=\"{C_DIM}\">{}</span>",
                 w.mark,
                 esc(&padded),
                 esc(w.title),
@@ -637,9 +714,9 @@ mod tests {
     #[test]
     fn dot_grades_good_warn_bad_and_falls_back_to_hollow() {
         assert!(dot("good").contains('●'));
-        assert!(dot("good").contains(C_GOOD));
-        assert!(dot("warn").contains(C_WARN));
-        assert!(dot("bad").contains(C_BAD));
+        assert!(dot("good").contains(&C_GOOD.to_string()));
+        assert!(dot("warn").contains(&C_WARN.to_string()));
+        assert!(dot("bad").contains(&C_BAD.to_string()));
         assert!(
             dot("dim").contains('○'),
             "unrecognized class must be hollow"
@@ -733,8 +810,10 @@ mod tests {
                 "docker_tip",
                 "eth_tip",
                 "hotspot_tip",
+                "inhibit_tip",
                 "mem_tip",
                 "pomo_tip",
+                "remote_tip",
                 "sec_tip",
                 "vol_tip",
                 "wifi_tip",
@@ -758,7 +837,9 @@ mod tests {
                 "docker_tip",
                 "eth_tip",
                 "hotspot_tip",
+                "inhibit_tip",
                 "mem_tip",
+                "remote_tip",
                 "sec_tip",
                 "vol_tip",
                 "wifi_tip",

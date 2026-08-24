@@ -13,12 +13,14 @@ mod docker;
 mod genconfig;
 mod hotspot;
 mod ipc;
+mod keepawake;
 mod mango;
 mod memory;
 mod net;
 mod pomo;
 mod power;
 mod powermode;
+mod remote;
 mod routes;
 mod sys;
 mod tooltip;
@@ -34,10 +36,12 @@ use darkmode::Darkmode;
 use docker::Docker;
 use hotspot::Hotspot;
 use ipc::IronbarIpc;
+use keepawake::Keepawake;
 use mango::Mango;
 use memory::Memory;
 use net::Net;
 use pomo::Pomo;
+use remote::Remote;
 use power::Power;
 use powermode::PowermodeWatch;
 use std::time::{Duration, Instant};
@@ -69,11 +73,13 @@ const HOVER_DELAY: Duration = Duration::from_millis(80);
 /// reaching the popup's own content box).
 const HOVER_HIDE_GRACE: Duration = Duration::from_millis(200);
 
-/// `sys::set_timer_slack` value while idle (no hover pending) — the existing
-/// eco knob, unchanged in magnitude. T13: this is scoped to idle-only now
-/// (tight while `hover_due` is armed) because 500ms of slack was silently
-/// adding up to 500ms to every `hover_due` firing, on top of `HOVER_DELAY`
-/// itself — see the `Line::Hover` and `hover_due` select arms.
+/// `sys::set_timer_slack` value while genuinely idle (no hover pending, no
+/// dirty ironvars waiting to flush) — the existing eco knob, unchanged in
+/// magnitude. T13 scoped it to idle-only for `hover_due`, because 500ms of
+/// slack was silently adding up to 500ms to every `hover_due` firing on top
+/// of `HOVER_DELAY` itself; a later pass found `dirty_since` (the workspace
+/// pill flush debounce) paid the same tax and folded both into one
+/// recompute at the top of the event loop — see that call site.
 const ECO_TIMER_SLACK_MS: u64 = 500;
 
 struct Stats {
@@ -357,6 +363,8 @@ async fn dispatch_refresh(
     mem: &mut Memory,
     docker: &mut Docker,
     hotspot: &mut Hotspot,
+    remote: &mut Remote,
+    keepawake: &mut Keepawake,
     darkmode: &mut Darkmode,
     claude: &mut Claude,
     pm_mode: powermode::Mode,
@@ -366,6 +374,13 @@ async fn dispatch_refresh(
     power_due: &mut Option<Instant>,
     docker_due: &mut Option<Instant>,
 ) {
+    // switchwall.sh sends this after every matugen regen, ahead of the
+    // full resync below — "colors" isn't its own match arm, so it falls
+    // straight through to the `_` arm the same way an unrecognized topic
+    // does, and darkmode.refresh() still runs from there.
+    if topic == "colors" {
+        crate::tooltip::reload_palette();
+    }
     match topic {
         "clock" => clock::refresh(vars),
         "mango" | "workspaces" | "window" => mango.apply(vars),
@@ -432,6 +447,12 @@ async fn dispatch_refresh(
         // only (reached from --toggle/--menu, never --status) — T6b D2's
         // only event source for this collector.
         "hotspot" => hotspot.refresh(vars).await,
+        // remote.sh's toggle() pokes this on the actual state-change edge —
+        // same shape as hotspot's arm above.
+        "remote" => remote.refresh(vars).await,
+        // keepawake.sh's toggle() pokes this on the actual state-change
+        // edge — same shape as remote's arm above.
+        "keepawake" => keepawake.refresh(vars).await,
         // switchwall.sh pokes this after every matugen regen — T6b D3.
         "darkmode" => darkmode.refresh(vars).await,
         // T6c: pure render (cache read only — never a fork), fired either by
@@ -455,6 +476,8 @@ async fn dispatch_refresh(
             mem.refresh(vars);
             docker.refresh(vars).await;
             hotspot.refresh(vars).await;
+            remote.refresh(vars).await;
+            keepawake.refresh(vars).await;
             darkmode.refresh(vars).await;
             claude.refresh(vars);
         }
@@ -479,7 +502,9 @@ async fn dispatch_refresh(
 ///
 /// T15: `hotspot` joins the `battery`/`volume`/`docker` group — its own
 /// module name doubles as its refresh topic (`main.rs:379`), same as those
-/// three, now that hover opens its popup instead of a click.
+/// three, now that hover opens its popup instead of a click. `inhibit`
+/// (the widget) maps to the `keepawake` topic instead — see its own match
+/// arm below for why the two names differ here.
 ///
 /// T19: `wifi`/`eth`/`netsec` join the `cpu`/`memory`/`clock`/`date` group —
 /// each maps to its own `-detail` topic (`wifi-detail`/`eth-detail`/
@@ -496,7 +521,16 @@ fn hover_refresh_topic(widget: &str) -> Option<&str> {
         "wifi" => Some("wifi-detail"),
         "eth" => Some("eth-detail"),
         "netsec" => Some("sec-detail"),
-        "battery" | "volume" | "docker" | "hotspot" => Some(widget),
+        "battery" | "volume" | "docker" | "hotspot" | "remote" => Some(widget),
+        // Widget/class name ("inhibit") and refresh topic ("keepawake")
+        // deliberately differ here: the pill kept its old `inhibit`
+        // name/class to reuse the existing style.css selectors and
+        // ironvars, but the collector, unit, and script are all named
+        // `keepawake` (keepawake.rs/keepawake.sh/mango-keepawake.service).
+        // Mapping straight to `Some(widget)` like the group above would
+        // dispatch an unmatched "inhibit" topic into the catch-all resync
+        // arm instead of the targeted one.
+        "inhibit" => Some("keepawake"),
         _ => None,
     }
 }
@@ -622,6 +656,8 @@ async fn run() -> Result<(), String> {
     let mut mem = Memory::new();
     let mut docker = Docker::new();
     let mut hotspot = Hotspot::new();
+    let mut remote = Remote::new();
+    let mut keepawake = Keepawake::new();
     let mut darkmode = Darkmode::new();
     let mut claude = Claude::new();
     let mut vars = Vars::new();
@@ -666,25 +702,25 @@ async fn run() -> Result<(), String> {
 
     clock::refresh(&mut vars);
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
 
     pomo_fd.get_ref().refresh(&mut vars);
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
 
     // Initial full picture at startup — net.rs's `MonitorChild` has no
     // `mmsg get`-style snapshot pairing, so this stands in for one.
     net.regrade(&mut vars, pm_mode).await;
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
 
     // Same reason: a `pactl subscribe` stream has no snapshot companion.
     audio.refresh(&mut vars).await;
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
 
     // Same reason again, plus priming power.rs's own AC-edge detector so the
@@ -693,7 +729,7 @@ async fn run() -> Result<(), String> {
     power.prime();
     power.refresh(&mut vars, pm_mode).await;
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
     power.trigger_startup_mode();
 
@@ -702,11 +738,11 @@ async fn run() -> Result<(), String> {
     // instantaneous, so a plain refresh is already correct.
     cpu.prime(&mut vars).await;
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
     mem.refresh(&mut vars);
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
 
     // T6b: docker/hotspot/darkmode all need an explicit startup refresh —
@@ -715,15 +751,23 @@ async fn run() -> Result<(), String> {
     // above; hotspot/darkmode have no event stream at all).
     docker.refresh(&mut vars).await;
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
     hotspot.refresh(&mut vars).await;
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
+    }
+    remote.refresh(&mut vars).await;
+    if vars.has_dirty() {
+        dirty_since.get_or_insert_with(Instant::now);
+    }
+    keepawake.refresh(&mut vars).await;
+    if vars.has_dirty() {
+        dirty_since.get_or_insert_with(Instant::now);
     }
     darkmode.refresh(&mut vars).await;
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
 
     // T6c: render whatever claudebar's cache already holds (likely stale or
@@ -732,7 +776,7 @@ async fn run() -> Result<(), String> {
     // 5-minute-aligned tick.
     claude.refresh(&mut vars);
     if vars.has_dirty() {
-        dirty_since = Some(Instant::now());
+        dirty_since.get_or_insert_with(Instant::now);
     }
     claude::spawn_fetch();
 
@@ -744,6 +788,25 @@ async fn run() -> Result<(), String> {
     loop {
         stats.wakeups += 1;
 
+        // The eco slack (500ms) is applied by the kernel to this loop's own
+        // epoll_wait timeout, so any armed `_due` deadline can fire that
+        // late — T13 measured ~650-850ms on `hover_due` before scoping the
+        // slack to idle. `dirty_since` was left out of that fix and still
+        // paid the full slack, which is what made a workspace switch repaint
+        // late. Tight whenever any deadline is armed: a pending flush or
+        // hover means a real event is in flight, so there is no idle wakeup
+        // left to coalesce with. Replaces the four separate restore sites
+        // this subsumed (each of the arms below used to set this back after
+        // its own deadline fired or was cancelled) — one call, correct by
+        // construction, instead of four call sites that all had to remember.
+        sys::set_timer_slack(
+            if dirty_since.is_some() || hover_due.is_some() || hover_hide_due.is_some() {
+                0
+            } else {
+                ECO_TIMER_SLACK_MS
+            },
+        );
+
         tokio::select! {
             r = clock_fd.readable() => {
                 match r {
@@ -751,7 +814,7 @@ async fn run() -> Result<(), String> {
                         guard.get_inner().on_tick(&mut vars);
                         guard.clear_ready();
                         if vars.has_dirty() {
-                            dirty_since = Some(Instant::now());
+                            dirty_since.get_or_insert_with(Instant::now);
                         }
                         // T7c: the pomodoro's minute-granular countdown and
                         // its break-time nag ride this same tick — no timer
@@ -759,14 +822,14 @@ async fn run() -> Result<(), String> {
                         // (pomo_fd's own select arm, below).
                         pomo_fd.get_mut().on_minute(&mut vars).await;
                         if vars.has_dirty() {
-                            dirty_since = Some(Instant::now());
+                            dirty_since.get_or_insert_with(Instant::now);
                         }
                         // Decision 2 (IRONBAR.md T3): RSSI rides this tick,
                         // gated by powermode — no timer of its own.
                         if net.should_refresh_on_tick(pm_mode) {
                             net.regrade(&mut vars, pm_mode).await;
                             if vars.has_dirty() {
-                                dirty_since = Some(Instant::now());
+                                dirty_since.get_or_insert_with(Instant::now);
                             }
                         }
                         // power.rs's 5-minute discharging backstop — no
@@ -781,7 +844,7 @@ async fn run() -> Result<(), String> {
                         if hotspot.should_refresh_on_tick() {
                             hotspot.refresh(&mut vars).await;
                             if vars.has_dirty() {
-                                dirty_since = Some(Instant::now());
+                                dirty_since.get_or_insert_with(Instant::now);
                             }
                         }
                         // T6c: claudebar's own 300s-aligned fetch, riding
@@ -805,7 +868,7 @@ async fn run() -> Result<(), String> {
                             stats.mem_polls += 1;
                         }
                         if (due.cpu || due.mem) && vars.has_dirty() {
-                            dirty_since = Some(Instant::now());
+                            dirty_since.get_or_insert_with(Instant::now);
                         }
                     }
                     Err(e) => eprintln!("mango-bard: clock fd error: {e}"),
@@ -827,7 +890,7 @@ async fn run() -> Result<(), String> {
                             stats.mem_polls += 1;
                         }
                         if vars.has_dirty() {
-                            dirty_since = Some(Instant::now());
+                            dirty_since.get_or_insert_with(Instant::now);
                         }
                     }
                     Err(e) => eprintln!("mango-bard: wheel fd error: {e}"),
@@ -840,7 +903,7 @@ async fn run() -> Result<(), String> {
                         guard.get_inner_mut().on_boundary(&mut vars).await;
                         guard.clear_ready();
                         if vars.has_dirty() {
-                            dirty_since = Some(Instant::now());
+                            dirty_since.get_or_insert_with(Instant::now);
                         }
                     }
                     Err(e) => eprintln!("mango-bard: pomo fd error: {e}"),
@@ -852,7 +915,7 @@ async fn run() -> Result<(), String> {
                 if net.ingest_nmcli_line(&line) {
                     net.refresh_busy_var(&mut vars);
                     if vars.has_dirty() {
-                        dirty_since = Some(Instant::now());
+                        dirty_since.get_or_insert_with(Instant::now);
                     }
                     regrade_due = Some(Instant::now());
                 } else {
@@ -901,7 +964,7 @@ async fn run() -> Result<(), String> {
                 if mango.ingest_monitors(&line) {
                     mango.apply(&mut vars);
                     if vars.has_dirty() {
-                        dirty_since = Some(Instant::now());
+                        dirty_since.get_or_insert_with(Instant::now);
                     }
                 } else {
                     stats.mmsg_noop += 1;
@@ -913,7 +976,7 @@ async fn run() -> Result<(), String> {
                 if mango.ingest_clients(&line) {
                     mango.apply(&mut vars);
                     if vars.has_dirty() {
-                        dirty_since = Some(Instant::now());
+                        dirty_since.get_or_insert_with(Instant::now);
                     }
                 } else {
                     stats.mmsg_noop += 1;
@@ -932,7 +995,7 @@ async fn run() -> Result<(), String> {
                             // verdict itself doesn't change on a mode flip.
                             net.set_eco_class(&mut vars, pm_mode);
                             if vars.has_dirty() {
-                                dirty_since = Some(Instant::now());
+                                dirty_since.get_or_insert_with(Instant::now);
                             }
                             // power.rs's eco leaf and Mode row are drawn
                             // from pm_mode — repaint on the flip. Safe from
@@ -961,7 +1024,7 @@ async fn run() -> Result<(), String> {
                             Line::Pomo(verb, arg) => {
                                 let reply = pomo_fd.get_mut().control(&verb, arg.as_deref(), &mut vars).await;
                                 if vars.has_dirty() {
-                                    dirty_since = Some(Instant::now());
+                                    dirty_since.get_or_insert_with(Instant::now);
                                 }
                                 let _ = control::reply(&mut stream, &reply).await;
                             }
@@ -972,12 +1035,12 @@ async fn run() -> Result<(), String> {
                                 dispatch_refresh(
                                     &topic, &mut vars, &mut mango, &mut net, &mut audio,
                                     &mut power, &mut cpu, &mut mem, &mut docker, &mut hotspot,
-                                    &mut darkmode, &mut claude, pm_mode, &mut stats,
+                                    &mut remote, &mut keepawake, &mut darkmode, &mut claude, pm_mode, &mut stats,
                                     &mut regrade_due, &mut audio_due, &mut power_due,
                                     &mut docker_due,
                                 ).await;
                                 if vars.has_dirty() {
-                                    dirty_since = Some(Instant::now());
+                                    dirty_since.get_or_insert_with(Instant::now);
                                 }
                                 let _ = control::reply(&mut stream, "ok").await;
                             }
@@ -1009,19 +1072,11 @@ async fn run() -> Result<(), String> {
                                 if let Some(hide_bar) = hide {
                                     let _ = ipc.hide_popup(&hide_bar).await;
                                 }
-                                // T13: eco slack (500ms) would let `hover_due`
-                                // fire up to half a second late on top of
-                                // `HOVER_DELAY` itself — and now the same for
-                                // `hover_hide_due`'s own grace window
-                                // (T-popup-hold). Tight while either is
-                                // pending — a hover means the user is at the
-                                // machine, so there is no idle wakeup to
-                                // coalesce.
-                                sys::set_timer_slack(if hover_due.is_some() || hover_hide_due.is_some() {
-                                    0
-                                } else {
-                                    ECO_TIMER_SLACK_MS
-                                });
+                                // Timer slack for hover_due/hover_hide_due is
+                                // now recomputed once at the top of the loop
+                                // (see that comment) rather than restored
+                                // here — the next iteration picks up whatever
+                                // hover_enter/hover_exit just set.
                                 let _ = control::reply(&mut stream, "ok").await;
                             }
                             Line::HoverPopup(event, bar) => {
@@ -1037,11 +1092,6 @@ async fn run() -> Result<(), String> {
                                         hover_release(&bar, &hover_open, &mut hover_hide_due)
                                     }
                                 }
-                                sys::set_timer_slack(if hover_due.is_some() || hover_hide_due.is_some() {
-                                    0
-                                } else {
-                                    ECO_TIMER_SLACK_MS
-                                });
                                 let _ = control::reply(&mut stream, "ok").await;
                             }
                             Line::Unknown => { let _ = control::reply(&mut stream, "unknown").await; }
@@ -1058,7 +1108,7 @@ async fn run() -> Result<(), String> {
             } => {
                 net.regrade(&mut vars, pm_mode).await;
                 if vars.has_dirty() {
-                    dirty_since = Some(Instant::now());
+                    dirty_since.get_or_insert_with(Instant::now);
                 }
                 regrade_due = None;
             }
@@ -1071,7 +1121,7 @@ async fn run() -> Result<(), String> {
             } => {
                 audio.refresh(&mut vars).await;
                 if vars.has_dirty() {
-                    dirty_since = Some(Instant::now());
+                    dirty_since.get_or_insert_with(Instant::now);
                 }
                 audio_due = None;
             }
@@ -1084,7 +1134,7 @@ async fn run() -> Result<(), String> {
             } => {
                 power.refresh(&mut vars, pm_mode).await;
                 if vars.has_dirty() {
-                    dirty_since = Some(Instant::now());
+                    dirty_since.get_or_insert_with(Instant::now);
                 }
                 power_due = None;
             }
@@ -1097,7 +1147,7 @@ async fn run() -> Result<(), String> {
             } => {
                 docker.refresh(&mut vars).await;
                 if vars.has_dirty() {
-                    dirty_since = Some(Instant::now());
+                    dirty_since.get_or_insert_with(Instant::now);
                 }
                 docker_due = None;
             }
@@ -1117,7 +1167,7 @@ async fn run() -> Result<(), String> {
                         dispatch_refresh(
                             topic, &mut vars, &mut mango, &mut net, &mut audio,
                             &mut power, &mut cpu, &mut mem, &mut docker, &mut hotspot,
-                            &mut darkmode, &mut claude, pm_mode, &mut stats,
+                            &mut remote, &mut keepawake, &mut darkmode, &mut claude, pm_mode, &mut stats,
                             &mut regrade_due, &mut audio_due, &mut power_due,
                             &mut docker_due,
                         ).await;
@@ -1146,21 +1196,8 @@ async fn run() -> Result<(), String> {
                     }
                 }
                 hover_due = None;
-                // T13: the debounce fired — restore eco slack now that no
-                // hover is pending (Line::Hover's own arm handles the other
-                // two transitions: Enter tightens, an Exit before firing
-                // clears `hover_due` and restores there instead).
-                // T-popup-hold: `hover_hide_due` is always None here — it's
-                // only ever armed by an Exit/Release on a popup that's
-                // already open, and `hover_enter` (this popup's own open
-                // path started there) unconditionally clears it — but the
-                // check costs nothing and keeps this line correct even if
-                // that invariant ever changes.
-                sys::set_timer_slack(if hover_hide_due.is_some() {
-                    0
-                } else {
-                    ECO_TIMER_SLACK_MS
-                });
+                // Timer slack is recomputed once at the top of the loop now
+                // (see that comment) — no restore needed here.
             }
 
             // Popup grace-hide (T-popup-hold) — same single-slot shape as
@@ -1177,11 +1214,8 @@ async fn run() -> Result<(), String> {
                     let _ = ipc.hide_popup(&bar).await;
                 }
                 hover_hide_due = None;
-                sys::set_timer_slack(if hover_due.is_some() {
-                    0
-                } else {
-                    ECO_TIMER_SLACK_MS
-                });
+                // Timer slack is recomputed once at the top of the loop now
+                // (see that comment) — no restore needed here.
             }
 
             _ = async {
@@ -1395,6 +1429,7 @@ mod tests {
         assert_eq!(hover_refresh_topic("volume"), Some("volume"));
         assert_eq!(hover_refresh_topic("docker"), Some("docker"));
         assert_eq!(hover_refresh_topic("hotspot"), Some("hotspot")); // T15
+        assert_eq!(hover_refresh_topic("remote"), Some("remote"));
                                                                      // T19
         assert_eq!(hover_refresh_topic("wifi"), Some("wifi-detail"));
         assert_eq!(hover_refresh_topic("eth"), Some("eth-detail"));

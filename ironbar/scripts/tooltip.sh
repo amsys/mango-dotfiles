@@ -13,9 +13,12 @@
 # Every tooltip built from these reads as one system: bold blue title, a rule,
 # then sections of `  <icon>  LABEL` followed by indented rows.
 
-# Deliberately hardcoded one-dark constants rather than matugen colors, so the
-# tooltips stay legible against the fixed GTK tooltip background whatever the
-# wallpaper does.
+# T-popup-colors: mango-bard's own tooltip.rs copy of this palette now tracks
+# matugen (its C_TITLE/C_LABEL/C_DIM/C_RULE/C_EMPTY read colors.json; good/
+# warn/bad stay fixed, same as here). This shell copy is legacy — nothing
+# execs a module as a bar popup through this file any more — but net.sh and
+# docker-menu.sh still source it for their rofi row markup, so it stays
+# hardcoded One Dark rather than growing a jq/colors.json reader of its own.
 C_TITLE='#61afef'
 C_RULE='#5c6370'
 C_LABEL='#abb2bf'

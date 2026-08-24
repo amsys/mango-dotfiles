@@ -111,6 +111,7 @@ window.background,
 .inhibit, .inhibit label, .battery, .battery label,
 .volume, .volume label, .mic, .mic label, .wifi, .wifi label,
 .eth, .eth label, .netsec, .netsec label, .hotspot, .hotspot label,
+.remote, .remote label,
 .bluetooth, .bluetooth label, .docker, .docker label,
 .power, .power label, .claudebar, .claudebar label,
 /* T19: was missing entirely — pomo's IC_TIMER/IC_MUTED glyphs (pomo.rs)
@@ -286,6 +287,19 @@ window.background,
 .ws button,
 .ws button label {
 	min-width: 24px;
+}
+/* The active/urgent/empty class flip arrives as a real `style add-class`
+ * IPC call, so GTK has a genuine state change to transition. The `button`
+ * and `label` twins are the same trap T17 documented for fonts: a rule
+ * matching a node directly beats an inherited value, so the label needs its
+ * own transition for the inherited `color` change to animate rather than
+ * snap. 120ms is short — the fade must never become the new source of
+ * perceived lag on top of the flush path's own budget.
+ */
+.ws,
+.ws button,
+.ws button label {
+	transition: background-color 120ms ease-out, color 120ms ease-out;
 }
 .ws:hover {
 	background: alpha(@bar_fg_dim, 0.10);
@@ -488,6 +502,16 @@ window.background,
 	color: @accent;
 }
 
+/* Remote access (wayvnc + kdeconnectd) — see remote.rs. Full-on and
+ * one-of-two use the same two states hotspot's own scale (dim/accent)
+ * already established; a bare untagged pill (no class) is neither. */
+.remote.partial {
+	color: @bar_fg_dim;
+}
+.remote.active {
+	color: @accent;
+}
+
 /* Volume opacity-by-level, `@class/volume` (audio.rs::volume_class) — T9.
  * The bar text dropped its `NN%` suffix (icon only now), so the icon's own
  * opacity is the only at-a-glance level signal left; `muted` needs none —
@@ -530,15 +554,15 @@ window.background,
 .bluetooth:hover {
 	background-color: alpha(@bar_fg, 0.08);
 }
-/* Unlike waybar's idle_inhibitor (a plain on/off toggle), ironbar's native
- * `inhibit` module has no documented on/off CSS state class — its docs
- * (docs/modules/Inhibit.md, fetched from upstream) describe only
- * `format_on`/`format_off` text, no class hook. So the same coffee-cup
- * glyph in both states (config.jsonc's own "CSS pill carries the state"
- * design) carries over; the accent-filled "activated" pill waybar's
- * `#idle_inhibitor.activated` rule adds does not, for lack of a selector
- * to hang it on. Documented gap, not a porting miss.
+/* Keep-awake state — `.inhibit` is now a `custom` module (keepawake.rs),
+ * so unlike the native `inhibit` module this replaced, it carries its own
+ * `@class/inhibit` ironvar. Same two-state accent treatment as
+ * `.remote.active`/`.hotspot.vpn` above — a bare untagged pill (no class)
+ * is off.
  */
+.inhibit.active {
+	color: @accent;
+}
 
 /* The one destructive target on the bar — reads as one on hover rather than
  * the neutral tint every other icon button uses. Ported from
@@ -628,32 +652,34 @@ window.background,
  * on a nested `<span>` and still outranks this — the clock keeps its
  * deliberate weight.
  *
- * T15: `.bluetooth button`/`.inhibit button` added. Both are *native*
- * modules (`type: "bluetooth"`/`"inhibit"` in genconfig.rs, not `custom`),
- * so `.custom button` above never reached their own `GtkButton` — it still
- * carried GTK4 Adwaita's default `padding: 4px 9px`/`min-width: 16px`,
- * which is why bluetooth rendered wider than every other icon button on
- * the bar. Same defect class T8d already found and fixed for `.tray .item`.
+ * T15: `.bluetooth button` added. `bluetooth` is a *native* module (`type:
+ * "bluetooth"` in genconfig.rs, not `custom`), so `.custom button` above
+ * never reached its own `GtkButton` — it still carried GTK4 Adwaita's
+ * default `padding: 4px 9px`/`min-width: 16px`, which is why bluetooth
+ * rendered wider than every other icon button on the bar. Same defect
+ * class T8d already found and fixed for `.tray .item`.
  *
  * T18: the T15 fix above still never matched. ironbar's own source puts
  * the class straight on the `GtkButton`, not on a wrapper the button
- * descends from — `src/modules/inhibit/mod.rs`: `let button =
- * Button::new(); button.add_css_class("inhibit");`, and
- * `src/modules/bluetooth/mod.rs` builds its `Button` the same way. So
- * `.inhibit button`/`.bluetooth button` selected nothing, and Adwaita's
- * theme `button` rule (an element selector) still supplied a background,
- * border and box-shadow the icon-button rule below never set — that was
- * the "unnecessary background". Added the bare classes here to reach the
- * button node directly. `padding` is deliberately NOT reset for these
- * two: the icon-button rule below already gives `.inhibit`/`.bluetooth`
- * `padding: 0 6px` at equal (class) specificity, and this rule sits
- * later in the file — a shared `padding: 0` here would win the
- * source-order tiebreak and flatten that padding back to nothing, so it
- * stays on its own line scoped to `.custom button` only.
+ * descends from — `src/modules/bluetooth/mod.rs`: `let button =
+ * Button::new(); button.add_css_class("bluetooth");`. So `.bluetooth
+ * button` selected nothing, and Adwaita's theme `button` rule (an element
+ * selector) still supplied a background, border and box-shadow the
+ * icon-button rule below never set — that was the "unnecessary
+ * background". Added the bare class here to reach the button node
+ * directly. `padding` is deliberately NOT reset here: the icon-button rule
+ * below already gives `.bluetooth` `padding: 0 6px` at equal (class)
+ * specificity, and this rule sits later in the file — a shared `padding: 0`
+ * here would win the source-order tiebreak and flatten that padding back
+ * to nothing, so it stays on its own line scoped to `.custom button` only.
+ *
+ * `.inhibit`/`.inhibit button` dropped this stage: `inhibit` is now a
+ * `custom` module (keepawake.rs), so it's covered by `.custom button`
+ * above the same as `remote`/`hotspot` — neither of those needed a
+ * bespoke entry here either.
  */
 .custom button,
-.bluetooth, .bluetooth button,
-.inhibit, .inhibit button {
+.bluetooth, .bluetooth button {
 	min-width: 0;
 	min-height: 0;
 	background: none;
@@ -678,8 +704,14 @@ window.background,
  * `GtkPopoverMenu` (`src/modules/tray/interface.rs`), the only other
  * popover in the process, leaving it at theme default.
  *
- * The colour stays deliberately non-matugen One Dark, as before: a
- * generated light surface could go light under text that assumes dark.
+ * Surface and border now track matugen (T-popup-colors): the old comment
+ * here said the colour had to stay non-matugen One Dark, because a
+ * generated light surface could go light under text that still assumed
+ * dark. That hazard is closed, not avoided — mango-bard's popup text
+ * (tooltip.rs's C_LABEL/C_DIM/C_RULE/C_TITLE, T-popup-colors) now reads
+ * from the same matugen-mode `colors.json` this surface reads from, so
+ * surface and ink move together per `--mode dark|light`, the same
+ * invariant `bar_bg`/`bar_fg` above already rely on.
  *
  * No box-shadow: this popover is an `xdg_popup` under Wayland, not a
  * layer-shell surface. GTK4's own `box-shadow` rendered as a solid near-
@@ -694,9 +726,9 @@ window.background,
  * shadow. The 1px border carries the edge instead.
  */
 popover:not(.menu) > contents {
-	background-color: #21252b;
+	background-color: {{colors.surface_container.default.hex}};
 	background-image: none;
-	border: 1px solid #3e4451;
+	border: 1px solid {{colors.outline_variant.default.hex}};
 	border-radius: 12px;
 	padding: 0;
 	box-shadow: none;
@@ -731,7 +763,7 @@ popover:not(.menu) > contents {
  * (no horizontal margin) reaches both edges exactly. */
 .popup-sep {
 	min-height: 1px;
-	background-color: #32363e;
+	background-color: {{colors.outline_variant.default.hex}};
 	margin: 6px 0;
 }
 /* `label` selector, not bare class, to outrank `.popup label` below (same
@@ -746,7 +778,7 @@ popover:not(.menu) > contents {
 	padding: 10px 14px 4px 14px;
 }
 .popup label {
-	color: #abb2bf;
+	color: {{colors.on_surface.default.hex}};
 	padding: 10px 14px;
 	/* T8b: popups are GTK popovers, so they only ever inherited the
 	 * bare `*` rule above. Ported from waybar/style.css:207-211; the

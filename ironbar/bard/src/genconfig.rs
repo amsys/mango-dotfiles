@@ -219,6 +219,16 @@ pub fn build(monitors: &[String]) -> Value {
     defaults.insert("hotspot_show".into(), json!("false"));
     defaults.insert("hotspot_text".into(), json!(""));
     defaults.insert("hotspot_tip".into(), json!(""));
+    // remote (wayvnc + kdeconnectd) — see remote.rs. No `_show`: this pill
+    // has no show_if, unlike hotspot's above.
+    defaults.insert("remote_text".into(), json!(""));
+    defaults.insert("remote_tip".into(), json!(""));
+    // keep-awake — see keepawake.rs. Keys stay named `inhibit_*` (not
+    // `keepawake_*`): they replace the native `inhibit` module's own
+    // `format_on`/`format_off` in place, and the style.css `.inhibit`
+    // selectors already target this class.
+    defaults.insert("inhibit_text".into(), json!(""));
+    defaults.insert("inhibit_tip".into(), json!(""));
     defaults.insert("dark_icon".into(), json!(""));
     // T6c claudebar vars — see claude.rs.
     defaults.insert("claude_text".into(), json!(""));
@@ -341,6 +351,7 @@ fn end_modules(bar_name: &str) -> Vec<Value> {
     end.extend(audio_modules(bar_name));
     end.extend(net_modules(bar_name));
     end.push(hotspot_module(bar_name));
+    end.push(remote_module(bar_name));
     end.push(bluetooth_module(bar_name));
     end.push(power_module());
     end
@@ -384,7 +395,7 @@ fn rightcenter_modules(bar_name: &str) -> Vec<Value> {
     m.push(colorpicker_module());
     m.push(darkmode_module());
     m.push(snip_module());
-    m.push(inhibit_module());
+    m.push(inhibit_module(bar_name));
     m
 }
 
@@ -903,6 +914,24 @@ fn hotspot_module(bar_name: &str) -> Value {
     })
 }
 
+/// Remote-access pill: wayvnc + kdeconnectd, one button (see remote.rs).
+/// Unlike `hotspot_module` above, no `show_if` — a toggle that hides itself
+/// once off has no way to be clicked back on, so this pill stays visible
+/// and carries its on/off/partial state entirely through `@class/remote`
+/// (style.css's `.remote.active`/`.remote.partial`).
+fn remote_module(bar_name: &str) -> Value {
+    json!({
+        "type": "custom",
+        "name": "remote",
+        "class": "remote",
+        "bar": [ { "type": "button", "label": "#remote_text" } ],
+        "popup": popup("remote_tip", bar_name),
+        "on_mouse_enter": format!("mango-bard hover enter {bar_name} remote -q"),
+        "on_mouse_exit": format!("mango-bard hover exit {bar_name} remote -q"),
+        "on_click_left": "~/.config/ironbar/scripts/remote.sh --toggle"
+    })
+}
+
 /// Native `music` module, replacing waybar's `mpris` built-in
 /// (config.jsonc:62-69). `playerctld` is waybar's own MPRIS proxy choice;
 /// ironbar's `music` module talks to MPRIS directly, so no `player_type`
@@ -1087,63 +1116,41 @@ fn snip_module() -> Value {
     })
 }
 
-/// Native `inhibit` module, replacing waybar's `idle_inhibitor` built-in
-/// (config.jsonc:236-241). Ironbar's inhibit has a duration-cycling design
-/// waybar's plain on/off toggle doesn't; one fixed "inf" duration is the
-/// closest parity, so a click behaves like a plain on/off flip rather than
-/// starting a countdown. Same coffee-cup glyph in both states as
-/// config.jsonc:238's `format-icons` (the CSS pill was meant to carry the
-/// state, per that line's own comment) — but ironbar's inhibit module has no
-/// documented on/off CSS class to hang that on, so unlike waybar's
-/// `.activated` rule, there is no accent-filled state here. Documented gap,
-/// not a porting miss.
+/// Keep-awake pill — was ironbar's native `inhibit` module (`"type":
+/// "inhibit"`, replacing waybar's `idle_inhibitor` built-in,
+/// config.jsonc:236-241), now a `custom` module driven by keepawake.rs, same
+/// shape as `remote_module()` above. The native module's
+/// `gtk_application_inhibit()` call needs `org.freedesktop.portal.Inhibit`,
+/// a portal interface this session has no backend for — confirmed live,
+/// three times, in `~/.local/share/ironbar/ironbar.*.log`: `Cannot get
+/// portal org.freedesktop.portal.Inhibit version: ... No such interface`.
+/// The toggle changed the coffee glyph and inhibited nothing; see
+/// keepawake.rs's own doc comment for the full root cause and the
+/// `systemd-inhibit` replacement.
 ///
-/// `on_click_left`/`on_click_right` are deliberately left unset: the
-/// upstream docs page (docs/modules/Inhibit.md) describes them as a
-/// `toggle`/`cycle` enum, but `ironbar --print-schema` against the actual
-/// installed binary (0.19.0-2) types both as a generic `ScriptInput` — the
-/// same shell-command type every other module's `on_click_*` uses. That
-/// mismatch means the docs describe a newer upstream than what's installed
-/// here; trusting the installed binary's own schema over the docs (the
-/// project's own rule — verify against the real running version, T0/S2's
-/// method), a literal `"toggle"` would be executed as a shell command
-/// (`sh -c toggle`), not interpreted as the click action. Left unset, the
-/// module keeps whatever built-in default click behavior this version
-/// ships, rather than shipping a command that cannot work.
-/// T8b/T15 (superseded by T17): U+F0F4 (coffee cup, Nerd Font) rendered
-/// live as `ô` twice, and because `ô` is U+00F4 — the low byte of U+F0F4 —
-/// both passes concluded ironbar's `format_on`/`format_off` code truncates
-/// PUA codepoints. The coincidence had a different cause. T16 found the
-/// pill font rule never reached any label (see spark_module()'s doc
-/// comment): this label rendered via fontconfig per-character fallback,
-/// which resolved U+F0F4 to a symbol-cmap font ("SansSerif"). Symbol-
-/// encoded fonts expose their 0x00-0xFF glyph range at U+F000-F0FF, so
-/// U+F0F4 draws that font's 0xF4 glyph — a real `ô`, no truncation
-/// anywhere. U+25CF worked in the same slot because IBM Plex Sans itself
-/// covers it. With the style.css `label` selector fix the Nerd Font stack
-/// reaches this label and the coffee cup renders; the `●`/`○` stand-ins
-/// are retired.
+/// This also closes the gap the native module's own old doc comment used
+/// to flag here: no documented on/off CSS class to hang an accent-filled
+/// state on. A `custom` module carries its own `@class/inhibit` ironvar
+/// (keepawake.rs), so `style.css`'s `.inhibit.active` rule now has
+/// something to select.
 ///
-/// T18: U+F0F4 (Font Awesome) and U+EC15 (Codicon) are two different
-/// glyph families' idea of a coffee cup — different shape, different
-/// weight — which is what "looks weird" reported. Replaced with one
-/// family's on/off pair, `nf-md-coffee` (U+F0176, filled cup on a
+/// Glyphs carried over unchanged from the native module's own
+/// `format_on`/`format_off`: `nf-md-coffee` (U+F0176, filled cup on a
 /// saucer) and `nf-md-coffee_outline` (U+F06CA, the same cup as an
-/// outline) — verified matching shapes with `pango-view` before wiring
-/// in. Both are Plane-15 PUA, so neither risks the CJK-claimant fallback
-/// T17 found for BMP PUA codepoints. Also both size to the same 832/1000
-/// em advance in the Propo font (see style.css's T18 comment), so the
-/// pill doesn't change width when it toggles.
-fn inhibit_module() -> Value {
+/// outline) — both size to the same 832/1000 em advance in the Propo font,
+/// so the pill doesn't change width when it toggles. Full glyph-choice
+/// history (Font Awesome/Codicon mismatch, symbol-cmap fallback, PUA
+/// plane) is on keepawake.rs's `IC_ON`/`IC_OFF` constants now.
+fn inhibit_module(bar_name: &str) -> Value {
     json!({
-        "type": "inhibit",
+        "type": "custom",
         "name": "inhibit",
         "class": "inhibit",
-        "durations": ["inf"],
-        "default_duration": "inf",
-        "format_on": "\u{f0176}",
-        "format_off": "\u{f06ca}",
-        "tooltip": "Keep-awake — click to toggle"
+        "bar": [ { "type": "button", "label": "#inhibit_text" } ],
+        "popup": popup("inhibit_tip", bar_name),
+        "on_mouse_enter": format!("mango-bard hover enter {bar_name} inhibit -q"),
+        "on_mouse_exit": format!("mango-bard hover exit {bar_name} inhibit -q"),
+        "on_click_left": "~/.config/ironbar/scripts/keepawake.sh --toggle"
     })
 }
 
@@ -1893,22 +1900,33 @@ mod tests {
     }
 
     #[test]
-    fn inhibit_module_has_no_broken_click_command() {
-        // ironbar --print-schema (0.19.0-2) types InhibitModule's
-        // on_click_left/on_click_right as a generic ScriptInput, not the
-        // toggle/cycle enum the upstream docs describe for a newer version
-        // — see inhibit_module()'s doc comment. Emitting "toggle" as a
-        // ScriptInput would shell out to a nonexistent `toggle` binary, so
-        // both fields must stay absent (fall back to the binary's own
-        // built-in default) rather than carry a string that cannot work.
-        //
-        // T-next (item 3): `inhibit` is part of `rightcenter_modules()`,
-        // which lives in `end` on a real per-monitor bar now.
+    fn inhibit_module_toggles_keepawake() {
+        // The native `inhibit` module's on_click was left unset (it had no
+        // working click enum on the installed binary — see genconfig.rs
+        // history). The `custom` replacement fixes that: a real
+        // keepawake.sh --toggle command that starts/stops
+        // mango-keepawake.service, and no on_click_right (same shape as
+        // remote_module(), which has none either).
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let inhibit = end.iter().find(|m| m["name"] == "inhibit").unwrap();
-        assert!(inhibit.get("on_click_left").is_none());
+        assert_eq!(
+            inhibit["on_click_left"],
+            json!("~/.config/ironbar/scripts/keepawake.sh --toggle")
+        );
         assert!(inhibit.get("on_click_right").is_none());
+    }
+
+    #[test]
+    fn inhibit_module_has_a_hover_popup() {
+        // Same shape as remote_module(): a real popup and both hover
+        // attributes, unlike the native `inhibit` module it replaced.
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let inhibit = end.iter().find(|m| m["name"] == "inhibit").unwrap();
+        assert!(inhibit.get("popup").is_some());
+        assert!(inhibit["on_mouse_enter"].is_string());
+        assert!(inhibit["on_mouse_exit"].is_string());
     }
 
     #[test]
@@ -2108,10 +2126,13 @@ mod tests {
         // T19: wifi/eth/netsec dropped from this list — they now carry a
         // hover popup (net_modules()'s own doc comment) and are checked by
         // every_hover_eligible_module_carries_both_mouse_attributes instead.
+        // `inhibit` dropped for the same reason, this stage: it went from
+        // the native `inhibit` module (no popup) to a `custom` one with a
+        // hover popup (inhibit_module()'s own doc comment) — checked by
+        // inhibit_module_has_a_hover_popup below instead.
         for name in [
             "spark",
             "power",
-            "inhibit",
             "colorpicker",
             "snip",
             "darkmode",
