@@ -14,6 +14,7 @@
 //! deliberately contains nothing named `config.*` under `src/ironbar/` so
 //! there is nothing for that symlink loop to collide with.
 
+use crate::cmd::CMD_TIMEOUT;
 use crate::mango::{
     overview_label, slugs_for, tag_label, var_lbl, var_ov, var_tags, var_tip, ws_module,
     ws_module_ov, TAG_COUNT,
@@ -131,11 +132,15 @@ fn default_out_path() -> PathBuf {
 }
 
 async fn query_monitors() -> Result<Vec<String>, String> {
-    let out = tokio::process::Command::new("mmsg")
-        .args(["get", "all-monitors"])
-        .output()
-        .await
-        .map_err(|e| format!("mmsg get all-monitors: {e}"))?;
+    let out = tokio::time::timeout(
+        CMD_TIMEOUT,
+        tokio::process::Command::new("mmsg")
+            .args(["get", "all-monitors"])
+            .output(),
+    )
+    .await
+    .map_err(|_| "mmsg get all-monitors: timed out".to_string())?
+    .map_err(|e| format!("mmsg get all-monitors: {e}"))?;
     let doc: Value =
         serde_json::from_slice(&out.stdout).map_err(|e| format!("bad all-monitors JSON: {e}"))?;
     Ok(doc

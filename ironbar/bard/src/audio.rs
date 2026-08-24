@@ -10,12 +10,12 @@
 //! and `pactl -f json list sinks`/`sources`/`sink-inputs`. `jq` disappears
 //! entirely; `serde_json` (already a dependency) does the parsing.
 
+use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::net::MonitorChild;
 use crate::tooltip::{bad, bar, barico, dim, esc, good, grade, row, sect, set_titled, C_EMPTY, C_GOOD};
 use crate::vars::Vars;
 use serde_json::Value;
-use tokio::process::Command;
 
 // ------------------------------------------------------------------ icons
 //
@@ -362,13 +362,6 @@ impl Default for Audio {
 }
 
 // ---------------------------------------------------------------- helpers
-
-async fn run(cmd: &str, args: &[&str]) -> String {
-    match Command::new(cmd).args(args).output().await {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Err(_) => String::new(),
-    }
-}
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").to_string()

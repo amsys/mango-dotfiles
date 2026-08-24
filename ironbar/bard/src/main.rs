@@ -6,6 +6,7 @@
 mod audio;
 mod claude;
 mod clock;
+mod cmd;
 mod control;
 mod cpu;
 mod darkmode;

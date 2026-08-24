@@ -12,6 +12,12 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+/// Matches `send()`'s own connect timeout below. Read side, not just
+/// connect: a client that connects and never sends a newline used to block
+/// this whole single-threaded daemon forever, since `read_line` had no
+/// deadline and ran inline in main.rs's select loop.
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub fn socket_path() -> PathBuf {
     std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -113,7 +119,9 @@ pub fn parse(line: &str) -> Line {
 pub async fn read_line(stream: &mut UnixStream) -> io::Result<String> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    tokio::time::timeout(READ_TIMEOUT, reader.read_line(&mut line))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "control socket read"))??;
     Ok(line)
 }
 

@@ -24,11 +24,11 @@
 //! stats. Only `iw dev <iface> info` (the channel) still forks, and only
 //! while the hotspot is up.
 
+use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::tooltip::{barico, kv, sect, set_titled};
 use crate::vars::Vars;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 /// wifi_tethering, was Material Symbols Rounded U+E1D9 — hotspot.sh:142's
 /// own comment flags this codepoint as carried over unverified from the
@@ -107,14 +107,8 @@ fn client_count() -> usize {
 
 /// hotspot.sh:128 — only fork left, and only while the hotspot is up.
 async fn channel() -> String {
-    let out = Command::new("iw")
-        .args(["dev", &iface(), "info"])
-        .output()
-        .await;
-    let Ok(out) = out else {
-        return String::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
+    run("iw", &["dev", &iface(), "info"])
+        .await
         .lines()
         .find(|l| l.contains("channel"))
         .and_then(|l| l.split_whitespace().nth(1))

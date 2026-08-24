@@ -20,6 +20,7 @@
 //! log line for the weekly review (§5.6).
 
 use crate::clock::format_epoch;
+use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::sys::ClockTimer;
 use crate::tooltip;
@@ -688,23 +689,33 @@ impl Pomo {
 
     // -------------------------------------------------------------- alerts
 
+    /// Detached (`sound()`'s own reasoning applies just as much here): a
+    /// wedged mako used to block the whole event loop on every break nag —
+    /// once a minute during a break — since this awaited `notify-send`
+    /// inline.
     async fn notify(&self, urgency: &str, title: &str, body: &str) {
         if self.muted_at(now()) {
             return;
         }
-        let _ = Command::new("notify-send")
-            .args([
-                "-a",
-                "pomodoro",
-                "-u",
-                urgency,
-                "-h",
-                "string:x-canonical-private-synchronous:pomodoro",
-                title,
-                body,
-            ])
-            .output()
+        let urgency = urgency.to_string();
+        let title = title.to_string();
+        let body = body.to_string();
+        tokio::spawn(async move {
+            run(
+                "notify-send",
+                &[
+                    "-a",
+                    "pomodoro",
+                    "-u",
+                    &urgency,
+                    "-h",
+                    "string:x-canonical-private-synchronous:pomodoro",
+                    &title,
+                    &body,
+                ],
+            )
             .await;
+        });
     }
 
     /// One of three sounds per family, picked by month index — FOCUS.md
@@ -739,20 +750,21 @@ impl Pomo {
         }
     }
 
+    /// Detached, same reasoning as `notify()` above — a wedged mako must not
+    /// block the event loop on every work-block start.
     async fn enable_dnd(&self) {
-        let _ = Command::new("makoctl")
-            .args(["mode", "-a", "do-not-disturb"])
-            .output()
-            .await;
+        tokio::spawn(async move {
+            run("makoctl", &["mode", "-a", "do-not-disturb"]).await;
+        });
     }
 
     /// `pub(crate)`, not private: main.rs's SIGTERM handler calls this
-    /// directly so a killed daemon never leaves DND stuck on.
+    /// directly so a killed daemon never leaves DND stuck on. Kept as a
+    /// bounded *await* rather than detached like `enable_dnd` — detaching it
+    /// would let the process exit before `makoctl` ever ran; `run()`'s own
+    /// timeout is what keeps it from hanging the shutdown path instead.
     pub(crate) async fn release_dnd(&self) {
-        let _ = Command::new("makoctl")
-            .args(["mode", "-r", "do-not-disturb"])
-            .output()
-            .await;
+        run("makoctl", &["mode", "-r", "do-not-disturb"]).await;
     }
 
     // ------------------------------------------------------------- refresh

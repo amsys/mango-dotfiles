@@ -9,12 +9,14 @@
 //! active_client in one document, so it also stands in for
 //! mango-window.sh's third `focusing-client` stream.
 
+use crate::cmd::CMD_TIMEOUT;
 use crate::vars::Vars;
 use serde_json::Value;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
+use tokio::time::timeout;
 
 pub const TAG_COUNT: u64 = 9;
 
@@ -410,11 +412,15 @@ impl Watch {
         self.lines = Some(BufReader::new(stdout).lines());
         self.child = Some(child);
 
-        let get = Command::new("mmsg")
-            .args(["get", self.topic])
-            .stderr(Stdio::null())
-            .output()
-            .await?;
+        let get = timeout(
+            CMD_TIMEOUT,
+            Command::new("mmsg")
+                .args(["get", self.topic])
+                .stderr(Stdio::null())
+                .output(),
+        )
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "mmsg get"))??;
         let snapshot = String::from_utf8_lossy(&get.stdout).trim().to_string();
         self.pending = if snapshot.is_empty() {
             None

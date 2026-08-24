@@ -20,11 +20,13 @@
 //! problem (same reasoning as T5's Power::refresh not needing battery.sh's
 //! RAPL-sample cache file).
 
+use crate::cmd::CMD_TIMEOUT;
 use crate::mango::CLASS_PREFIX;
 use crate::net::MonitorChild;
 use crate::tooltip::{barico_label, dim, dot, esc, mono, projhdr, set_titled, C_DIM};
 use crate::vars::Vars;
 use tokio::process::Command;
+use tokio::time::timeout;
 
 /// T16 retracts T8b's stated root cause. T8b tried nf-linux-docker (whale,
 /// U+F308), saw it render as CJK tofu, and concluded this ironbar/GTK4 build
@@ -261,12 +263,15 @@ impl Docker {
 
     /// docker.sh:107-159. The only thing that forks.
     pub async fn refresh(&mut self, vars: &mut Vars) {
-        let output = Command::new(docker_bin())
-            .args(["ps", "-a", "--format", FORMAT])
-            .output()
-            .await;
+        let output = timeout(
+            CMD_TIMEOUT,
+            Command::new(docker_bin())
+                .args(["ps", "-a", "--format", FORMAT])
+                .output(),
+        )
+        .await;
         let raw = match output {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
             _ => {
                 // daemon unreachable — empty text hides the module, same as
                 // net.sh does mid-scan; no error pill, no tofu.

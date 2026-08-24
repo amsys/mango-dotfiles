@@ -8,6 +8,7 @@
 //! doing calendar math, and libc is already a dependency for the timerfd
 //! syscalls.
 
+use crate::cmd::{run, run_with_env};
 use crate::sys::ClockTimer;
 use crate::vars::Vars;
 use std::os::fd::{AsRawFd, RawFd};
@@ -151,13 +152,11 @@ fn world_zones() -> String {
 /// remote zone, combining `%z`/`%j`/`%H:%M` into a single invocation rather
 /// than three, since all three are read from the same child either way.
 async fn zone_snapshot(zone: &str) -> Option<(String, i32, String)> {
-    let out = tokio::process::Command::new("date")
-        .env("TZ", zone)
-        .arg("+%z %j %H:%M")
-        .output()
-        .await
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let out = run_with_env("date", &["+%z %j %H:%M"], &[("TZ", zone)]).await;
+    let text = out.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
     let mut parts = text.split_whitespace();
     let z = parts.next()?.to_string();
     let day: i32 = parts.next()?.parse().ok()?;
@@ -282,12 +281,8 @@ async fn cal_grid(today: u32, month_year: Option<(u32, i32)>) -> String {
         args.push(m.to_string());
         args.push(y.to_string());
     }
-    let out = tokio::process::Command::new("cal")
-        .args(&args)
-        .output()
-        .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run("cal", &arg_refs).await;
     cal_grid_render(&out, today)
 }
 

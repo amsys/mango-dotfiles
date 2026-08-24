@@ -11,6 +11,7 @@
 //! no prior sample for the *pill* — `refresh()` is correct on the very first
 //! call — but the popup's page-fault rate does need one, held on `Memory`.
 
+use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::tooltip::{
     bad, bar, barico_label, dim, esc, good, grade, hcount, hkib, mono, row, sect, set_titled,
@@ -303,14 +304,8 @@ fn parse_rss_line(line: &str) -> Option<(i64, i64, String)> {
 }
 
 async fn ps_top_rss() -> Vec<(i64, i64, String)> {
-    let Ok(out) = tokio::process::Command::new("ps")
-        .args(["-eo", "rss=,pid=,comm=", "--sort=-rss"])
-        .output()
+    run("ps", &["-eo", "rss=,pid=,comm=", "--sort=-rss"])
         .await
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(parse_rss_line)
         .take(5)

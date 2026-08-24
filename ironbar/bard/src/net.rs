@@ -18,6 +18,7 @@
 //! (main.rs's `regrade_due`) — the same constant, and the same "coalesce a
 //! burst, fire once it goes quiet" shape, as net-watch.sh's own `DEBOUNCE`.
 
+use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::powermode;
 use crate::tooltip::{
@@ -1185,13 +1186,6 @@ impl Default for Net {
 }
 
 // ---------------------------------------------------------------- helpers
-
-async fn run(cmd: &str, args: &[&str]) -> String {
-    match Command::new(cmd).args(args).output().await {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Err(_) => String::new(),
-    }
-}
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").to_string()

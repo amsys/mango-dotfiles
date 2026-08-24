@@ -13,8 +13,8 @@
 //! poke is gone with waybar — ironbar hot-loads its CSS on change and never
 //! needed a reload signal at all.
 
+use crate::cmd::run;
 use crate::vars::Vars;
-use tokio::process::Command;
 
 /// darkmode.sh:25 — shown while dark (click goes light).
 /// T8b: U+E518 (Material Symbols "light_mode") -> U+F0599 (sun, JetBrainsMono
@@ -46,14 +46,11 @@ impl Darkmode {
     /// The only thing that forks — one `gsettings get`, same as
     /// darkmode.sh's own single read.
     pub async fn refresh(&mut self, vars: &mut Vars) {
-        let out = Command::new("gsettings")
-            .args(["get", "org.gnome.desktop.interface", "color-scheme"])
-            .output()
-            .await;
-        let value = match out {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-            Err(_) => String::new(),
-        };
+        let value = run(
+            "gsettings",
+            &["get", "org.gnome.desktop.interface", "color-scheme"],
+        )
+        .await;
         let icon = if is_dark(&value) {
             IC_LIGHT_MODE
         } else {

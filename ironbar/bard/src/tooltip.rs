@@ -38,7 +38,7 @@ pub struct Ink(usize);
 
 impl fmt::Display for Ink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&PALETTE.read().unwrap()[self.0])
+        f.write_str(&PALETTE.read().unwrap_or_else(|e| e.into_inner())[self.0])
     }
 }
 
@@ -108,7 +108,7 @@ pub fn reload_palette() {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
         return;
     };
-    let mut palette = PALETTE.write().unwrap();
+    let mut palette = PALETTE.write().unwrap_or_else(|e| e.into_inner());
     for (slot, key) in MATUGEN_KEYS {
         if let Some(hex) = json.get(key).and_then(|v| v.as_str()) {
             palette[slot] = hex.to_string();

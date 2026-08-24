@@ -25,10 +25,10 @@
 //! native module's own `format_on`/`format_off` pair so the pill still
 //! reads as a state at a glance, not just an availability flag.
 
+use crate::cmd::is_active;
 use crate::mango::CLASS_PREFIX;
 use crate::tooltip::{kv, sect, set_titled};
 use crate::vars::Vars;
-use tokio::process::Command;
 
 /// nf-md-coffee, filled cup on a saucer — shown while active. Carried over
 /// from the old `inhibit_module()`'s `format_on` (genconfig.rs); see that
@@ -43,18 +43,6 @@ const UNIT: &str = "mango-keepawake.service";
 
 fn class_key(module: &str) -> String {
     format!("{CLASS_PREFIX}{module}")
-}
-
-/// `systemctl --user is-active <unit>` as a plain bool — matches the exit
-/// code, not the printed status text (remote.rs's own `is_active`, ported
-/// verbatim: a masked/failed unit reads as down the same as a stopped one).
-async fn is_active(unit: &str) -> bool {
-    Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", unit])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 pub struct Keepawake {

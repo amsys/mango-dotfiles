@@ -14,10 +14,10 @@
 //! `grim -o <output>` crop of the bar after building and swap the codepoint
 //! if it doesn't render.
 
+use crate::cmd::is_active;
 use crate::mango::CLASS_PREFIX;
 use crate::tooltip::{barico, kv, sect, set_titled};
 use crate::vars::Vars;
-use tokio::process::Command;
 
 const IC_REMOTE: char = '\u{f0379}';
 
@@ -26,18 +26,6 @@ const KDECONNECT_UNIT: &str = "kdeconnectd.service";
 
 fn class_key(module: &str) -> String {
     format!("{CLASS_PREFIX}{module}")
-}
-
-/// `systemctl --user is-active <unit>` as a plain bool — matches the exit
-/// code, not the printed status text, so a masked/failed unit reads as down
-/// the same as a stopped one.
-async fn is_active(unit: &str) -> bool {
-    Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", unit])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 pub struct Remote {

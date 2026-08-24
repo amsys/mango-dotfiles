@@ -10,6 +10,7 @@
 //! is open (main.rs, genconfig.rs). `refresh()` (the T6a pill path, on the
 //! wheel) stays pure `/proc` reads with zero forks either way.
 
+use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::tooltip::{
     bad, bar, barico_label, dim, esc, grade, hdur, heatbar, mono, row, sect, set_titled, C_DIM,
@@ -218,7 +219,7 @@ impl Cpu {
         self.maybe_refresh_atop();
         let log = atop_log_path();
         let atop_ok = atop_available(&log);
-        let peaks = self.atop.lock().unwrap().peaks.clone();
+        let peaks = self.atop.lock().unwrap_or_else(|e| e.into_inner()).peaks.clone();
 
         let tip = build_tip(&DetailInputs {
             total: self.total,
@@ -243,7 +244,7 @@ impl Cpu {
     /// `atop_refresh()` mkdir-lock pair, minus the lockdir/tmp-file (D3: an
     /// in-memory flag serves the same "only one refresh at a time" purpose).
     fn maybe_refresh_atop(&self) {
-        let mut st = self.atop.lock().unwrap();
+        let mut st = self.atop.lock().unwrap_or_else(|e| e.into_inner());
         let stale = st.fetched_at.is_none_or(|t| t.elapsed() >= ATOP_TTL);
         if !stale || st.in_flight {
             return;
@@ -261,17 +262,17 @@ async fn refresh_atop_cache(atop: Arc<Mutex<AtopState>>) {
     let log = atop_log_path();
     let text = if atop_available(&log) {
         let begin = begin_hhmm_70min_ago();
-        tokio::process::Command::new("atop")
-            .args(["-P", "PRC", "-r", &log, "-b", &begin])
-            .output()
-            .await
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        run("atop", &["-P", "PRC", "-r", &log, "-b", &begin]).await
     } else {
-        None
+        String::new()
     };
-    let rows = text.map(|t| atop_top(&t)).unwrap_or_default();
-    let mut st = atop.lock().unwrap();
+    let rows = atop_top(&text);
+    // No early return above `in_flight = false` below: a timed-out or
+    // failed fork degrades to an empty `text`/`rows` here exactly like a
+    // spawn error already did, so `maybe_refresh_atop`'s in-flight flag
+    // always clears and the cache retries on the next stale check rather
+    // than deadlatching.
+    let mut st = atop.lock().unwrap_or_else(|e| e.into_inner());
     // cpu.sh's own comment (atop_refresh): an empty result is left alone
     // rather than installed, so a transient atop failure never overwrites a
     // real cache with nothing and never suppresses the "reading…"
@@ -511,14 +512,8 @@ fn parse_pcpu_line(line: &str) -> Option<(String, i64, String)> {
 }
 
 async fn ps_top_cpu() -> Vec<(String, i64, String)> {
-    let Ok(out) = tokio::process::Command::new("ps")
-        .args(["-eo", "pcpu=,pid=,comm=", "--sort=-pcpu"])
-        .output()
+    run("ps", &["-eo", "pcpu=,pid=,comm=", "--sort=-pcpu"])
         .await
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(parse_pcpu_line)
         .take(5)
@@ -568,17 +563,8 @@ pub fn stuck(ps_text: &str, own_pids: &str) -> Vec<(String, i64, i64, String)> {
 }
 
 async fn ps_stuck() -> Vec<(String, i64, i64, String)> {
-    let Ok(out) = tokio::process::Command::new("ps")
-        .args(["-eo", "state=,etimes=,ppid=,pid=,comm="])
-        .output()
-        .await
-    else {
-        return Vec::new();
-    };
-    stuck(
-        &String::from_utf8_lossy(&out.stdout),
-        &std::process::id().to_string(),
-    )
+    let out = run("ps", &["-eo", "state=,etimes=,ppid=,pid=,comm="]).await;
+    stuck(&out, &std::process::id().to_string())
 }
 
 // --------------------------------------------------------------- atop peaks
