@@ -176,10 +176,16 @@ class SleepLock:
 
         r, w = os.pipe()
         try:
-            subprocess.Popen(["swaylock", "--ready-fd", str(w)], pass_fds=(w,))
+            proc = subprocess.Popen(["swaylock", "--ready-fd", str(w)], pass_fds=(w,))
         finally:
             os.close(w)
         self.ready_fd = r
+        # Same watch as the "already running" branch above — without it,
+        # only that branch ever fires _on_pid_exit, so owns_pause is never
+        # cleared and the pomodoro stays paused forever after a suspend that
+        # spawned its own swaylock (SUPER+SHIFT+L, power-key hold,
+        # battery-guard's emergency suspend).
+        self._watch_pid_for_unlock(proc.pid)
 
         ch = GLib.IOChannel.unix_new(r)
         self.io_id = GLib.io_add_watch(
