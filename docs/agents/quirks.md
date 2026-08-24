@@ -1,7 +1,8 @@
 # mango-dotfiles — project quirks
 
-Source of truth for this machine's desktop: mango (Wayland compositor), waybar,
-kitty, rofi, matugen colour pipeline, wlogout, fish, fontconfig.
+Source of truth for this machine's desktop: mango (Wayland compositor),
+ironbar + the mango-bard daemon, kitty, rofi, matugen colour pipeline,
+wlogout, fish, fontconfig.
 
 Read this file before touching any of the areas listed below.
 
@@ -41,20 +42,25 @@ something was created outside the repo and needs moving in and adding to
 Editing them works until the next wallpaper switch, then silently reverts:
 
 ```
-~/.config/waybar/style.css          ~/.config/mango/colors.conf
-~/.config/waybar/scripts/claudebar.sh   ~/.config/mango/keybinds.html
+~/.config/ironbar/style.css         ~/.config/mango/colors.conf
+~/.config/ironbar/config.json       ~/.config/mango/keybinds.html
 ~/.config/kitty/theme.conf          ~/.config/rofi/colors.rasi
 ~/.config/swaylock/config           ~/.config/gtk-{3,4}.0/gtk.css
 ~/.config/mako/config               ~/.config/kdeglobals
+~/.config/wlogout/style.css
 /usr/share/sddm/themes/mango-sddm/Colors.qml
 /usr/share/sddm/themes/mango-sddm/background.*
+/boot/mango-palette.img
 ```
 
-Edit `matugen/templates/<thing>` instead, then regenerate:
+`ironbar/style.css` comes from `matugen/templates/ironbar/style.css`;
+`ironbar/config.json` comes from `mango-bard gen-config` (edit
+`ironbar/bard/src/genconfig.rs`). For the rest, edit
+`matugen/templates/<thing>`. Then regenerate:
 
 ```bash
 ~/.config/mango/scripts/switchwall.sh --noswitch
-pkill -SIGUSR2 waybar      # if you touched the bar
+pkill -x ironbar; ~/.config/ironbar/scripts/start.sh &   # if you touched the bar
 ```
 
 `.gitignore` lists all of them as a safety net — if `git status` is dirty right
@@ -67,7 +73,7 @@ writes `wallpaperPath` and `accentColor` into it) and `mango/local.conf`
 ## System state this repo does *not* cover
 
 Changing any of these is still a system change and still needs recording here —
-in the README checklist if it cannot be tracked as a file:
+in the docs/install.md checklist if it cannot be tracked as a file:
 
 - `hypridle.conf`, and anything else under `~/.config/hypr/`
 - `/usr/local/bin/keepassxc-stash-pw` + the SDDM PAM hook feeding
@@ -82,6 +88,16 @@ in the README checklist if it cannot be tracked as a file:
   tracked in `system/sddm/` — `sudo system/sddm/install.sh` is what pushes them
   out. Editing the installed copies directly is the same mistake as editing
   matugen output
+- the boot-time colour frame's *installed* side: `/usr/local/bin/mango-cryptbox`,
+  `/usr/local/bin/console-palette-sync`,
+  `/usr/local/share/mango-cryptbox/ask-password-dropin.conf`,
+  `/usr/lib/initcpio/install/mango-cryptbox`,
+  `/etc/sudoers.d/console-palette-sync`, the `mango-cryptbox` hook in
+  `/etc/mkinitcpio.conf`'s `HOOKS`, and `GRUB_EARLY_INITRD_LINUX_CUSTOM` in
+  `/etc/default/grub`. The *sources* are tracked in `system/cryptbox/` —
+  `sudo system/cryptbox/install.sh` is what pushes them out, and it also runs
+  `mkinitcpio -P` and `grub-mkconfig`, the only two steps that touch `/boot`
+  outside of a wallpaper switch
 - battery power attribution: `/etc/udev/rules.d/mango-rapl.rules` (group-reads
   RAPL's `energy_uj` for `wheel`) and `/etc/sudoers.d/mango-powertop`
   (NOPASSWD, arg-less `powertop`). Sources tracked in `system/rapl/` —
@@ -101,6 +117,6 @@ in the README checklist if it cannot be tracked as a file:
   subcommand self-check (`wait-for-keepass-unlock.sh test`,
   `keyring-lookup.sh test`).
 - Machine-specific values go in `mango/local.conf`, never hardcoded — see the
-  README's "Machine-specific values" table.
+  docs/machine-values.md table.
 - Attribution for ported work stays in the README Credits section. Renaming
   paths does not change provenance.
