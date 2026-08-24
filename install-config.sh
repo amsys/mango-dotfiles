@@ -245,8 +245,7 @@ for entry in "${UNITS[@]}" "${LINK_ONLY_UNITS[@]}"; do
 done
 if ((DRY_RUN)); then
 	log "  (dry run) would run: systemctl --user daemon-reload && enable each unit above (except LINK_ONLY_UNITS)"
-elif command -v systemctl >/dev/null 2>&1; then
-	systemctl --user daemon-reload
+elif command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload 2>/dev/null; then
 	for entry in "${UNITS[@]}"; do
 		systemctl --user enable "${entry#*:}"
 	done
@@ -256,7 +255,7 @@ elif command -v systemctl >/dev/null 2>&1; then
 	log "  mango-keepawake.service (toggle from the bar, or"
 	log "  'systemctl --user start <unit>')"
 else
-	log "  skip:   systemctl not available"
+	log "  skip:   systemctl not available (or no user bus — re-run this inside a session)"
 fi
 log
 

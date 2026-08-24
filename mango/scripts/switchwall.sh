@@ -143,9 +143,9 @@ main() {
 		--mode) mode_flag="$2"; shift 2 ;;
 		--type) type_flag="$2"; shift 2 ;;
 		--color)
-			if [[ "$2" =~ ^#?[A-Fa-f0-9]{6}$ ]]; then
+			if [[ "${2:-}" =~ ^#?[A-Fa-f0-9]{6}$ ]]; then
 				set_accent_color "$2"; shift 2
-			elif [[ "$2" == "clear" ]]; then
+			elif [[ "${2:-}" == "clear" ]]; then
 				set_accent_color ""; shift 2
 			else
 				set_accent_color "$(hyprpicker --no-fancy)"; shift

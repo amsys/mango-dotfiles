@@ -31,8 +31,8 @@ all, and wayvnc's one bind address can't cover both `wg_hetzner`
 (`10.0.254.2/32`) and the hotspot's `p2p0` (transient address) at once. So
 **ufw is the only boundary**, not the bind address. `install.sh` in this
 directory adds the `wg_hetzner` rules; the hotspot needs nothing extra —
-`system/hotspot/mango-hotspot` already opens a blanket `allow in on p2p0`
-while it's up.
+`system/hotspot/mango-hotspot` scopes its own `p2p0` rules to DHCP/DNS, so a
+hotspot client cannot reach port 5900 or kdeconnect's ports at all.
 
 No VNC password is configured. Anyone who reaches port 5900 over
 `wg_hetzner` or the hotspot gets full keyboard and mouse — WireGuard's

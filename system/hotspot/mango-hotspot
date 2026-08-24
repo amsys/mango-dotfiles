@@ -140,7 +140,14 @@ cmd_up() {
 	sysctl -qw net.ipv4.ip_forward=1
 	iptables -t nat -C POSTROUTING -s "$SUBNET.0/24" -j MASQUERADE 2>/dev/null ||
 		iptables -t nat -A POSTROUTING -s "$SUBNET.0/24" -j MASQUERADE
-	ufw allow in on "$IFACE" comment 'mango hotspot' >/dev/null 2>&1 || true
+	# Scoped to DHCP/DNS only, not a blanket allow — otherwise any hotspot
+	# client can reach wayvnc (no VNC password) and kdeconnect while those
+	# are toggled on. Same pattern as system/libvirt-net/install.sh.
+	ufw allow in on "$IFACE" to any port 67 proto udp comment 'mango hotspot DHCP' >/dev/null 2>&1 || true
+	ufw allow in on "$IFACE" to any port 53 comment 'mango hotspot DNS' >/dev/null 2>&1 || true
+	if ! ufw status verbose 2>/dev/null | grep -q '^Default: .*allow (routed)'; then
+		ufw route allow in on "$IFACE" comment 'mango hotspot egress' >/dev/null 2>&1 || true
+	fi
 }
 
 # ---------------------------------------------------------------- down
@@ -149,7 +156,10 @@ cmd_down() {
 	kill_pidfile "$RUN_DIR/hostapd.pid"
 	kill_pidfile "$RUN_DIR/dnsmasq.pid"
 	iptables -t nat -D POSTROUTING -s "$SUBNET.0/24" -j MASQUERADE 2>/dev/null || true
-	ufw delete allow in on "$IFACE" >/dev/null 2>&1 || true
+	ufw delete allow in on "$IFACE" to any port 67 proto udp >/dev/null 2>&1 || true
+	ufw delete allow in on "$IFACE" to any port 53 >/dev/null 2>&1 || true
+	ufw route delete allow in on "$IFACE" >/dev/null 2>&1 || true
+	ufw delete allow in on "$IFACE" >/dev/null 2>&1 || true  # legacy blanket rule, pre-scoping
 	ip link set "$IFACE" down 2>/dev/null || true
 	iw dev "$IFACE" del 2>/dev/null || true
 	rm -rf "$RUN_DIR"

@@ -200,12 +200,18 @@ class SleepLock:
         elapsed_ms = (time.monotonic() - self._t0) * 1000
         if data:
             log(f"locked in {elapsed_ms:.0f} ms")
+            self._done_locking()
         else:
-            # swaylock exited before writing the ready byte — most likely
-            # exit 2, "another lockscreen running", a race against the
-            # idle-timeout lock this script's own docstring accepts.
-            log(f"swaylock exited without confirming a lock ({elapsed_ms:.0f} ms in)")
-        self._done_locking()
+            # swaylock exited before writing the ready byte. The documented
+            # case is benign (exit 2, "another lockscreen running" — a lock
+            # is already on screen), but a crash or bad config looks the
+            # same here and must not release the inhibitor early: hold until
+            # _on_ready_timeout's bound instead of suspending unlocked.
+            log(
+                f"swaylock exited without confirming a lock ({elapsed_ms:.0f} ms in)"
+                " — holding until the ready timeout"
+            )
+            self.io_id = None  # the watch already removed itself (one-shot)
         return False  # one-shot watch
 
     def _on_ready_timeout(self):
