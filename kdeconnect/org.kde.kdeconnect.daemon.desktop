@@ -1,0 +1,11 @@
+[Desktop Entry]
+# Disables /etc/xdg/autostart/org.kde.kdeconnect.daemon.desktop, whose
+# Exec runs kdeconnectd on every login unconditionally (no OnlyShowIn
+# filter, live-confirmed running here well before any toggle click). A
+# user-level autostart file with the same basename overrides the system
+# one per the XDG autostart spec — that's what Hidden=true here does.
+#
+# Without this, kdeconnectd is always on regardless of the remote-access
+# bar toggle (systemd/kdeconnectd.service), which defeats the "off means
+# nothing listening" design in system/remote/README.md.
+Hidden=true

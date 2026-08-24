@@ -1,0 +1,20 @@
+[Unit]
+Description=kdeconnectd — KDE Connect daemon for the remote-access bar toggle
+# Started/stopped only by ironbar/scripts/remote.sh --toggle. No [Install]
+# section — deliberately not enabled at login.
+#
+# kdeconnectd binds 0.0.0.0 with no bind-address option; ufw
+# (system/remote/install.sh) is the only boundary. kdeconnect ships no unit
+# of its own, only /usr/share/dbus-1/services/org.kde.kdeconnect.service —
+# anything that calls its D-Bus name while this unit is stopped can still
+# D-Bus-activate kdeconnectd outside systemd. It is single-instance, so the
+# bus name simply stays taken; this unit just gives the toggle a definite
+# stop/start handle.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kdeconnectd
+Restart=on-failure
+RestartSec=2

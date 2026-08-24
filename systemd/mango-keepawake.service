@@ -1,0 +1,18 @@
+[Unit]
+Description=mango-keepawake — holds a logind idle/lid-switch block inhibitor
+# Started/stopped only by ironbar/scripts/keepawake.sh --toggle. No
+# [Install] section — deliberately not enabled at login, same as
+# wayvnc.service. Replaces ironbar's native `inhibit` module: that module's
+# gtk_application_inhibit() call needs org.freedesktop.portal.Inhibit, a
+# portal interface this session has no backend for (see keepawake.rs's own
+# doc comment). `sleep` is deliberately excluded from --what: an explicit
+# `systemctl suspend` (SUPER+SHIFT+L, battery-guard.sh's 5% emergency
+# suspend) must still work while this is active.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/systemd-inhibit --what=idle:handle-lid-switch --who=mango-keepawake --why="Keep-awake toggle" --mode=block sleep infinity
+Restart=on-failure
+RestartSec=2

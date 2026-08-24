@@ -1,0 +1,15 @@
+[Unit]
+Description=wayvnc — VNC server for the remote-access bar toggle
+# Started/stopped only by ironbar/scripts/remote.sh --toggle. No [Install]
+# section — deliberately not enabled at login, unlike mango-bard.service.
+# Binds 0.0.0.0: ufw (system/remote/install.sh) is the only boundary,
+# restricting it to wg_hetzner and the mango hotspot. No VNC password —
+# see system/remote/README.md for that call.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wayvnc 0.0.0.0 5900
+Restart=on-failure
+RestartSec=2
