@@ -1,0 +1,41 @@
+/* Wallpaper picker. Everything visual comes from config.rasi; this widens
+   the window into a thumbnail grid and enlarges the icon column so each
+   image reads as a preview rather than a launcher-sized icon. */
+@import "config.rasi"
+
+window {
+    width: 900px;
+}
+
+entry {
+    placeholder: "Filter wallpapers…";
+}
+
+/* 3x2 grid: the six wallpapers this machine ships with fit with no
+   scrolling; more just adds a second screenful, no layout change needed. */
+listview {
+    columns: 3;
+    lines: 2;
+    spacing: 10px;
+}
+
+element {
+    orientation: vertical;
+    padding: 8px;
+}
+
+/* Large enough to actually judge a wallpaper by, unlike config.rasi's
+   1.1em launcher-icon default. */
+element-icon {
+    size: 220px;
+    vertical-align: 0.5;
+}
+
+element-text {
+    horizontal-align: 0.5;
+}
+
+message textbox {
+    font: "IBM Plex Sans 10";
+    text-color: @muted;
+}

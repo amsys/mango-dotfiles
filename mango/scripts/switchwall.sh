@@ -27,9 +27,100 @@ set_accent_color() {
 	jq --arg color "$1" '.appearance.palette.accentColor = $color' "$THEME_FILE" >"$THEME_FILE.tmp" && mv "$THEME_FILE.tmp" "$THEME_FILE"
 }
 
+SPAN_DIR="$STATE_DIR/generated/wallpaper"
+
+# T-span: an ultrawide panorama (e.g. 3840x1080 across two 1920x1080 outputs)
+# cover-crops identically on every output with a single swaybg -m fill (no
+# -o), showing the same ~2x-zoomed centre slice twice instead of spanning.
+# span_geometry prints per-output crop rects when the image aspect matches
+# the monitor layout's bounding-box aspect, or REJECT otherwise (fewer than
+# 2 outputs, or the aspect is off by more than 10% — the real
+# 3840x1080/5120x1440 panoramas score 0.00, a 3440x1440 ultrawide on this
+# layout scores 0.33, a near-square wallpaper scores 0.50, so 0.10 cleanly
+# separates "is a panorama for this layout" from "isn't"). Crop is computed
+# in logical (layout) coordinates then scaled into source pixels — swaybg
+# rescales the tile to the output's physical mode regardless of its own
+# resolution, so cropping from the source instead of downscaling first is
+# what keeps a higher-than-layout-resolution panorama (e.g. 5120x1440) sharp.
+span_geometry() {
+	local sw="$1" sh="$2" mons
+	mons="$(mmsg get all-monitors 2>/dev/null)" || return 1
+	jq -n -r --argjson mons "$mons" --argjson sw "$sw" --argjson sh "$sh" '
+		($mons.monitors // []) as $all
+		| ($all | map(select(.width > 0 and .height > 0))) as $m
+		| if ($m | length) < 2 then "REJECT" else
+			($m | map(.x) | min) as $minx |
+			($m | map(.y) | min) as $miny |
+			($m | map(.x + .width) | max) as $maxx |
+			($m | map(.y + .height) | max) as $maxy |
+			($maxx - $minx) as $boxw |
+			($maxy - $miny) as $boxh |
+			([$sw / $boxw, $sh / $boxh] | min) as $k |
+			(($sw / $sh) / ($boxw / $boxh)) as $ratio |
+			((if $ratio < 1 then 1 / $ratio else $ratio end) - 1) as $diff |
+			if $diff > 0.10 then "REJECT" else
+				(($sw - $k * $boxw) / 2) as $offx |
+				(($sh - $k * $boxh) / 2) as $offy |
+				(["ACCEPT"] + ($m | map(
+					"\(.name) \((.width * $k) | round) \((.height * $k) | round) \(($offx + (.x - $minx) * $k) | round) \(($offy + (.y - $miny) * $k) | round)"
+				))) | join("\n")
+			end
+		end
+	'
+}
+
+# Cuts (or reuses cached) per-output tiles for image "$1", printing
+# "name tilepath" lines on success. Returns 1 with no stderr — this is the
+# ordinary "not an ultrawide for this layout" path, not an error condition —
+# when the gate fails or ImageMagick isn't installed; apply_wallpaper()
+# falls back to today's single-image fill either way. JPEG tiles, not PNG:
+# measured 0.09s vs 0.90s per tile on this machine, and this path runs
+# before the desktop shows anything but black.
+span_tiles() {
+	command -v magick >/dev/null 2>&1 || return 1
+	local img="$1" sw sh geometry key name w h x y
+	# `read`'s own exit status is unreliable here: identify's format string
+	# has no trailing newline, so read hits EOF right after the last field
+	# and reports failure even though sw/sh parsed fine — check the values
+	# themselves instead of the read command's status.
+	read -r sw sh < <(identify -format '%w %h' "$img" 2>/dev/null)
+	[[ -n "${sw:-}" && -n "${sh:-}" ]] || return 1
+	geometry="$(span_geometry "$sw" "$sh")" || return 1
+	[[ "$geometry" == ACCEPT* ]] || return 1
+
+	mkdir -p "$SPAN_DIR"
+	key="$img $(stat -c %Y "$img" 2>/dev/null)
+$geometry"
+	if [[ -f "$SPAN_DIR/span.key" && "$(cat "$SPAN_DIR/span.key")" == "$key" ]]; then
+		tail -n +2 <<<"$geometry" | while read -r name _; do
+			echo "$name $SPAN_DIR/span-$name.jpg"
+		done
+		return 0
+	fi
+
+	rm -f "$SPAN_DIR"/span-*.jpg
+	while read -r name w h x y; do
+		magick "$img" -crop "${w}x${h}+${x}+${y}" +repage "$SPAN_DIR/span-$name.jpg" || return 1
+		echo "$name $SPAN_DIR/span-$name.jpg"
+	done < <(tail -n +2 <<<"$geometry")
+	printf '%s' "$key" >"$SPAN_DIR/span.key"
+}
+
+# Nothing re-runs this script on monitor hotplug today (one exec-once at
+# login, one SUPER+W bind) — a newly plugged monitor needs SUPER+W pressed
+# once to pick up its own tile, same as ironbar already needs for its own
+# per-monitor bars. Known limitation, not a watcher: YAGNI until it bites.
 apply_wallpaper() {
 	pkill -x swaybg 2>/dev/null || true
-	setsid swaybg -i "$1" -m fill >/dev/null 2>&1 &
+	local tiles name path argv=()
+	if tiles="$(span_tiles "$1")" && [[ -n "$tiles" ]]; then
+		while read -r name path; do
+			argv+=(-o "$name" -i "$path" -m fill)
+		done <<<"$tiles"
+		setsid swaybg "${argv[@]}" >/dev/null 2>&1 &
+	else
+		setsid swaybg -i "$1" -m fill >/dev/null 2>&1 &
+	fi
 }
 
 main() {
@@ -71,9 +162,11 @@ main() {
 		type_flag="auto"
 	fi
 
+	# rofi thumbnail grid, not kdialog: kdialog has no preview flag at all,
+	# and the KDE dialog's own persisted preview state (~/.config/kdialogrc)
+	# doesn't exist on a fresh machine, so it always opened as a bare list.
 	if [[ -z "$imgpath" && -z "$color_flag" ]]; then
-		cd "$(xdg-user-dir PICTURES)/Wallpapers/showcase" 2>/dev/null || cd "$(xdg-user-dir PICTURES)/Wallpapers" 2>/dev/null || cd "$(xdg-user-dir PICTURES)" || exit
-		imgpath="$(kdialog --getopenfilename . --title 'Choose wallpaper')"
+		imgpath="$("$XDG_CONFIG_HOME/rofi/wallpaper.sh" --launch)"
 	fi
 
 	if [[ -n "$imgpath" && -z "$noswitch_flag" ]]; then
@@ -123,7 +216,10 @@ main() {
 	# own though (IRONBAR.md T6b decision D3 — a gsettings monitor child
 	# measured ~22 ctxt-switches/min idle, worse than every other watcher
 	# this daemon runs), so its ironvar still needs this explicit poke.
-	mango-bard refresh darkmode 2>/dev/null || true
+	# "colors" (not "darkmode"): also re-reads generated/colors.json into
+	# mango-bard's popup palette (tooltip.rs's reload_palette()) before
+	# doing the same full resync "darkmode" used to trigger alone.
+	mango-bard refresh colors 2>/dev/null || true
 
 	# Qt/KDE + GTK3: matugen just wrote the palette into kdeglobals/gtk.css, but
 	# icon theme and gtk-theme are name-switched, not color-switched, so they
