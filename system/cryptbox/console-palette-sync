@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Install matugen's rendered console palette into the early initrd that
+# colours the LUKS unlock prompt. Called from matugen's post_hook on every
+# wallpaper switch, via one fixed sudoers rule.
+#
+# Why this is not just a `cp`: the file being installed is read by
+# mango-cryptbox while running as root, before anyone has authenticated. So
+# the sudo target is this script — root-owned, not user-writable, and
+# argument-free — and it installs a render only if every line matches the
+# fixed "<index> <rrggbb>" grammar. Anything else and it refuses. Fails closed.
+#
+# Usage: sudo console-palette-sync      (no arguments; the sudoers rule forbids them)
+#        console-palette-sync test      (self-check, writes nothing, no root needed)
+
+set -u
+
+BOOT_IMAGE=/boot/mango-palette.img
+MAX_BYTES=1024
+
+die() {
+	printf 'console-palette-sync: %s\n' "$1" >&2
+	exit 1
+}
+
+# A valid render is comments/blanks plus exactly 16 "<index> <rrggbb>" lines
+# (an optional leading '#' on the colour is allowed — matugen's `format: "hex"`
+# filter emits one, `hex_stripped` does not), indices 0-15, each exactly once,
+# in any order.
+check_palette() {
+	candidate=$1
+	owner=$2
+
+	[ ! -L "$candidate" ] || die "refusing a symlink: $candidate"
+	[ -f "$candidate" ] || die "not found: $candidate"
+	[ "$(stat -c %u "$candidate")" = "$owner" ] ||
+		die "not owned by uid $owner: $candidate"
+	[ "$(stat -c %s "$candidate")" -le "$MAX_BYTES" ] ||
+		die "over $MAX_BYTES bytes: $candidate"
+
+	lines=$(grep -vE '^\s*(#|$)' "$candidate")
+	count=$(printf '%s\n' "$lines" | grep -c .)
+	[ "$count" -eq 16 ] || die "expected 16 colour lines, found $count: $candidate"
+	printf '%s\n' "$lines" | grep -qvE '^(1[0-5]|[0-9]) #?[0-9a-fA-F]{6}$' &&
+		die "a line does not match '<index> <rrggbb>': $candidate"
+	indices=$(printf '%s\n' "$lines" | cut -d' ' -f1 | sort -n | uniq)
+	[ "$(printf '%s\n' "$indices" | wc -l)" -eq 16 ] ||
+		die "duplicate colour index: $candidate"
+}
+
+# Build /boot/mango-palette.img: a cpio archive whose only member is
+# /etc/mango/palette.conf, staged and installed atomically.
+install_image() {
+	candidate=$1
+	tmp=$(mktemp -d) || die "could not create a temp dir"
+
+	install -Dm644 -- "$candidate" "$tmp/etc/mango/palette.conf" ||
+		{ rm -rf "$tmp"; die "could not stage the palette"; }
+	(cd "$tmp" && printf 'etc/mango/palette.conf\n' | cpio --quiet -o -H newc) \
+		>"$tmp/image.cpio" ||
+		{ rm -rf "$tmp"; die "could not build the cpio image"; }
+
+	if [ -f "$BOOT_IMAGE" ] && cmp -s "$tmp/image.cpio" "$BOOT_IMAGE"; then
+		rm -rf "$tmp"
+		return 0
+	fi
+	install -m 644 -- "$tmp/image.cpio" "$BOOT_IMAGE.new" ||
+		{ rm -rf "$tmp"; die "could not stage $BOOT_IMAGE"; }
+	mv -f "$BOOT_IMAGE.new" "$BOOT_IMAGE"
+	rm -rf "$tmp"
+}
+
+# ------------------------------------------------------------------ self-check
+
+if [ "${1:-}" = "test" ]; then
+	tmp=$(mktemp -d) || exit 1
+	trap 'rm -rf "$tmp"' EXIT
+	uid=$(id -u)
+	failures=0
+
+	clean="$tmp/clean.conf"
+	{
+		echo "# a comment, and a blank line follow"
+		echo
+		i=0
+		while [ "$i" -le 15 ]; do
+			printf '%s %06x\n' "$i" $((i * 1000003 % 16777216))
+			i=$((i + 1))
+		done
+	} >"$clean"
+
+	expect() {
+		want=$1
+		name=$2
+		file=$3
+		if (check_palette "$file" "$uid") >/dev/null 2>&1; then
+			got=accept
+		else
+			got=refuse
+		fi
+		if [ "$got" = "$want" ]; then
+			printf 'ok    %s (%s)\n' "$name" "$got"
+		else
+			printf 'FAIL  %s: wanted %s, got %s\n' "$name" "$want" "$got"
+			failures=$((failures + 1))
+		fi
+	}
+
+	expect accept "a clean render" "$clean"
+
+	head -n -1 "$clean" >"$tmp/short.conf"
+	expect refuse "only 15 colour lines" "$tmp/short.conf"
+
+	sed '2,3{s/^0 /1 /}' "$clean" | grep -vE '^\s*(#|$)' >"$tmp/dup.conf"
+	expect refuse "duplicate index" "$tmp/dup.conf"
+
+	sed 's/^0 [0-9a-f]*/0 gggggg/' "$clean" >"$tmp/badhex.conf"
+	expect refuse "invalid hex digit" "$tmp/badhex.conf"
+
+	{ cat "$clean"; echo "16 000000"; } >"$tmp/extra.conf"
+	expect refuse "an extra 17th line" "$tmp/extra.conf"
+
+	ln -s "$clean" "$tmp/link.conf"
+	expect refuse "symlinked source" "$tmp/link.conf"
+
+	sed 's/^0 [0-9a-f]*/0 123456/' "$clean" >"$tmp/recoloured.conf"
+	expect accept "different colours" "$tmp/recoloured.conf"
+
+	[ "$failures" -eq 0 ] || exit 1
+	echo "ok"
+	exit 0
+fi
+
+# ----------------------------------------------------------------------- apply
+
+[ $# -eq 0 ] || die "takes no arguments"
+[ "$(id -u)" -eq 0 ] || die "must run as root, through sudo"
+
+uid=${SUDO_UID:-}
+[ -n "$uid" ] || die "SUDO_UID is unset — run me through sudo, not as root directly"
+[ "$uid" -gt 0 ] 2>/dev/null || die "refusing to run for uid ${uid}"
+
+home=$(getent passwd "$uid" | cut -d: -f6)
+[ -n "$home" ] && [ -d "$home" ] || die "no home directory for uid $uid"
+
+palette=$home/.local/state/mango/generated/console-palette.conf
+
+check_palette "$palette" "$uid"
+install_image "$palette"

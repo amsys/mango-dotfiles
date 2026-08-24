@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Installed to /usr/lib/initcpio/install/mango-cryptbox by
+# system/cryptbox/install.sh. Adds mango-cryptbox and its systemd drop-in to
+# the initramfs. Add the `mango-cryptbox` hook name to HOOKS in
+# /etc/mkinitcpio.conf, before sd-encrypt, then `mkinitcpio -P`.
+
+build() {
+	add_binary /usr/local/bin/mango-cryptbox
+	add_binary /usr/bin/stty
+	add_file /usr/local/share/mango-cryptbox/ask-password-dropin.conf \
+		/etc/systemd/system/systemd-ask-password-console.service.d/10-mango-cryptbox.conf \
+		0644
+}
+
+help() {
+	cat <<HELPEOF
+This hook adds mango-cryptbox to the initramfs: it draws a matugen-coloured
+ASCII frame around the LUKS passphrase prompt via an ExecStartPre on
+systemd-ask-password-console.service. See mango-dotfiles/system/cryptbox/.
+HELPEOF
+}
+
+# vim: set ft=sh ts=4 sw=4 et:
