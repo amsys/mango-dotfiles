@@ -161,51 +161,130 @@ window.background,
  * waybar's unstyled `#tray` — not worth re-opening the nesting risk above
  * to avoid one shared background color.
  */
-/* T-next (item 3): `#start` joins this rule. `center` used to hold cpu/
- * memory/docker/battery/claudebar/music ahead of the workspace pills, which
- * is why only `center`/`end` had the pill background before — that group
- * moved to `start` (genconfig.rs::leftcenter_modules, so the pill centring
- * fix wouldn't shift with pomodoro/music text width; see that function's
- * own doc comment), and an unstyled `start` next to two styled pills would
- * have read as a visible break in the bar's own row treatment. */
+/* T23 — INV-2 full corner bleed (statusbar-layout.md). The bar's own
+ * `margin` is already 0 on every side (ironbar `MarginConfig` default;
+ * `genconfig.rs` never sets it) and `#bar` itself carries no padding, so
+ * every dead pixel was in these row pills. `#start`/`#end` now square their
+ * OUTWARD corner and carry no padding at all on that side — the inset
+ * moves inside `.spark`/`.power` as their own padding (below), never as
+ * margin, since margin is dead space and is exactly what INV-2 forbids.
+ * `#center` never touches a screen edge, so it keeps its full rounding and
+ * padding unchanged. All three drop to a bottom-only margin so they still
+ * hang at the same height as each other and stay flush with the top edge.
+ */
 #bar #start,
 #bar #center,
 #bar #end {
 	background-color: @pill_bg;
+	margin: 0 0 4px 0;
+}
+#bar #start {
+	border-radius: 0 12px 12px 0;
+}
+#bar #center {
 	border-radius: 12px;
-	margin: 4px 0;
 	padding: 0 5px;
+}
+#bar #end {
+	border-radius: 12px 0 0 12px;
 }
 #bar #start > *,
 #bar #center > *,
 #bar #end > * {
 	margin: 0 2px;
 }
-/* T-next (item 4): resource-monitor group (cpu, memory, docker, battery,
- * claudebar) — these five live in `start` now (T-next item 3; originally
- * `center`, confirmed against the live generated config both times, not
- * assumed from the name).
+/* T25: resource-monitor group (cpu, memory, docker, battery, claudebar) —
+ * padding cut to the *leading* inset only, `0 0 0 6px`. The trailing 6px
+ * this rule used to carry is now part of each pill's own `min-width`
+ * reserve below, so the same gap doubles as the overflow buffer: a rarer,
+ * one-digit-wider string eats into that width instead of growing the box
+ * and pushing `end`'s leftmost member (`tray`) sideways. `min-width` sizes
+ * *content* only in this engine — declared `padding` adds on top of it,
+ * confirmed live (`ironbar style load-css` probe: `min-width: 200px;
+ * padding: 0 6px` painted a 212px box, not 200) — so this rule and the
+ * reserve rule below are independent, not double-counted.
+ *
+ * Written as bare classes, not `#bar #end > .cpu` etc.: T21 live-verified
+ * that in this engine a bare class beats an ID-selector-chain rule
+ * targeting the same property on the same node, opposite of the W3C model.
  *
  * These five are `custom` modules: ironbar's own `.custom button { padding:
  * 0; }` (further down this file) zeroes the inner GtkButton's padding, and
  * this outer box (the node `.cpu`/etc actually selects — a `custom`
- * module's container, distinct from its nested button) carried no padding
- * of its own either. The only gap between pills was `#bar #start > *`'s
- * shared `margin: 0 2px` — half of what `.inhibit`/`.snip`/`.colorpicker`/
- * `.darkmode` get: those are single-node native/icon-button modules with
- * their own `padding: 0 6px` (the icon-button rule below) stacking with
- * their own `margin: 0 2px`, for 2+6+6+2 = 16px between neighbours versus
- * these five's 2+2 = 4px. `padding: 0 6px` here matches that box model
- * directly (2 ID selectors + 1 class outranks the shared `#bar #start > *`
- * margin rule, same override pattern already used for `.ws`/network pills
- * — see the T14/T18 comments on those); a `margin-left` bodge is no longer
- * needed, so it's replaced rather than kept alongside. */
-#bar #start > .cpu,
-#bar #start > .memory,
-#bar #start > .docker,
-#bar #start > .battery,
-#bar #start > .claudebar {
-	padding: 0 6px;
+ * module's container, distinct from its nested button) carries this file's
+ * only padding for the pill.
+ */
+.cpu,
+.memory,
+.docker,
+.battery,
+.claudebar {
+	padding: 0 0 0 6px;
+}
+
+/* T25 — INV-5 (statusbar-layout.md), *reserved width with trailing slack*
+ * variant, not the *centred fixed width* variant `.ws`/`.clock`/`.date`
+ * use — deliberately NO `label` min-width twin here. GtkLabel defaults
+ * `xalign: 0.5`; a twin would centre the text in the reserve and walk the
+ * icon sideways on every digit-count change, which is the wobble this
+ * stage removes, not a wobble to add. The `tnum` twin below stays: that is
+ * a font property and the T17 label-inheritance trap is real for it.
+ *
+ * `end` is right-anchored: any of these five growing pushes `tray`
+ * (leftmost in `end`) sideways — that is the reflow this closes, not a
+ * `center` shift (`center` holds only clock/date/pomo since T23).
+ *
+ * Every value below is measured live (`grim`, `ironbar var set` probe
+ * strings, daemon frozen with `systemctl --user stop mango-bard.service`
+ * so its own refresh tick can't overwrite the probe; column-ink-scanned
+ * per statusbar-layout.md §6, not estimated like the numbers this
+ * replaces) = realistic content width + 9px slack, where 9px is one
+ * measured tabular digit (delta between a pill's realistic string and
+ * its next-digit-wider string, confirmed again this stage):
+ *   cpu/memory  "<icon> 99%"  = 48/47px; +9 slack = 57/56px
+ *   docker      "<icon> 99"   = 34px;    +9 slack = 43px
+ *   battery     "<icon> 100%" = 52px;    +9 slack = 61px
+ *   claudebar   "<icon> 100% · 4h 59m" = 122px; +9 slack = 131px
+ *
+ * T26 re-measured all five against this stage's own comment above and
+ * found cpu/memory/docker already correct (58/58/45 vs. a re-measured
+ * 57/56/43 — inside font-hinting noise, left as T25 set them) but
+ * battery and claudebar oversized: T25's "realistic max" folded in a
+ * second, independent condition — battery's eco leaf (power.rs:778, set
+ * by the standing powermode preference, not by charge %) and claudebar's
+ * stale-cache "⏸" (claude.rs:406, set by a failed refresh, not by usage
+ * %) — as if it were part of the common case, rather than the rarer
+ * combination it actually is. Reserving for it every pixel-tick everywhere
+ * costs both pills the 220px `.music` used to cost by itself. Sized here
+ * to the common case alone; the combined rare case (measured: battery
+ * "<icon> 100% <eco leaf>" = 71px, claudebar "<icon> 100% · 4h 59m ⏸" =
+ * 135px, both matching T25's own recorded numbers) overflows its reserve
+ * by 10px / 4px and reflows `tray` by that much — accepted, not missed.
+ */
+.cpu,
+.memory,
+.docker,
+.battery,
+.claudebar,
+.cpu label,
+.memory label,
+.docker label,
+.battery label,
+.claudebar label {
+	font-feature-settings: "tnum" 1;
+}
+.cpu,
+.memory {
+	min-width: 58px;
+}
+.docker {
+	min-width: 45px;
+}
+.battery {
+	min-width: 61px;
+}
+.claudebar {
+	min-width: 131px;
 }
 
 /* T9: symmetric ~10px edge gap for the two outermost icons (launcher,
@@ -213,17 +292,22 @@ window.background,
  * ~30px/~13px from their respective edges (measured live, not derived from
  * any CSS rule that existed before this one).
  *
- * T-next (item 3): `#start` gained the shared `padding: 0 5px` above (it
- * had none before), so `.spark`'s margin is halved — 10px -> 5px — to keep
- * the same ~10px total from the bar's raw edge instead of stacking to
- * ~15px. `.power` needed no matching change: `#end` already carried that
- * padding when its own 2px was tuned, so its total is unaffected here.
+ * T23: `#start`/`#end` no longer carry any padding of their own (INV-2
+ * above) — `.spark`/`.power` now supply the full ~10px edge gap themselves,
+ * as padding (inside the clickable node) rather than margin (dead space
+ * outside it). Their own `margin: 0` overrides the shared `#bar #start/
+ * #end > *` 2px margin rule — a bare class beating an ID-chain rule on the
+ * same property, the same T21-verified engine behaviour the resource-pill
+ * comment above relies on.
  */
 .spark {
-	margin-left: 5px;
+	border-radius: 9999px;
+	padding: 0 10px;
+	margin: 0;
 }
 .power {
-	margin-right: 2px;
+	padding: 0 10px;
+	margin: 0;
 }
 
 /* Workspace pills — ported from waybar/style.css:268-311. T-next: the T9
@@ -264,7 +348,12 @@ window.background,
 	color: alpha(@bar_fg_dim, 0.90);
 	border-radius: 9999px;
 }
-#bar #center > .ws {
+/* T23: retargeted from `#bar #center` — the tag pills moved to `start`
+ * (statusbar-layout.md §3.1, reversing T-next item 3's move into `center`;
+ * see genconfig.rs::time_modules()'s own doc comment for why the reversal
+ * is safe). Same rule, same reasoning as T14's own comment above — only
+ * the row changed. */
+#bar #start > .ws {
 	margin: 0 2px;
 }
 /* T19: `min-width` above sizes the `.ws` module container, but its child
@@ -341,9 +430,10 @@ window.background,
 	padding: 0 10px;
 }
 
-/* Clock + date. T15: padding tightened 8px -> 4px — the tag pills sit
- * immediately to this pill's left, and 8px read as a dead gap against T14's
- * already-tightened `.ws` spacing. */
+/* Clock + date. T15: padding tightened 8px -> 4px, back when `center` held
+ * the tag pills immediately to this pill's left. T23: clock/date/pomo are
+ * `center`'s only content now (statusbar-layout.md §3.2) — `.pill`'s own
+ * padding is unaffected either way, kept as-is. */
 .pill {
 	color: @bar_fg;
 	padding: 0 4px;
@@ -362,6 +452,37 @@ window.background,
 }
 .pomo.paused {
 	color: @bar_fg_dim;
+}
+
+/* T23 — INV-5 (statusbar-layout.md): `center`'s own constant-width
+ * requirement (INV-6) depends directly on this — a centred group reflows
+ * from its middle, so an unpadded digit substitution here doesn't just
+ * wobble locally, it shifts the whole `center` block sideways.
+ *
+ * T24: `.clock`'s 130px was an unmeasured guess and left ~80px of dead
+ * space after the rendered "HH:MM" (measured 46px live via `grim`, per
+ * this comment's own instruction) — the reported gap between time and
+ * date. `.date` had no reserve at all, violating INV-6 on its own (its
+ * width changed with the weekday/day-of-month string). Both values below
+ * are measured live against a running bar, not estimated:
+ * `.clock` = 46px content + `.date` = 80px content ("Tue, 25 Aug"),
+ * each with a few px of slack for font/subpixel variance. */
+.clock,
+.date,
+.pomo,
+.clock label,
+.date label,
+.pomo label {
+	font-feature-settings: "tnum" 1;
+}
+.clock {
+	min-width: 50px;
+}
+.date {
+	min-width: 84px;
+}
+.pomo {
+	min-width: 52px;
 }
 
 /* Spinner: one glyph, CSS-rotated — see genconfig.rs's net_modules() doc and
@@ -474,9 +595,20 @@ window.background,
  * low/mid/high/critical.
  *
  * T15: all four states get their own color, not just the top two — three
- * matugen hues (primary/tertiary/error) plus an inverted chip for critical,
- * so the limit state reads at a glance without opening the popup. No new
- * `@define-color` needed — all four tokens are already defined above.
+ * matugen hues (primary/tertiary/error) plus, originally, an inverted chip
+ * for critical, so the limit state reads at a glance without opening the
+ * popup. No new `@define-color` needed — all four tokens are already
+ * defined above.
+ *
+ * T25: `.critical`'s chip (background + padding) dropped to color-only,
+ * matching its three siblings. Two classes beat `.claudebar`'s own bare
+ * rule, so its old `padding: 0 6px` survived T25's `padding: 0 0 0 6px`
+ * untouched and would have re-widened the box by 6px, reflowing the tray
+ * on every entry into `critical` (95%+ usage, `claude.rs::class_for` — a
+ * real, reachable state, not an edge case). A background chip is also
+ * incompatible with a wide reserved box on its own terms: it paints the
+ * whole allocation, so the pill would render as a 145px oval with the
+ * text pinned to one end instead of a snug chip.
  */
 .claudebar.low {
 	color: @accent;
@@ -488,10 +620,7 @@ window.background,
 	color: @urgent;
 }
 .claudebar.critical {
-	background-color: @urgent;
-	color: @urgent_fg;
-	border-radius: 9999px;
-	padding: 0 6px;
+	color: @urgent;
 }
 
 /* Hotspot — ported from waybar/style.css:357-365. */
@@ -527,6 +656,26 @@ window.background,
 	opacity: 1;
 }
 
+/* T23 — INV-1, not INV-5: `volume`/`mic` are icon-only (T9 comment above),
+ * no digit string, so tabular figures are a no-op here — the real risk is
+ * a two-state width jump (icon vs. empty, e.g. `mic` when unmuted). A
+ * `min-width` alone closes it; see statusbar-layout.md §2's own distinction. */
+.volume,
+.mic {
+	min-width: 20px;
+}
+
+/* T23 gave `music` a 220px reserve here, sized to `truncate.max_length: 30`
+ * — its own comment flagged it as "estimate, not measured", and it was:
+ * measured live this stage, an average track title never gets near 30
+ * chars, so 220px sat empty behind whatever short title (or nothing) was
+ * actually showing — the single biggest gap on the bar.
+ *
+ * T26 drops the reserve. `volume`/`mic` (next in `audio_modules()`) now
+ * shift left when a track starts and right when it ends — a discrete,
+ * user-caused event, not the per-second tick INV-1 exists to guard
+ * against — see statusbar-layout.md §3.6 for the trade recorded there. */
+
 /* Icon-only static buttons (spark/colorpicker/snip/power) and tray/music/
  * bluetooth/inhibit/darkmode — the T8a additions. Same circular hover
  * target as waybar's CircleUtilButton set (style.css:233-248), so a hover
@@ -537,7 +686,12 @@ window.background,
  * padding/hover as its `.power` neighbour to actually match it, not just to
  * stop being wider.
  */
-.spark,
+/* T23: `.spark` moved out of this shared rule — its own corner-bleed rule
+ * (above, near `#bar #start`/`#bar #end`) sets its `border-radius` and
+ * 10px padding directly instead, since a later same-specificity bare-class
+ * padding rule here would otherwise win and flatten it back to this
+ * group's 6px. Kept in the `:hover` list below — the hover tint itself
+ * doesn't conflict with anything. */
 .colorpicker,
 .snip,
 .darkmode,
@@ -554,6 +708,20 @@ window.background,
 .bluetooth:hover {
 	background-color: alpha(@bar_fg, 0.08);
 }
+/* T23: tools-drawer trigger (genconfig.rs::tools_module()) — same circular
+ * hover target as the icon-button group above, styled separately since it's
+ * a nested widget, not a sibling module, inside `.tools`. No `on_click_left`
+ * of its own (hover alone drives the reveal); the revealed children below
+ * keep their own existing `.colorpicker`/`.darkmode`/`.snip` hover rules
+ * (icon-button group above) unchanged. */
+.tools-trigger {
+	border-radius: 9999px;
+	padding: 0 6px;
+}
+.tools-trigger:hover {
+	background-color: alpha(@bar_fg, 0.08);
+}
+
 /* Keep-awake state — `.inhibit` is now a `custom` module (keepawake.rs),
  * so unlike the native `inhibit` module this replaced, it carries its own
  * `@class/inhibit` ironvar. Same two-state accent treatment as
@@ -567,10 +735,14 @@ window.background,
 /* The one destructive target on the bar — reads as one on hover rather than
  * the neutral tint every other icon button uses. Ported from
  * waybar/style.css:139-148.
+ *
+ * T23: `padding` dropped from this rule — `.power`'s own corner-bleed rule
+ * (above, near `#bar #start`/`#bar #end`) already sets it to 10px; a second
+ * declaration here at equal specificity would win by source order and
+ * flatten it back to 6px.
  */
 .power {
 	border-radius: 9999px;
-	padding: 0 6px;
 }
 .power:hover {
 	background-color: alpha(@urgent, 0.18);

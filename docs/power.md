@@ -124,6 +124,49 @@ The bar's inhibit pill toggles `mango-keepawake.service`, a
 `systemd-inhibit` block on idle and lid-switch handling. logind honors the
 lid part only with `LidSwitchIgnoreInhibited=no` — see the checklist.
 
+## Display rescue (`rescue-outputs.sh`)
+
+Symptom: the desktop stops drawing and stays frozen on the last frame.
+Input still works (keybinds fire, a password typed into a lock screen still
+reaches it) — only painting stops. This is mango's `selmon == NULL` state:
+every output got disabled, and with nothing to paint to, the compositor has
+no surface to draw. It is not a hang and it is not a crash.
+
+Confirmed 2026-08-26 (source-level, against the exact installed
+`mangowm-git` build) that `wlopm --off '*'` (DPMS, `hypridle.conf`'s
+600 s screen-off) is **not** the cause: a DPMS-off monitor keeps its real
+geometry and stays disable-only, not layout-removed. The remaining
+suspects are anything that applies a `zwlr_output_management_v1`
+configuration with an output disabled — `wdisplays` is installed and does
+exactly this — or a `disable_monitor`/`toggle_monitor` dispatch (no keybind
+here uses either).
+
+Recovery needs no compositor restart and loses no applications: mango
+keeps a disabled output on its monitor list and re-enabling it is a plain
+IPC call. Three layers:
+
+1. **`mango-outputs.service`** polls for the frozen state and re-enables
+   automatically, usually within ~15 s.
+2. **`SUPER+SHIFT+o`** runs the same rescue immediately — the manual
+   escape, and it works even if the watchdog itself is dead, since input
+   keeps responding during the freeze.
+3. **A TTY** (`Ctrl+Alt+F3`) as the last resort:
+   `~/.config/mango/scripts/rescue-outputs.sh`. Do this before reaching for
+   `systemctl restart sddm` — that restart is what loses every open
+   application.
+
+```
+rescue-outputs.sh        # one-shot: check, rescue if frozen
+rescue-outputs.sh watch  # poll loop (what the service runs)
+rescue-outputs.sh test   # self-check, no compositor needed
+```
+
+The two `windowrule=` fractional-size rules that used to crash mango in
+this state (`mango.c:1827-1834` dereferences the monitor with no NULL
+guard to resolve a fraction) were changed to literal pixel sizes in
+`config.conf` — a crash there would have killed every running application
+along with the compositor.
+
 ## Power attribution (`system/rapl/`)
 
 `sudo system/rapl/install.sh` makes per-domain power visible to the

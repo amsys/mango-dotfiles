@@ -24,34 +24,40 @@ unit `mango-bard.service`.
 
 ## Modules
 
-Start (left):
+Layout is grouped by domain — see
+[statusbar-layout.md](statusbar-layout.md) for the full normative spec
+(module ordering, width invariants, and why each group sits where it does).
+
+Start (launcher → tags → focus):
 
 | Pill | Shows | Click |
 |---|---|---|
 | spark | launcher star | app launcher |
+| *(9 tag pills + overview)* | per-monitor tags — left-click views a tag, scroll moves through tags, hover lists a tag's windows | — |
 | win | focused window title | scroll: brightness |
-| cpu | usage; popup: per-core bars, temperature, top processes, recent peaks from atop | `btop` |
-| memory | usage; popup: RAM/swap meters, page faults, top processes, DIMM data | `btop` |
-| docker | container count; popup: container list | right: docker menu |
-| battery | charge; popup: health, cycle count, watts, time estimate, power attribution | left: power mode toggle; right: powertop |
-| claudebar | Claude usage | right: usage settings |
-| music | MPRIS track | play/pause |
 
-Center: the nine tag pills and one overview pill, per monitor. Left-click
-views the tag, scroll moves through tags, hover lists the tag's windows.
-
-End (right):
+Center (time):
 
 | Pill | Shows | Click |
 |---|---|---|
 | clock | time; popup: local + world clocks | — |
 | date | date; popup: month calendar | focus the calendar app |
 | pomo | pomodoro state | left: start/pause; right: mute |
-| colorpicker | — | `hyprpicker` |
-| darkmode | light/dark | toggle |
-| snip | — | left: region shot; right: window shot |
+
+End (tray → resources → tools → audio → connectivity → session):
+
+| Pill | Shows | Click |
+|---|---|---|
+| tray | — | app menus |
+| cpu | usage; popup: per-core bars, temperature, top processes, recent peaks from atop | `btop` |
+| memory | usage; popup: RAM/swap meters, page faults, top processes, DIMM data | `btop` |
+| docker | container count; popup: container list | right: docker menu |
+| battery | charge; popup: health, cycle count, watts, time estimate, power attribution | left: power mode toggle; right: powertop |
+| claudebar | Claude usage | right: usage settings |
+| tools | hover-expandable drawer: colorpicker, darkmode, snip | hover to reveal |
 | inhibit | keep-awake state | toggle keep-awake |
-| tray, volume, mic | audio | `pavucontrol-qt`; scroll: volume |
+| music | MPRIS track | play/pause |
+| volume, mic | audio | `pavucontrol-qt`; scroll: volume |
 | net-spinner, wifi, eth, netsec | network state and a security grade | menus; see below |
 | hotspot | hidden unless active | left: menu; right: toggle |
 | remote | wayvnc + KDE Connect state | toggle |

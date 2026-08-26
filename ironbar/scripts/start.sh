@@ -15,4 +15,34 @@ mango-bard gen-config --out "$CONFIG"
 SHIM="$HOME/.local/lib/mango/fast-tooltips.so"
 [ -f "$SHIM" ] && export LD_PRELOAD="$SHIM"
 
-exec ironbar
+# Stale-state guard: a login into a runtime dir left over from a crashed
+# prior session (compositor died mid-handoff) finds a still-alive ironbar
+# and its IPC socket already there. A fresh ironbar tries to take over that
+# socket and can hang forever mid-handshake — confirmed live (2026-08-26):
+# `g_application_run` parked in a blocking syscall, no bar surface, no IPC
+# listener, ironbar ping failing (see IRONBAR.md). Clear any leftover
+# instance and its socket before every launch, not just after a crash —
+# cheap and always correct even when nothing was left behind.
+SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ironbar-ipc.sock"
+pkill -x ironbar 2>/dev/null || true
+for _ in 1 2 3 4 5; do pgrep -x ironbar >/dev/null || break; sleep 0.2; done
+rm -f "$SOCK"
+
+# Launch and confirm the bar actually came up (the guard above handles the
+# known cause; this catches anything else). One retry — a bar that fails
+# twice in a row has a different problem and should stay visibly broken
+# rather than loop.
+for attempt in 1 2; do
+	ironbar &
+	pid=$!
+	for _ in $(seq 1 20); do
+		ironbar ping >/dev/null 2>&1 && { wait "$pid"; exit $?; }
+		sleep 0.5
+	done
+	echo "start.sh: ironbar did not answer ping within 10s (attempt $attempt), retrying" >&2
+	kill "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
+	rm -f "$SOCK"
+done
+echo "start.sh: ironbar failed to start after 2 attempts, giving up" >&2
+exit 1

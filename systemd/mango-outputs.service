@@ -1,0 +1,21 @@
+[Unit]
+Description=mango-outputs — recovers from mango's frozen-desktop state (all outputs zeroed)
+# 2026-08-26: every output lost its geometry (mango.c:7176) while the
+# compositor kept running — no crash, no way back except restarting sddm
+# and losing every application. rescue-outputs.sh polls `mmsg get
+# all-monitors` and re-enables any monitor whose geometry has been zeroed.
+# See mango/scripts/rescue-outputs.sh's own header and
+# ~/.claude/plans/read-home-martin-claude-plans-find-out-w-precious-torvalds.md
+# for the source analysis. Restart=always: a poll loop wedged on a bad mmsg
+# response should come back, not stay dead until next login.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.config/mango/scripts/rescue-outputs.sh watch
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

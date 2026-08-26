@@ -216,6 +216,7 @@ UNITS=(
 	"ironbar/mango-bard.service:mango-bard.service"
 	"systemd/mango-sleep-lock.service:mango-sleep-lock.service"
 	"systemd/mango-powerkey.service:mango-powerkey.service"
+	"systemd/mango-outputs.service:mango-outputs.service"
 )
 # Linked but never enabled: started/stopped only from a bar toggle, never
 # at login — wayvnc/kdeconnectd from the remote-access toggle

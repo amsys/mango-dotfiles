@@ -235,6 +235,9 @@ pub fn build(monitors: &[String]) -> Value {
     defaults.insert("inhibit_text".into(), json!(""));
     defaults.insert("inhibit_tip".into(), json!(""));
     defaults.insert("dark_icon".into(), json!(""));
+    // T23 tools drawer — see `tools_modules()`'s own doc comment. Starts
+    // closed: the drawer's whole point is a collapsed resting state.
+    defaults.insert("tools_open".into(), json!("false"));
     // T6c claudebar vars — see claude.rs.
     defaults.insert("claude_text".into(), json!(""));
     defaults.insert("claude_tip".into(), json!(""));
@@ -259,16 +262,17 @@ pub fn build(monitors: &[String]) -> Value {
         }
     }
 
+    // T23: `center` now holds the time block (clock/date/pomo) on every
+    // bar, real or fallback — see `time_modules()`'s own doc comment for why
+    // this reverses T-next (item 3)'s deliberate emptying of `center`. The
+    // reversal is safe: putting the tag pills in `start` instead anchors
+    // them to a fixed X, which is what that stage was actually trying to
+    // buy and what INV-4 (statusbar-layout.md) demands directly — a fixed-
+    // width `center` (INV-6) no longer depends on `center` being pill-only,
+    // it depends on `time_modules()` itself being fixed-width, which it is.
     let mut monitors_map = serde_json::Map::new();
     for (name, slug) in monitors.iter().zip(&slugs) {
         let bar_name = format!("bar-{name}");
-        // T-next (item 3): `end` is `rightcenter_modules()` (the old
-        // clock/pomo/colorpicker/darkmode/snip/inhibit tail of `center`)
-        // followed by this bar's own tray/audio/net/hotspot/bluetooth/power
-        // — see `rightcenter_modules()`'s own doc comment for why that
-        // group moved here instead of staying in `center`.
-        let mut end = rightcenter_modules(&bar_name);
-        end.extend(end_modules(&bar_name));
         monitors_map.insert(
             name.clone(),
             json!({
@@ -288,22 +292,12 @@ pub fn build(monitors: &[String]) -> Value {
                 // lever `PopupConfig`/`BarConfig` expose for "popup sits too
                 // close to the button" (no per-widget offset field exists).
                 "popup_gap": 12,
-                "start": start_modules(&bar_name),
-                // T-next (item 3): the 9 workspace pills, and nothing else
-                // — see `workspace_pills()`'s own doc comment for why this
-                // slot used to hold 15 modules and now holds only these.
-                "center": workspace_pills(name, slug),
-                "end": end,
+                "start": start_modules(&bar_name, Some((name, slug))),
+                "center": time_modules(&bar_name),
+                "end": end_modules(&bar_name),
             }),
         );
     }
-
-    // No workspace pills on the fallback bar (no monitor name/slug to build
-    // them from — T0 spike S3's unlisted-output case), so `rightcenter_
-    // modules()` keeps its old position inside `center` here instead of
-    // moving to `end` the way it does for a real per-monitor bar above —
-    // there is no pill group on this bar for it to visually protect.
-    let fallback_center = rightcenter_modules("bar-default");
 
     json!({
         // Popups are click-driven (workspace pill right-click, window
@@ -321,38 +315,30 @@ pub fn build(monitors: &[String]) -> Value {
         "name": "bar-default",
         "height": 40,
         "position": "top",
-        "start": start_modules("bar-default"),
-        "center": fallback_center,
+        // No `mon_slug` — T0 spike S3's unlisted-output case has no
+        // monitor name/slug to build tag pills from, so `start_modules`
+        // simply omits them here (see its own doc comment).
+        "start": start_modules("bar-default", None),
+        "center": time_modules("bar-default"),
         "end": end_modules("bar-default"),
         "monitors": Value::Object(monitors_map),
     })
 }
 
-/// `end` row: config.jsonc:271's own `group/indicators` order — volume/mic,
-/// the network pills, then hotspot/bluetooth/power. T8d moved cpu/memory/
-/// docker/battery/claudebar/music OUT of this row and into `center`'s
-/// `leftcenter_modules()`, to match waybar's actual layout (those six render
-/// at the far left of the center row, not the right end) — see IRONBAR.md's
-/// T8d entry for the correction. T-next (item 3): `center` itself moved
-/// again, to `start` — see `leftcenter_modules()`'s own doc comment.
+/// `end` row, grouped by domain per statusbar-layout.md §3.3-3.8: tray
+/// (leads, INV-1 growth end) → resources → tools → audio → connectivity →
+/// session. Each sub-group is one saccade's worth of ambient information
+/// (proximity/common region — see the spec's own §Rationale), not a flat
+/// list of 18 unrelated pills.
 ///
-/// T9: `tray` now leads this row, matching waybar's own `modules-right =
-/// [tray, group/indicators]` (config.jsonc:9) — tray sits at the left edge
-/// of the right-hand region, ahead of the indicator pills, not merged into
-/// them. T8a had put tray in `start` specifically to dodge the box-nesting
-/// popup-addressing risk (Phase 2 finding), but `TrayModule`'s schema has no
-/// `popup`/`PopupConfig` field at all — that risk never applied to tray, so
-/// it can sit flat in `end` like every other T8d module. Known, accepted
-/// cosmetic deviation from waybar: it now shares `#bar #end`'s pill
-/// background (waybar's own `#tray` rule is unstyled) — not worth
-/// re-opening the box-nesting risk to avoid one shared background color,
-/// same call T8a already made for the rest of this row.
-///
-/// `build()` prepends [`rightcenter_modules`] to this on every per-monitor
-/// bar — see that function's own doc comment for why tray doesn't lead the
-/// visible row even though it leads this function's own return value.
+/// T23: this replaces T-next (item 3)'s `rightcenter_modules()`-prepended
+/// shape. `center` now carries the time block directly (`time_modules()`,
+/// wired in `build()`) instead of `end` borrowing it — see that function's
+/// own doc comment for why the reversal of T-next item 3 is safe.
 fn end_modules(bar_name: &str) -> Vec<Value> {
     let mut end = vec![tray_module()];
+    end.extend(resource_modules(bar_name));
+    end.extend(tools_modules(bar_name));
     end.extend(audio_modules(bar_name));
     end.extend(net_modules(bar_name));
     end.push(hotspot_module(bar_name));
@@ -362,46 +348,50 @@ fn end_modules(bar_name: &str) -> Vec<Value> {
     end
 }
 
-/// `start`'s trailing block — waybar's own `group/leftcenter` order
-/// (config.jsonc:26-29: cpu, memory, docker, battery, claudebar, mpris),
-/// appended to `start` after the launcher/window title. `music` takes
-/// waybar's `mpris` slot and `claudebar` is T6c's new pill, in waybar's own
-/// slot between battery and mpris/music.
-///
-/// T-next (item 3): moved here from leading `center`. `center` used to hold
-/// this group plus the 9 workspace pills plus [`rightcenter_modules`] — 15
-/// modules of mixed, content-dependent width, of which only the 9 pills are
-/// what a viewer reads as "the centre". GTK centres whatever `center`
-/// contains as one block, so any of the other 6 changing width (a longer
-/// pomodoro countdown, a music title, a claude-usage percentage) visibly
-/// shifted the pills sideways. `center` now holds only
-/// [`workspace_pills`] — see that function's own doc comment — so this
-/// group needed a new home; `start` already reads left-to-right before the
-/// pills, same position it held inside the old `center`.
-fn leftcenter_modules(bar_name: &str) -> Vec<Value> {
+/// Resource-monitor block (statusbar-layout.md §3.4): cpu, memory, docker,
+/// battery, claudebar — one glance-only "is this machine healthy" group,
+/// general to specific. Renamed from `leftcenter_modules` (T23): `music`
+/// moved out to `audio_modules` (§3.6, grouped with volume/mic instead —
+/// proximity by domain, not by original waybar slot), and this group's home
+/// row changed from `start` to `end` (see `end_modules()`'s own doc comment)
+/// — waybar's own `group/leftcenter` order this once mirrored no longer
+/// applies to either its position or its membership.
+fn resource_modules(bar_name: &str) -> Vec<Value> {
     let mut m = cpu_modules(bar_name);
     m.push(docker_module(bar_name));
     m.extend(power_modules(bar_name));
     m.push(claudebar_module(bar_name));
-    m.push(music_module());
     m
 }
 
-/// The group that used to trail the workspace pills inside `center`
-/// (T8a's own `group/rightcenter`: clock, date, colorpicker, darkmode,
-/// snip, idle_inhibitor — config.jsonc:186). `build()` prepends this to
-/// [`end_modules`] on every per-monitor bar, so the group keeps its old
-/// position immediately right of the pills — `center` no longer carries it
-/// (see [`workspace_pills`]'s own doc comment for why), and `end` is the
-/// next slot to its right in reading order, same as before the move.
-fn rightcenter_modules(bar_name: &str) -> Vec<Value> {
+/// `center`'s whole content (statusbar-layout.md §3.2): clock, date, pomo —
+/// nothing else. T23 reverses T-next (item 3)'s decision to empty `center`
+/// down to the tag pills: that stage moved clock/date/pomo/colorpicker/
+/// darkmode/snip/inhibit out of `center` because the group carried 15
+/// modules of mixed width and GTK centres `center` as one block, so any of
+/// the other 6 changing width shifted the pills sideways. The tag pills
+/// moved to `start` instead this stage (see `start_modules()`'s own doc
+/// comment) — a fixed X for the pills no longer depends on `center` being
+/// pill-only, it depends on `start` anchoring them right after `spark`,
+/// which INV-4 (statusbar-layout.md) demands directly. `center` can hold
+/// the time block again because `time_modules()` is fixed-width on its own
+/// (INV-5/INV-6) — three modules, no variable-width member — not because
+/// `center` merely holds fewer things.
+fn time_modules(bar_name: &str) -> Vec<Value> {
     let mut m = clock_pill(bar_name);
     m.push(pomo_pill(bar_name));
-    m.push(colorpicker_module());
-    m.push(darkmode_module());
-    m.push(snip_module());
-    m.push(inhibit_module(bar_name));
     m
+}
+
+/// Tools drawer (statusbar-layout.md §3.5): one `custom` module whose `bar`
+/// nests a trigger label plus the three click-only, never-glanced buttons
+/// (colorpicker, darkmode, snip) that used to sit as separate always-visible
+/// pills — see this module's own doc comment below for the nesting
+/// mechanism. `inhibit` is deliberately NOT nested here; it stays a sibling
+/// module right after, taking the spec's own stated exception (keep-awake
+/// state needs to be glanceable, unlike the other three).
+fn tools_modules(bar_name: &str) -> Vec<Value> {
+    vec![tools_module(), inhibit_module(bar_name)]
 }
 
 /// T8c: `truncate` added (= config.jsonc:22's `max-length: 32`, dropped
@@ -431,19 +421,24 @@ fn window_module(bar_name: &str) -> Value {
     })
 }
 
-/// T8a: static click-only buttons and native window title, ported from
-/// config.jsonc's `modules-left` (`custom/spark`, `custom/window`).
-/// T9: `tray` moved OUT of this row and into `end_modules()`'s front — see
-/// that function's own doc comment for why.
+/// `start` row (statusbar-layout.md §3.1): launcher → tags → focus.
 ///
-/// T-next (item 3): [`leftcenter_modules`] appended here — see that
-/// function's own doc comment for why cpu/memory/docker/battery/claudebar/
-/// music moved out of `center`. `start` no longer matches waybar's own
-/// `modules-left` 1:1 (waybar kept that group in its own centre row); this
-/// bar's `center` is reserved for the workspace pills alone.
-fn start_modules(bar_name: &str) -> Vec<Value> {
-    let mut m = vec![spark_module(), window_module(bar_name)];
-    m.extend(leftcenter_modules(bar_name));
+/// T23: `mon_slug` (monitor name + its ws-var slug) is threaded through so
+/// [`workspace_pills`] can sit here, between `spark` and `win` — this
+/// reverses T-next (item 3)'s move of the tag pills into `center`; see
+/// `time_modules()`'s own doc comment for why that reversal is safe.
+/// `None` on the fallback bar (T0 spike S3's unlisted-output case: no
+/// monitor name/slug exists to build tag vars from), so the fallback bar
+/// renders `spark`/`win` with no tag block, same shape it already had.
+/// `win` stays last — INV-1 (statusbar-layout.md): it is the one
+/// unbounded-width field in this row, so it must sit at the growth end,
+/// displacing nothing to its left.
+fn start_modules(bar_name: &str, mon_slug: Option<(&str, &str)>) -> Vec<Value> {
+    let mut m = vec![spark_module()];
+    if let Some((mon, slug)) = mon_slug {
+        m.extend(workspace_pills(mon, slug));
+    }
+    m.push(window_module(bar_name));
     m
 }
 
@@ -625,7 +620,13 @@ fn pomo_pill(bar_name: &str) -> Value {
 /// since it is already proven to render in this environment.
 const NET_SPINNER_GLYPH: &str = "\u{f0aa5}";
 
-/// Volume/mic pills: T4 (see audio.rs). Bar-global, like `net_modules()` —
+/// Audio block (statusbar-layout.md §3.6): music, volume, mic — one domain
+/// by proximity/common region ("what's playing, and what is the machine
+/// doing with sound"). T23: `music_module()` moved here from `start`'s old
+/// `leftcenter_modules()`/`resource_modules()` group — see this function's
+/// own doc comment for why the resource block is machine-health only now.
+///
+/// Volume/mic: T4 (see audio.rs). Bar-global, like `net_modules()` —
 /// audio state is the same on every monitor. Click layout is a T4 design
 /// decision (IRONBAR.md has no hover tooltip, so the popup needs a click):
 /// left opens the popup (the detail that used to live under hover), right
@@ -646,6 +647,7 @@ const NET_SPINNER_GLYPH: &str = "\u{f0aa5}";
 /// the only popup content.
 fn audio_modules(bar_name: &str) -> Vec<Value> {
     vec![
+        music_module(),
         json!({
             "type": "custom",
             "name": "volume",
@@ -947,6 +949,14 @@ fn remote_module(bar_name: &str) -> Value {
 /// without bound and push `power` off the right edge of the screen (one of
 /// three unbounded-width causes found this stage; see `window_module()`
 /// and `build()`'s `"height"` for the other two).
+///
+/// T23: this cap is necessary but not sufficient for INV-1 (statusbar-
+/// layout.md) now that `music` sits mid-block in `audio_modules()`, not at
+/// a growth end — `truncate` bounds the MAX width but not the MIN, so an
+/// empty "nothing playing" string would still let `volume`/`mic` shift
+/// left of where they sit while a track is showing. `.music`'s own CSS
+/// `min-width` (style.css) closes that gap; this function only supplies
+/// the cap the CSS reserves against.
 fn music_module() -> Value {
     json!({
         "type": "music",
@@ -1055,18 +1065,23 @@ fn power_module() -> Value {
     })
 }
 
-/// Darkmode pill: T6b (see darkmode.rs). Bar-global. No popup (nothing to
-/// show beyond the icon itself — waybar's own tooltip was a fixed string
-/// too, config.jsonc:224); a static `tooltip` string is supported (ironbar
-/// schema: `tooltip` is `string|null`, only *dynamic* strings need
-/// `{{script}}` and aren't supported — a fixed string needs neither).
+/// Darkmode toggle: T6b (see darkmode.rs).
+///
+/// T23: was a standalone `custom` module; now a nested widget inside
+/// `tools_module()`'s own drawer — see that function's own doc comment for
+/// why nesting (not a separate sibling module) is what makes the drawer
+/// reachable. `show_if`/`transition_type` gate the reveal; the static
+/// `tooltip` is dropped (redundant once the icon is only ever seen already
+/// hover-revealed — ironbar schema: `tooltip` is `string|null`, only
+/// *dynamic* strings need `{{script}}`, but this one needs neither now).
 fn darkmode_module() -> Value {
     json!({
-        "type": "custom",
+        "type": "label",
         "name": "darkmode",
         "class": "darkmode",
-        "bar": [ { "type": "label", "label": "#dark_icon" } ],
-        "tooltip": "Toggle dark/light",
+        "label": "#dark_icon",
+        "show_if": "#tools_open",
+        "transition_type": "slide_start",
         "on_click_left": "~/.config/ironbar/scripts/darkmode.sh --toggle"
     })
 }
@@ -1080,13 +1095,17 @@ fn darkmode_module() -> Value {
 /// two families are patched from different source fonts with different
 /// vertical scaling. Checked with `pango-view --font="JetBrainsMono Nerd
 /// Font Propo"` before wiring in, same method as T18.
+///
+/// T23: nested inside `tools_module()`'s drawer — see `darkmode_module()`'s
+/// own doc comment above for why nesting, not a sibling module.
 fn colorpicker_module() -> Value {
     json!({
-        "type": "custom",
+        "type": "label",
         "name": "colorpicker",
         "class": "colorpicker",
-        "bar": [ { "type": "label", "label": "\u{f020b}" } ],
-        "tooltip": "Pick a color",
+        "label": "\u{f020b}",
+        "show_if": "#tools_open",
+        "transition_type": "slide_start",
         "on_click_left": "hyprpicker -a"
     })
 }
@@ -1108,16 +1127,71 @@ fn colorpicker_module() -> Value {
 /// user). Two buttons carry the two pointer-driven modes — region and
 /// window, both of which need the pointer next anyway — and the two
 /// pointer-free modes (active monitor, every output) stay on their
-/// config.conf keys, named in the tooltip so the split is discoverable.
+/// config.conf keys.
+///
+/// T23: nested inside `tools_module()`'s drawer — the discoverability the
+/// old tooltip text carried ("left: region, right: window...") is less
+/// critical now that reaching this icon at all already means the user
+/// hovered the drawer open; the two clicks themselves are unchanged.
 fn snip_module() -> Value {
     json!({
-        "type": "custom",
+        "type": "label",
         "name": "snip",
         "class": "snip",
-        "bar": [ { "type": "label", "label": "\u{f0e5a}" } ],
-        "tooltip": "Screenshot — left: region, right: window (monitor: Alt+S, all: Print)",
+        "label": "\u{f0e5a}",
+        "show_if": "#tools_open",
+        "transition_type": "slide_start",
         "on_click_left": "~/.config/mango/scripts/screenshot.sh region",
         "on_click_right": "~/.config/mango/scripts/screenshot.sh window"
+    })
+}
+
+/// The tools drawer itself (statusbar-layout.md §3.5): one `custom` module,
+/// collapsed to a single trigger icon at rest, revealing `colorpicker`/
+/// `darkmode`/`snip` on hover.
+///
+/// **Why nested widgets, not three sibling modules with their own
+/// `show_if`.** `show_if` and `on_mouse_enter`/`on_mouse_exit` are both
+/// module-/widget-level fields (`WidgetConfig`, `--print-schema`) — a
+/// top-level module gets them, but so does a widget nested inside another
+/// module's own `bar` array (already proven live in this file: `popup()`'s
+/// outer `box` carries `on_mouse_enter`/`on_mouse_exit` for `hover hold`/
+/// `release`, T22 item 1/4). If the trigger and its three revealed icons
+/// were separate TOP-LEVEL sibling modules in `end`, moving the pointer
+/// from the trigger onto a freshly-revealed sibling would cross a real GTK
+/// widget boundary — firing the trigger's own `on_mouse_exit`, closing the
+/// drawer out from under the pointer before it ever reaches the icon.
+/// Nesting all four under one module's `bar` means that crossing happens
+/// *inside* this module's own footprint; the module-level
+/// `on_mouse_enter`/`on_mouse_exit` below only fire when the pointer
+/// truly leaves the whole drawer, not on every internal hand-off between
+/// its children — the same guarantee `popup()`'s hold/release already
+/// relies on, applied here to a reveal instead of a popup.
+///
+/// State lives in the `tools_open` ironvar, set directly by `ironbar var
+/// set` from the module's own hover handlers — no daemon round trip: this
+/// is bar-local UI state with no collector behind it, unlike every other
+/// ironvar in this file.
+///
+/// Trigger glyph is a plain Unicode ellipsis (U+2026), not a Nerd Font
+/// icon — deliberately: every Nerd Font codepoint on this bar needed a
+/// live `pango-view` render check before being trusted (T8b/T15/T17/T18's
+/// repeated wrong-glyph bugs), and a plain punctuation mark already
+/// renders correctly through the base `* { font-family }` stack with zero
+/// new verification needed.
+fn tools_module() -> Value {
+    json!({
+        "type": "custom",
+        "name": "tools",
+        "class": "tools",
+        "bar": [ { "type": "box", "orientation": "horizontal", "widgets": [
+            { "type": "label", "class": "tools-trigger", "label": "\u{2026}" },
+            colorpicker_module(),
+            darkmode_module(),
+            snip_module()
+        ] } ],
+        "on_mouse_enter": "ironbar var set tools_open true",
+        "on_mouse_exit": "ironbar var set tools_open false"
     })
 }
 
@@ -1401,11 +1475,11 @@ mod tests {
     fn toggle_popup_targets_the_monitors_own_bar_name() {
         let cfg = build(&["eDP-1".to_string()]);
         assert_eq!(cfg["monitors"]["eDP-1"]["name"], json!("bar-eDP-1"));
-        // T8d: center[0] is no longer a workspace pill — leftcenter_modules()
-        // now precedes the workspace pills, so find the first tag pill by
-        // its known name instead of assuming an index.
-        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
-        let ws1 = center
+        // T23: the tag pills live in `start` now, between spark and win —
+        // see `start_modules()`'s own doc comment. Find the first tag pill
+        // by its known name rather than assuming an index.
+        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
+        let ws1 = start
             .iter()
             .find(|m| m["name"] == ws_module("eDP-1", 1))
             .unwrap();
@@ -1453,16 +1527,15 @@ mod tests {
 
     #[test]
     fn battery_hover_targets_its_own_bar_name_and_drops_the_click_toggle() {
-        // T8d: battery moved from `end` to `center` (leftcenter_modules).
         // T-hover: see volume_hover_targets_its_own_bar_name_and_drops_the_
         // click_toggle — same shape.
         // T15: on_click_left is powermode toggle now, moved from middle;
         // right stays untouched.
-        // T-next (item 3): `center` renamed to `start` — see
-        // `leftcenter_modules()`'s own doc comment.
+        // T23: `battery` is part of `resource_modules()`, which lives in
+        // `end` now — see that function's own doc comment.
         let cfg = build(&["eDP-1".to_string()]);
-        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
-        let battery = start.iter().find(|m| m["name"] == "battery").unwrap();
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let battery = end.iter().find(|m| m["name"] == "battery").unwrap();
         assert!(battery["on_mouse_enter"]
             .as_str()
             .unwrap()
@@ -1479,8 +1552,8 @@ mod tests {
         assert!(battery["on_click_right"].is_string());
 
         let fallback = build(&[]);
-        let fb_start = fallback["start"].as_array().unwrap();
-        let fb_battery = fb_start.iter().find(|m| m["name"] == "battery").unwrap();
+        let fb_end = fallback["end"].as_array().unwrap();
+        let fb_battery = fb_end.iter().find(|m| m["name"] == "battery").unwrap();
         assert!(fb_battery["on_mouse_enter"]
             .as_str()
             .unwrap()
@@ -1506,45 +1579,92 @@ mod tests {
     }
 
     #[test]
-    fn cpu_memory_docker_battery_claudebar_music_sit_at_the_back_of_start() {
-        // T8d: waybar's own `group/leftcenter` order (config.jsonc:26-29).
-        // T-next (item 3): moved again, from the front of `center` to the
-        // back of `start` (after spark/win) — see `leftcenter_modules()`'s
-        // own doc comment for why `center` had to lose this group.
-        // `claudebar` (T6c) sits in the same slot waybar's own module list
-        // gives it, between battery and mpris/music.
+    fn start_holds_only_spark_tags_and_win_no_ambient_modules() {
+        // T23: `start` is launcher -> tags -> focus only (statusbar-layout.md
+        // §3.1) — the resource-monitor group moved to `end` (see
+        // `resource_modules()`'s own doc comment), reversing T-next (item
+        // 3)'s move of that group INTO `start`. Regression guard: none of
+        // them may still be here.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let names: Vec<&str> = start.iter().map(|m| m["name"].as_str().unwrap()).collect();
-        let win = names.iter().position(|n| *n == "win").unwrap();
+        assert_eq!(names.first(), Some(&"spark"));
+        assert_eq!(names.last(), Some(&"win"));
+        for name in ["cpu", "memory", "docker", "battery", "claudebar", "music"] {
+            assert!(
+                !names.contains(&name),
+                "{name} must not still be in start"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_memory_docker_battery_claudebar_sit_together_in_end() {
+        // T23: the resource block (statusbar-layout.md §3.4) — general to
+        // specific: cpu -> memory -> docker -> battery -> claudebar. `music`
+        // is deliberately absent: it moved to `audio_modules()` instead (see
+        // that function's own doc comment) — grouped with volume/mic by
+        // domain, not kept alongside the machine-health pills.
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
+        let tray = names.iter().position(|n| *n == "tray").unwrap();
         let cpu = names.iter().position(|n| *n == "cpu").unwrap();
         let memory = names.iter().position(|n| *n == "memory").unwrap();
         let docker = names.iter().position(|n| *n == "docker").unwrap();
         let battery = names.iter().position(|n| *n == "battery").unwrap();
         let claudebar = names.iter().position(|n| *n == "claudebar").unwrap();
-        let music = names.iter().position(|n| *n == "music").unwrap();
-        assert!(win < cpu, "leftcenter must follow spark/win in start");
-        assert!(
-            cpu < memory
-                && memory < docker
-                && docker < battery
-                && battery < claudebar
-                && claudebar < music
-        );
+        assert!(tray < cpu, "resource block must follow tray in end");
+        assert!(cpu < memory && memory < docker && docker < battery && battery < claudebar);
     }
 
     #[test]
-    fn end_no_longer_carries_the_leftcenter_modules() {
-        // T8d regression guard: these five must not still be in `end`.
+    fn all_36_modules_survive_the_reorder() {
+        // Conservation check (statusbar-layout.md's own acceptance
+        // criterion): a reorder must never silently drop a pill. Every name
+        // present in the OLD start/center/end shape (T22, before T23) must
+        // still be present somewhere in the new one, and the total count
+        // must stay 36 for a two-monitor build (9 tags + 1 overview, times
+        // 2 monitors, plus the 16 bar-global/static modules).
         let cfg = build(&["eDP-1".to_string()]);
+        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
+        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        for name in ["cpu", "memory", "docker", "battery", "claudebar", "music"] {
-            assert!(
-                !end.iter().any(|m| m["name"] == name),
-                "{name} must have moved to start, not stayed in end"
-            );
+        let mut names = HashSet::new();
+        collect_module_names(&json!({"start": start, "center": center, "end": end}), &mut names);
+        let expected = [
+            "spark", "win", "clock", "date", "pomo", "tray", "cpu", "memory", "docker", "battery",
+            "claudebar", "tools", "colorpicker", "darkmode", "snip", "inhibit", "music", "volume",
+            "mic", "net-spinner", "wifi", "eth", "netsec", "hotspot", "remote", "bluetooth",
+            "power",
+        ];
+        for name in expected {
+            assert!(names.contains(name), "{name} missing after reorder");
         }
+        for tag in 1..=TAG_COUNT {
+            assert!(names.contains(&ws_module("eDP-1", tag)));
+        }
+        assert!(names.contains(&ws_module_ov("eDP-1")));
+        // 27 named non-tag modules + 9 tags + 1 overview = 37 names, but
+        // `tools` itself has no popup/module content beyond its own name —
+        // it is real, so the raw count is 37, not 36; the "36 visible
+        // modules" claim in statusbar-layout.md counts the drawer as one
+        // slot, not two (trigger + itself). Assert the real, larger set
+        // size instead of restating that approximation as a second source
+        // of truth.
+        assert_eq!(names.len(), 37);
     }
+
+    // T23: `end_no_longer_carries_the_leftcenter_modules` (a T8d regression
+    // guard against cpu/memory/docker/battery/claudebar/music living in
+    // `end`) removed outright, not inverted — its own premise is now
+    // backwards by design (`resource_modules()`/`audio_modules()` put them
+    // back in `end` on purpose). Superseded by
+    // `cpu_memory_docker_battery_claudebar_sit_together_in_end` (positive:
+    // they ARE in `end`, in order) and
+    // `start_holds_only_spark_tags_and_win_no_ambient_modules` (negative:
+    // they are NOT in `start`) — together a strict superset of what this
+    // test checked, so nothing is lost by removing it.
 
     #[test]
     fn hotspot_sits_after_net_pills_in_end() {
@@ -1558,14 +1678,13 @@ mod tests {
 
     #[test]
     fn docker_hover_targets_its_own_bar_name_and_drops_the_click_toggle() {
-        // T8d: docker moved from `end` to `center` (leftcenter_modules).
-        // T-next (item 3): `center` renamed to `start` — see
-        // `leftcenter_modules()`'s own doc comment.
+        // T23: `docker` is part of `resource_modules()`, which lives in
+        // `end` now — see that function's own doc comment.
         // T-hover: plain toggle-popup on_click_left is gone — right-click
         // (docker-menu.sh) stays untouched.
         let cfg = build(&["eDP-1".to_string()]);
-        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
-        let docker = start.iter().find(|m| m["name"] == "docker").unwrap();
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let docker = end.iter().find(|m| m["name"] == "docker").unwrap();
         assert!(docker.get("on_click_left").is_none());
         assert!(docker["on_mouse_enter"]
             .as_str()
@@ -1581,8 +1700,8 @@ mod tests {
         );
 
         let fallback = build(&[]);
-        let fb_start = fallback["start"].as_array().unwrap();
-        let fb_docker = fb_start.iter().find(|m| m["name"] == "docker").unwrap();
+        let fb_end = fallback["end"].as_array().unwrap();
+        let fb_docker = fb_end.iter().find(|m| m["name"] == "docker").unwrap();
         assert!(fb_docker["on_mouse_enter"]
             .as_str()
             .unwrap()
@@ -1591,11 +1710,11 @@ mod tests {
 
     #[test]
     fn claudebar_popup_targets_its_own_bar_name() {
-        // T-next (item 3): `center` renamed to `start` — see
-        // `leftcenter_modules()`'s own doc comment.
+        // T23: `claudebar` is part of `resource_modules()`, which lives in
+        // `end` now — see that function's own doc comment.
         let cfg = build(&["eDP-1".to_string()]);
-        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
-        let claudebar = start.iter().find(|m| m["name"] == "claudebar").unwrap();
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let claudebar = end.iter().find(|m| m["name"] == "claudebar").unwrap();
         assert!(claudebar.get("on_click_left").is_none());
         assert!(claudebar["on_mouse_enter"]
             .as_str()
@@ -1607,8 +1726,8 @@ mod tests {
         );
 
         let fallback = build(&[]);
-        let fb_start = fallback["start"].as_array().unwrap();
-        let fb_claudebar = fb_start.iter().find(|m| m["name"] == "claudebar").unwrap();
+        let fb_end = fallback["end"].as_array().unwrap();
+        let fb_claudebar = fb_end.iter().find(|m| m["name"] == "claudebar").unwrap();
         assert!(fb_claudebar["on_mouse_enter"]
             .as_str()
             .unwrap()
@@ -1642,37 +1761,40 @@ mod tests {
     }
 
     #[test]
-    fn darkmode_appears_once_per_monitor_and_on_the_fallback_bar() {
-        // T-next (item 3): darkmode is part of `rightcenter_modules()`,
-        // which lives in `end` on a real per-monitor bar now (the fallback
-        // bar below has no pill group to protect, so it keeps this group in
-        // `center` — see `rightcenter_modules()`'s own doc comment).
+    fn tools_drawer_holds_darkmode_and_reveals_it_on_the_tools_open_var() {
+        // T23: darkmode moved into `tools_module()`'s nested drawer — see
+        // that function's own doc comment for the nesting mechanism and why
+        // it replaces darkmode's old life as a standalone sibling module.
+        // Real per-monitor bar and the fallback bar both get one.
         let cfg = build(&["eDP-1".to_string(), "DP-1".to_string()]);
         for mon in ["eDP-1", "DP-1"] {
             let end = cfg["monitors"][mon]["end"].as_array().unwrap();
-            let count = end.iter().filter(|m| m["name"] == "darkmode").count();
-            assert_eq!(count, 1, "{mon} must have exactly one darkmode module");
+            let tools = end.iter().find(|m| m["name"] == "tools").unwrap();
+            let widgets = tools["bar"][0]["widgets"].as_array().unwrap();
+            let darkmode = widgets.iter().find(|w| w["name"] == "darkmode").unwrap();
+            assert_eq!(darkmode["show_if"], json!("#tools_open"));
         }
         let fallback = build(&[]);
-        let fb_center = fallback["center"].as_array().unwrap();
-        assert!(fb_center.iter().any(|m| m["name"] == "darkmode"));
+        let fb_end = fallback["end"].as_array().unwrap();
+        let fb_tools = fb_end.iter().find(|m| m["name"] == "tools").unwrap();
+        let fb_widgets = fb_tools["bar"][0]["widgets"].as_array().unwrap();
+        assert!(fb_widgets.iter().any(|w| w["name"] == "darkmode"));
     }
 
     // ---- T7a additions
 
     #[test]
     fn cpu_and_memory_hover_targets_its_own_bar_name_and_drops_the_click_toggle() {
-        // T8d: cpu/memory moved from `end` to `center` (leftcenter_modules).
-        // T-next (item 3): `center` renamed to `start` — see
-        // `leftcenter_modules()`'s own doc comment.
+        // T23: `cpu`/`memory` are part of `resource_modules()`, which lives
+        // in `end` now — see that function's own doc comment.
         // T-hover: the refresh-then-toggle-popup on_click_left is gone —
         // hover carries the bar name instead (main.rs's hover state machine
         // runs the cpu-detail/mem-detail refresh before opening).
         // T15: btop moved from middle- to left-click.
         let cfg = build(&["eDP-1".to_string()]);
-        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         for name in ["cpu", "memory"] {
-            let module = start.iter().find(|m| m["name"] == name).unwrap();
+            let module = end.iter().find(|m| m["name"] == name).unwrap();
             assert!(module["on_mouse_enter"]
                 .as_str()
                 .unwrap()
@@ -1696,8 +1818,8 @@ mod tests {
         }
 
         let fallback = build(&[]);
-        let fb_start = fallback["start"].as_array().unwrap();
-        let fb_cpu = fb_start.iter().find(|m| m["name"] == "cpu").unwrap();
+        let fb_end = fallback["end"].as_array().unwrap();
+        let fb_cpu = fb_end.iter().find(|m| m["name"] == "cpu").unwrap();
         assert!(fb_cpu["on_mouse_enter"]
             .as_str()
             .unwrap()
@@ -1720,12 +1842,12 @@ mod tests {
         // `toggle-popup`, so it does not reopen the collision this test
         // guards against; only `clock` (no left-click action of its own) is
         // checked for the absence.
-        // T-next (item 3): `clock`/`date` are part of `rightcenter_modules()`,
-        // which lives in `end` on a real per-monitor bar now — see that
-        // function's own doc comment.
+        // T23: `clock`/`date` are `time_modules()`'s own content, which
+        // lives in `center` on every bar now (this reverses T-next item 3's
+        // move into `end` — see `time_modules()`'s own doc comment).
         let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let clock = end.iter().find(|m| m["name"] == "clock").unwrap();
+        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
+        let clock = center.iter().find(|m| m["name"] == "clock").unwrap();
         assert!(
             clock.get("on_click_left").is_none(),
             "clock must not carry on_click_left"
@@ -1737,7 +1859,7 @@ mod tests {
         // `popup()` adds for any keyed tip on top of that.
         let expected_len = [("clock", 3), ("date", 5)];
         for (name, len) in expected_len {
-            let module = end.iter().find(|m| m["name"] == name).unwrap();
+            let module = center.iter().find(|m| m["name"] == name).unwrap();
             let enter = module["on_mouse_enter"].as_str().unwrap();
             assert!(enter.contains("bar-eDP-1"));
             assert!(enter.contains(&format!("hover enter bar-eDP-1 {name}")));
@@ -1759,11 +1881,11 @@ mod tests {
     fn date_left_click_opens_the_calendar_app() {
         // T15: moved from middle- to left-click — middle-click retired
         // bar-wide.
-        // T-next (item 3): `date` is part of `rightcenter_modules()`, which
-        // lives in `end` on a real per-monitor bar now.
+        // T23: `date` is `time_modules()`'s own content, in `center` on
+        // every bar now.
         let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let date = end.iter().find(|m| m["name"] == "date").unwrap();
+        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
+        let date = center.iter().find(|m| m["name"] == "date").unwrap();
         assert_eq!(
             date["on_click_left"],
             json!("~/.config/ironbar/scripts/clock.sh --calendar")
@@ -1774,50 +1896,58 @@ mod tests {
     // ---- T8a additions: tray, bluetooth, music, inhibit, static buttons.
 
     #[test]
-    fn tray_leads_its_own_group_in_end() {
-        // T9: moved back to `end`, matching waybar's own
-        // `modules-right = [tray, group/indicators]` order — see
-        // `end_modules()`'s doc comment for why the box-nesting risk that
-        // originally justified `start` (T8a Phase 2) never applied to tray
-        // (it has no popup).
-        //
-        // T-next (item 3): tray no longer leads `end` as a whole — build()
-        // prepends `rightcenter_modules()` (clock/pomo/colorpicker/
-        // darkmode/snip/inhibit) ahead of `end_modules()`'s own return
-        // value, so those lead the row instead. Tray still leads its own
-        // sub-group (volume/net/hotspot/bluetooth/power), which is what
-        // `end_modules()` itself controls.
+    fn tray_leads_end_and_the_resource_block_follows() {
+        // T23: `end` is now tray -> resources -> tools -> audio ->
+        // connectivity -> session (statusbar-layout.md §3.3-3.8) — see
+        // `end_modules()`'s own doc comment. Tray leads the WHOLE row now,
+        // not just its own sub-group, since `center` carries the time
+        // block instead of `end` borrowing it.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         assert!(!start.iter().any(|m| m["name"] == "tray"));
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
-        let tray = names.iter().position(|n| *n == "tray").unwrap();
+        assert_eq!(names.first(), Some(&"tray"));
+        let cpu = names.iter().position(|n| *n == "cpu").unwrap();
         let volume = names.iter().position(|n| *n == "volume").unwrap();
-        assert!(tray < volume, "tray must lead its own group, ahead of volume");
+        assert!(cpu < volume, "resources must precede audio in end");
     }
 
     #[test]
-    fn spark_precedes_window_in_start() {
-        // T9: tray no longer lives here — see tray_leads_its_own_group_in_end.
-        // T-next (item 3): leftcenter_modules() now trails spark/win in
-        // start — see that function's own doc comment — so `start` no
-        // longer stops at exactly these two.
+    fn spark_leads_start_tags_follow_win_is_last() {
+        // T23: the tag pills moved back into `start`, between `spark` and
+        // `win` (statusbar-layout.md §3.1 — reverses T-next item 3's move
+        // into `center`; see `start_modules()`'s own doc comment). `win`
+        // stays last: it is the one unbounded-width field, INV-1's growth
+        // end.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let names: Vec<&str> = start.iter().map(|m| m["name"].as_str().unwrap()).collect();
-        assert_eq!(&names[..2], &["spark", "win"]);
+        assert_eq!(names.first(), Some(&"spark"));
+        assert_eq!(names.last(), Some(&"win"));
+        let spark = names.iter().position(|n| *n == "spark").unwrap();
+        let ws1 = names
+            .iter()
+            .position(|n| *n == ws_module("eDP-1", 1))
+            .unwrap();
+        let win = names.iter().position(|n| *n == "win").unwrap();
+        assert!(spark < ws1 && ws1 < win);
 
         let fallback = build(&[]);
         let fb_start = fallback["start"].as_array().unwrap();
         assert!(fb_start.iter().any(|m| m["name"] == "spark"));
+        assert!(
+            !fb_start.iter().any(|m| m["name"] == ws_module("eDP-1", 1)),
+            "fallback bar has no monitor slug to build tag pills from"
+        );
     }
 
     #[test]
-    fn bluetooth_and_power_land_in_end() {
-        // T8d: music moved to `center` (leftcenter_modules) alongside
-        // battery, matching waybar's own layout — only bluetooth/power (plus
-        // hotspot, checked separately) stay in `end` from this trio.
+    fn bluetooth_and_power_land_at_the_end_of_end() {
+        // T23: connectivity -> session is still the tail of `end`
+        // (statusbar-layout.md §3.7-3.8) — `music` lives in `audio_modules()`
+        // now (see that function's own doc comment), so it's absent from
+        // this specific trailing check.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
@@ -1825,8 +1955,7 @@ mod tests {
         let bluetooth = names.iter().position(|n| *n == "bluetooth").unwrap();
         let power = names.iter().position(|n| *n == "power").unwrap();
         assert!(hotspot < bluetooth && bluetooth < power);
-        // power is the last module of the last row, matching waybar's own
-        // placement (config.jsonc:273's comment).
+        // power is the last module of the last row — INV-3's corner target.
         assert_eq!(names.last(), Some(&"power"));
     }
 
@@ -1869,39 +1998,57 @@ mod tests {
     }
 
     #[test]
-    fn colorpicker_darkmode_snip_inhibit_follow_clock_date() {
-        // T-next (item 3): this whole group is `rightcenter_modules()`,
-        // which lives in `end` on a real per-monitor bar now.
+    fn tools_drawer_nests_colorpicker_snip_in_reading_order_inhibit_follows_outside() {
+        // T23: colorpicker/darkmode/snip moved from standalone sibling
+        // modules into `tools_module()`'s own nested drawer (statusbar-
+        // layout.md §3.5) — see that function's own doc comment for why
+        // nesting, not separate modules with their own `show_if`, is what
+        // makes the drawer reachable. `inhibit` stays a real sibling module
+        // right after `tools`, taking the spec's own stated exception.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        // T8c: clock_pill() now returns two NAMED modules ("clock", "date")
-        // instead of one unnamed "pill" module — find date by name.
         let names: Vec<Option<&str>> = end.iter().map(|m| m["name"].as_str()).collect();
-        let clock = names.iter().position(|n| *n == Some("clock")).unwrap();
-        let date = names.iter().position(|n| *n == Some("date")).unwrap();
-        let colorpicker = names
+        let tools = names.iter().position(|n| *n == Some("tools")).unwrap();
+        let inhibit = names.iter().position(|n| *n == Some("inhibit")).unwrap();
+        assert!(tools < inhibit, "inhibit must follow the tools drawer");
+        assert!(
+            !names.contains(&Some("colorpicker")),
+            "colorpicker must not be a top-level sibling module any more"
+        );
+        assert!(
+            !names.contains(&Some("darkmode")),
+            "darkmode must not be a top-level sibling module any more"
+        );
+        assert!(
+            !names.contains(&Some("snip")),
+            "snip must not be a top-level sibling module any more"
+        );
+
+        let tools_module = end.iter().find(|m| m["name"] == "tools").unwrap();
+        let widgets = tools_module["bar"][0]["widgets"].as_array().unwrap();
+        let widget_names: Vec<Option<&str>> = widgets.iter().map(|w| w["name"].as_str()).collect();
+        let colorpicker = widget_names
             .iter()
             .position(|n| *n == Some("colorpicker"))
             .unwrap();
-        let darkmode = names.iter().position(|n| *n == Some("darkmode")).unwrap();
-        let snip = names.iter().position(|n| *n == Some("snip")).unwrap();
-        let inhibit = names.iter().position(|n| *n == Some("inhibit")).unwrap();
-        assert!(
-            clock < date
-                && date < colorpicker
-                && colorpicker < darkmode
-                && darkmode < snip
-                && snip < inhibit
-        );
-
-        let fallback = build(&[]);
-        let fb_center = fallback["center"].as_array().unwrap();
-        for name in ["colorpicker", "darkmode", "snip", "inhibit"] {
-            assert!(
-                fb_center.iter().any(|m| m["name"] == name),
-                "fallback bar missing {name}"
+        let darkmode = widget_names
+            .iter()
+            .position(|n| *n == Some("darkmode"))
+            .unwrap();
+        let snip = widget_names.iter().position(|n| *n == Some("snip")).unwrap();
+        assert!(colorpicker < darkmode && darkmode < snip);
+        for w in &widgets[1..] {
+            assert_eq!(
+                w["show_if"],
+                json!("#tools_open"),
+                "every drawer child but the trigger must gate on tools_open"
             );
         }
+
+        let fallback = build(&[]);
+        let fb_end = fallback["end"].as_array().unwrap();
+        assert!(fb_end.iter().any(|m| m["name"] == "tools"));
+        assert!(fb_end.iter().any(|m| m["name"] == "inhibit"));
     }
 
     #[test]
@@ -1936,18 +2083,14 @@ mod tests {
 
     #[test]
     fn native_modules_carry_their_own_class() {
-        // T-next (item 3): `music` is part of `leftcenter_modules()`, which
-        // lives in `start` now — see that function's own doc comment.
+        // T23: `music` is part of `audio_modules()`, which lives in `end`
+        // now (grouped with volume/mic — see that function's own doc
+        // comment), not `start`.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
-        for (row, name, expect_type) in [
-            (start, "music", "music"),
-            (end, "bluetooth", "bluetooth"),
-            (end, "tray", "tray"),
-        ] {
-            let m = row.iter().find(|m| m["name"] == name).unwrap();
-            assert_eq!(m["type"], json!(expect_type));
+        for name in ["music", "bluetooth", "tray"] {
+            let m = end.iter().find(|m| m["name"] == name).unwrap();
+            assert_eq!(m["type"], json!(name));
             assert_eq!(m["class"], json!(name));
         }
     }
@@ -2001,23 +2144,23 @@ mod tests {
         }
 
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
-        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
 
         let win = start.iter().find(|m| m["name"] == "win").unwrap();
         assert!(win["tooltip"].is_string());
-        // T-next (item 3): `music` is part of `leftcenter_modules()`, which
-        // lives in `start` now.
-        let music = start.iter().find(|m| m["name"] == "music").unwrap();
+        // T23: `music` is part of `audio_modules()`, which lives in `end`
+        // now (grouped with volume/mic — see that function's own doc
+        // comment), not `start`.
+        let music = end.iter().find(|m| m["name"] == "music").unwrap();
         assert!(music["tooltip"].is_string(), "music missing a tooltip");
         // T19: wifi/eth/netsec moved out of this group — see below.
         let mic = end.iter().find(|m| m["name"] == "mic").unwrap();
         assert!(mic["tooltip"].is_string(), "mic missing a tooltip");
 
-        // T-next (item 3): all five are part of `leftcenter_modules()`,
-        // which lives in `start` now.
+        // T23: all five are part of `resource_modules()`, which lives in
+        // `end` now — see that function's own doc comment.
         for name in ["cpu", "memory", "docker", "battery", "claudebar"] {
-            let m = start.iter().find(|m| m["name"] == name).unwrap();
+            let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert!(
                 m["tooltip"].is_null(),
                 "{name} should have lost its tooltip"
@@ -2033,7 +2176,9 @@ mod tests {
                 "{name} should have lost its tooltip"
             );
         }
-        let ws1 = center
+        // T23: tags live in `start` now — see `start_modules()`'s own doc
+        // comment.
+        let ws1 = start
             .iter()
             .find(|m| m["name"] == ws_module("eDP-1", 1))
             .unwrap();
@@ -2050,15 +2195,16 @@ mod tests {
         // The plan's own exhaustive "modules to convert" list: every module
         // that already had a `popup` field, except `window` (left out of
         // the plan's own list — see the stage's IRONBAR.md entry).
-        // T-next (item 3): cpu/memory/docker/battery/claudebar are part of
-        // `leftcenter_modules()` (now in `start`); clock/date/pomo are part
-        // of `rightcenter_modules()` (now in `end` on a real per-monitor
-        // bar) — see both functions' own doc comments.
+        // T23: cpu/memory/docker/battery/claudebar are part of
+        // `resource_modules()` (now in `end`); clock/date/pomo are part of
+        // `time_modules()` (now in `center` on every bar) — see both
+        // functions' own doc comments.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
+        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         for name in ["cpu", "memory", "docker", "battery", "claudebar"] {
-            let m = start.iter().find(|m| m["name"] == name).unwrap();
+            let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert!(
                 m["on_mouse_enter"].is_string(),
                 "{name} missing on_mouse_enter"
@@ -2069,7 +2215,7 @@ mod tests {
             );
         }
         for name in ["clock", "date", "pomo"] {
-            let m = end.iter().find(|m| m["name"] == name).unwrap();
+            let m = center.iter().find(|m| m["name"] == name).unwrap();
             assert!(
                 m["on_mouse_enter"].is_string(),
                 "{name} missing on_mouse_enter"
@@ -2100,10 +2246,10 @@ mod tests {
             bluetooth["on_mouse_enter"].is_string(),
             "bluetooth missing on_mouse_enter"
         );
-        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
+        // T23: tags live in `start` now.
         for n in 1..=TAG_COUNT {
             let module = ws_module("eDP-1", n);
-            let m = center.iter().find(|m| m["name"] == module).unwrap();
+            let m = start.iter().find(|m| m["name"] == module).unwrap();
             assert!(
                 m["on_mouse_enter"].is_string(),
                 "{module} missing on_mouse_enter"
@@ -2113,12 +2259,33 @@ mod tests {
                 "{module} missing on_mouse_exit"
             );
         }
+        // T23: the tools drawer itself is hover-eligible too, but not for a
+        // popup — it toggles `tools_open`, revealing/hiding its own nested
+        // children (see `tools_module()`'s own doc comment). Checked here,
+        // not folded into the popup-based loops above, since it has no
+        // `popup` field at all.
+        let tools = end.iter().find(|m| m["name"] == "tools").unwrap();
+        assert_eq!(tools["on_mouse_enter"], json!("ironbar var set tools_open true"));
+        assert_eq!(tools["on_mouse_exit"], json!("ironbar var set tools_open false"));
     }
 
     #[test]
     fn non_popup_modules_carry_no_mouse_attributes() {
         // A pill with no `popup` field has nothing to show — hover there
         // must stay a no-op, so these must carry neither attribute.
+        //
+        // T23: `colorpicker`/`snip`/`darkmode` dropped from this list — they
+        // are no longer top-level modules at all (nested inside `tools`'s
+        // own drawer, see `tools_module()`'s own doc comment), so a
+        // top-level `find` by name would panic, not fail meaningfully. Their
+        // own `show_if`/gating is checked by
+        // `tools_drawer_nests_colorpicker_snip_in_reading_order_inhibit_
+        // follows_outside` instead. `tools` itself is the one deliberate
+        // EXCEPTION to the invariant this test guards: it has no `popup`
+        // field yet legitimately carries both mouse attributes, because
+        // hover here toggles `tools_open` (a reveal), not a popup — checked
+        // separately in `every_hover_eligible_module_carries_both_mouse_
+        // attributes`, not asserted absent here.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
@@ -2135,15 +2302,7 @@ mod tests {
         // the native `inhibit` module (no popup) to a `custom` one with a
         // hover popup (inhibit_module()'s own doc comment) — checked by
         // inhibit_module_has_a_hover_popup below instead.
-        for name in [
-            "spark",
-            "power",
-            "colorpicker",
-            "snip",
-            "darkmode",
-            "mic",
-            "net-spinner",
-        ] {
+        for name in ["spark", "power", "mic", "net-spinner"] {
             let m = all
                 .iter()
                 .find(|m| m["name"] == name)
@@ -2173,11 +2332,11 @@ mod tests {
         // off the bar (still reachable as `mango-bard pomo reset -q` from
         // the CLI).
         //
-        // T-next (item 3): `pomo` is part of `rightcenter_modules()`, which
-        // lives in `end` on a real per-monitor bar now.
+        // T23: `pomo` is `time_modules()`'s own content, in `center` on
+        // every bar now.
         let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let pomo = end.iter().find(|m| m["name"] == "pomo").unwrap();
+        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
+        let pomo = center.iter().find(|m| m["name"] == "pomo").unwrap();
         assert_eq!(pomo["on_click_left"], json!("mango-bard pomo click -q"));
         assert!(pomo.get("on_click_middle").is_none());
         assert_eq!(pomo["on_click_right"], json!("mango-bard pomo mute -q"));
@@ -2207,14 +2366,14 @@ mod tests {
         // launch never sends `toggle-popup`, so it cannot race hover the
         // way the old refresh-then-toggle pattern could; the test below
         // checks for that string instead of requiring the key's absence.
-        // T-next (item 3): cpu/memory/docker/battery/claudebar are part of
-        // `leftcenter_modules()` (now in `start`); clock/date are part of
-        // `rightcenter_modules()` (now in `end` on a real per-monitor bar).
+        // T23: cpu/memory/docker/battery/claudebar are part of
+        // `resource_modules()` (now in `end`); clock/date are part of
+        // `time_modules()` (now in `center` on every bar).
         let cfg = build(&["eDP-1".to_string()]);
-        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
+        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         for name in ["cpu", "memory", "docker", "battery", "claudebar"] {
-            let m = start.iter().find(|m| m["name"] == name).unwrap();
+            let m = end.iter().find(|m| m["name"] == name).unwrap();
             if let Some(click) = m.get("on_click_left").and_then(|v| v.as_str()) {
                 assert!(
                     !click.contains("toggle-popup"),
@@ -2223,7 +2382,7 @@ mod tests {
             }
         }
         for name in ["clock", "date"] {
-            let m = end.iter().find(|m| m["name"] == name).unwrap();
+            let m = center.iter().find(|m| m["name"] == name).unwrap();
             if let Some(click) = m.get("on_click_left").and_then(|v| v.as_str()) {
                 assert!(
                     !click.contains("toggle-popup"),
@@ -2247,10 +2406,10 @@ mod tests {
         // still true, and worth pinning so a future edit that adds one
         // notices this test instead of sliding past it silently.
         for name in ["docker", "claudebar"] {
-            let m = start.iter().find(|m| m["name"] == name).unwrap();
+            let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert!(m.get("on_click_left").is_none());
         }
-        let clock = end.iter().find(|m| m["name"] == "clock").unwrap();
+        let clock = center.iter().find(|m| m["name"] == "clock").unwrap();
         assert!(clock.get("on_click_left").is_none());
         let bt = end.iter().find(|m| m["name"] == "bluetooth").unwrap();
         assert!(bt.get("on_click_left").is_none());
@@ -2263,9 +2422,10 @@ mod tests {
         // doc comment: it isn't in tension with hover (a different
         // gesture), so removing a working manual fallback for no reason
         // would not be the smallest diff.
+        // T23: tags live in `start` now.
         let cfg = build(&["eDP-1".to_string()]);
-        let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
-        let ws1 = center
+        let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
+        let ws1 = start
             .iter()
             .find(|m| m["name"] == ws_module("eDP-1", 1))
             .unwrap();

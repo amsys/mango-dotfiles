@@ -270,6 +270,7 @@ impl Pomo {
         self.count = count;
         self.distractions = distractions;
         self.task = task;
+        self.clamp_until(now()); // a stale or torn file can carry an out-of-range value
     }
 
     fn save(&self) {
@@ -629,6 +630,24 @@ impl Pomo {
         }
     }
 
+    /// Both meanings of `until` are bounded by the current phase length
+    /// (`Running`: a deadline no further out than one phase; `Pause`:
+    /// seconds left, never negative and never longer than the phase).
+    /// Clamping here rather than at each display site keeps every
+    /// downstream reader — bar text, tooltip meter, `resume_now`, the TSV
+    /// log — reading one already-valid value.
+    fn clamp_until(&mut self, n: i64) {
+        let len = self.cfg.phase_len(self.phase);
+        match self.state {
+            Run::Idle => {}
+            // High end only. A deadline already in the past is legitimate
+            // (daemon was down) and `catch_up`'s `while self.until <= n`
+            // loop must still see it to roll through every missed boundary.
+            Run::Running => self.until = self.until.min(n + len),
+            Run::Pause => self.until = self.until.clamp(0, len),
+        }
+    }
+
     /// Running -> Pause. Split out of `toggle_run_pause` so the `pause`
     /// control verb (mango-sleep-lock's pre-suspend call) can reach the same
     /// state change directly, guarded by its own `state == Run::Running`
@@ -636,6 +655,8 @@ impl Pomo {
     async fn pause_now(&mut self, n: i64, vars: &mut Vars) {
         self.until -= n; // becomes "seconds left"
         self.state = Run::Pause;
+        // A clock step or a late pause can leave `until` out of range.
+        self.clamp_until(n);
         // FOCUS.md §5.3: DND covers an active work block, not a paused
         // one — stepping away mid-block should not also silence everything
         // else indefinitely.
@@ -1068,6 +1089,40 @@ mod tests {
         let reply = p.control("pause", None, &mut vars).await;
         assert_eq!(reply, "ok");
         assert_eq!(p.state, Run::Pause);
+    }
+
+    // A pause taken after the deadline already passed (daemon lagging the
+    // timerfd boundary, or a CLOCK_REALTIME step across suspend) must not
+    // store a negative remaining — the pill would render "-2m" forever.
+    #[tokio::test]
+    async fn pause_after_deadline_clamps_remaining_to_zero() {
+        let mut p = pomo();
+        let mut vars = Vars::new();
+        p.state = Run::Running;
+        p.phase = Phase::Work;
+        p.until = 1000;
+        p.pause_now(1200, &mut vars).await; // 200s past the deadline
+        assert_eq!(p.until, 0, "remaining must clamp to zero, not go negative");
+    }
+
+    // A `Pause` state's stored remaining is bounded by its own phase length
+    // no matter how it got there (a stale/torn state file, a shorter
+    // MANGO_POMODORO reload) — `load()` calls this same clamp on every read
+    // rather than trusting the file. Exercised on `clamp_until` directly,
+    // not through `load()` itself: `load()`/`save()` share
+    // `$XDG_RUNTIME_DIR/mango-bard-pomo` with the real running daemon, and a
+    // test writing that file would race it.
+    #[test]
+    fn load_clamps_remaining_longer_than_the_phase() {
+        let mut p = pomo();
+        p.state = Run::Pause;
+        p.phase = Phase::Short; // phase_len = 300
+        p.until = 99_999; // absurdly long remaining
+        p.clamp_until(now());
+        assert_eq!(
+            p.until, 300,
+            "remaining must not exceed its own phase length"
+        );
     }
 
     // Idle and already-paused must both report "noop" and leave state

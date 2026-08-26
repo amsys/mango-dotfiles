@@ -4,10 +4,23 @@
 //! `set()` is the only writer and it compares against `live` first.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
+
+// ponytail: fixed cooldown, not exponential — a destroyed-output workspace
+// class fails forever until the output returns, so backoff shape doesn't
+// matter here. Revisit if a transient-failure case needs faster recovery.
+const RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 
 pub struct Vars {
     live: HashMap<Box<str>, Box<str>>,
     dirty: BTreeMap<Box<str>, Box<str>>,
+    /// Keys that just failed an IPC send, and when they become eligible for
+    /// another attempt. Without this, a permanently-failing key (e.g. a
+    /// workspace class for an output mango has destroyed) retries every
+    /// flush forever and starves every other dirty key behind it in `dirty`
+    /// — a `Module not found` reject on one output can lock the whole bar's
+    /// UI to stale state.
+    cooldown: HashMap<Box<str>, Instant>,
 }
 
 impl Vars {
@@ -15,6 +28,7 @@ impl Vars {
         Self {
             live: HashMap::new(),
             dirty: BTreeMap::new(),
+            cooldown: HashMap::new(),
         }
     }
 
@@ -41,17 +55,31 @@ impl Vars {
         self.live.get(key).map(|v| &**v)
     }
 
-    /// Takes the next dirty pair without removing it from `dirty` — the
-    /// caller (ipc::flush) removes on ACK and leaves it on failure, so a
-    /// send that never got a response naturally replays on the next flush.
+    /// Takes the next dirty pair that isn't cooling down from a prior
+    /// failure, without removing it from `dirty` — the caller (ipc::flush)
+    /// removes on ACK and leaves it on failure, so a send that never got a
+    /// response naturally replays once its cooldown elapses. Skipping past a
+    /// cooling-down key (rather than stopping at it) is what lets sibling
+    /// keys still flush every cycle.
     pub fn peek_dirty(&self) -> Option<(&str, &str)> {
-        self.dirty.iter().next().map(|(k, v)| (&**k, &**v))
+        let now = Instant::now();
+        self.dirty
+            .iter()
+            .find(|(k, _)| self.cooldown.get(*k).is_none_or(|&until| now >= until))
+            .map(|(k, v)| (&**k, &**v))
     }
 
     pub fn ack(&mut self, key: &str) {
         if let Some((k, v)) = self.dirty.remove_entry(key) {
+            self.cooldown.remove(&k);
             self.live.insert(k, v);
         }
+    }
+
+    /// Records a send failure for `key` so `peek_dirty` skips it until
+    /// `RETRY_COOLDOWN` elapses, instead of handing it back every flush.
+    pub fn back_off(&mut self, key: &str) {
+        self.cooldown.insert(key.into(), Instant::now() + RETRY_COOLDOWN);
     }
 
     /// Called when the ironbar socket's inode changes (restart detected) —
@@ -103,6 +131,31 @@ mod tests {
         v.mark_all_dirty();
         assert!(v.has_dirty());
         assert_eq!(v.peek_dirty(), Some(("k", "a")));
+    }
+
+    #[test]
+    fn back_off_skips_the_failing_key_but_not_its_siblings() {
+        // Regression test for the 2026-08-26 freeze: a permanently-failing
+        // key (workspace class for a destroyed output) must not block every
+        // other dirty key behind it in `dirty` forever.
+        let mut v = Vars::new();
+        v.set("a", "1");
+        v.set("b", "2");
+        assert_eq!(v.peek_dirty(), Some(("a", "1")));
+
+        v.back_off("a");
+        assert_eq!(
+            v.peek_dirty(),
+            Some(("b", "2")),
+            "cooling-down key must be skipped, not returned again"
+        );
+
+        v.ack("b");
+        assert_eq!(
+            v.peek_dirty(),
+            None,
+            "the cooling-down key must stay hidden until its cooldown elapses"
+        );
     }
 
     #[test]

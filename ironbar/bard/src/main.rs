@@ -342,7 +342,12 @@ async fn flush_vars(vars: &mut Vars, ipc: &mut IronbarIpc, stats: &mut Stats) {
             Err(e) => {
                 stats.ipc_errors += 1;
                 eprintln!("mango-bard: ipc error setting {k}: {e}");
-                break;
+                // Cool this key down instead of leaving it as the permanent
+                // head of `dirty` — otherwise a key that fails forever (e.g.
+                // a workspace class for an output mango has destroyed) wins
+                // `break` every flush and starves every sibling key behind
+                // it in the map (T-freeze-2026-08-26).
+                vars.back_off(&k);
             }
         }
     }
