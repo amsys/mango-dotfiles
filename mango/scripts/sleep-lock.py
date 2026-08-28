@@ -86,6 +86,7 @@ class SleepLock:
         self.timeout_id = None
         self.io_id = None
         self._t0 = 0.0
+        self.proc = None  # our own swaylock child, if we spawned it — see begin_sleep()
 
     # ------------------------------------------------------- logind inhibitor
 
@@ -179,6 +180,10 @@ class SleepLock:
             proc = subprocess.Popen(["swaylock", "--ready-fd", str(w)], pass_fds=(w,))
         finally:
             os.close(w)
+        # Keep the handle so _on_pid_exit can wait() it once the pidfd fires —
+        # a pidfd watch alone does not reap; an un-waited child stays a zombie
+        # for the life of this daemon, and pgrep (unlike pidof) matches zombies.
+        self.proc = proc
         self.ready_fd = r
         # Same watch as the "already running" branch above — without it,
         # only that branch ever fires _on_pid_exit, so owns_pause is never
@@ -249,6 +254,9 @@ class SleepLock:
 
     def _on_pid_exit(self, channel, condition, pfd):
         os.close(pfd)
+        if self.proc is not None:
+            self.proc.wait()  # pidfd already fired, so this cannot block
+            self.proc = None
         log("swaylock has exited — treating as unlocked")
         if self.owns_pause:
             self.unpause_pomodoro()
@@ -303,14 +311,18 @@ def selftest():
     assert inhibitor_count() == before, "inhibitor still held after release()"
 
     # The same pidfd + GLib.IOChannel plumbing `_watch_pid_for_unlock` uses,
-    # against a throwaway child instead of a real swaylock.
+    # against a throwaway child instead of a real swaylock. Routed through the
+    # real handler (not a standalone callback) so this also proves
+    # _on_pid_exit reaps its child — an unreaped pidfd-watched child is
+    # exactly how a stray zombie swaylock broke SUPER+L's `pgrep` guard.
     loop = GLib.MainLoop()
     fired = {}
     proc = subprocess.Popen(["sh", "-c", "sleep 0.2"])
+    handler.proc = proc
 
     def on_exit(channel, condition, pfd):
         fired["ok"] = True
-        os.close(pfd)
+        handler._on_pid_exit(channel, condition, pfd)
         loop.quit()
         return False
 
@@ -320,6 +332,8 @@ def selftest():
     GLib.timeout_add(3000, lambda: (loop.quit(), False)[1])
     loop.run()
     assert fired.get("ok"), "pidfd exit watch never fired"
+    assert handler.proc is None, "_on_pid_exit did not reap the child"
+    assert proc.returncode is not None, "child left as a zombie"
 
     print("ok")
 

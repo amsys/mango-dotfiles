@@ -33,7 +33,9 @@
 use crate::mango::CLASS_PREFIX;
 use crate::net::MonitorChild;
 use crate::powermode;
-use crate::tooltip::{bad, bar, barico_label, esc, grade, hdur, kv, kvsub, mono, set_titled, C_GOOD};
+use crate::tooltip::{
+    bad, bar, esc, grade, hdur, kv, kvsub, level_class, mono, set_titled, C_GOOD,
+};
 use crate::vars::Vars;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -48,63 +50,15 @@ fn class_key(module: &str) -> String {
 // printf byte sequences (battery.sh:46,66 — decoded and named here instead,
 // same idiom as net.rs's icon table).
 
-/// battery_charging_full, was U+E1A3 (Material Symbols).
-/// T8b: -> U+F1E6 (plug, JetBrainsMono Nerd Font Font Awesome) — GTK4
-/// cannot correctly rasterize Material Symbols Rounded's variable font on
-/// this system; see IRONBAR.md's T8b entry. The first two replacements
-/// tried (U+F0E7 and U+F427, both bolt/lightning glyphs) rendered as wrong
-/// CJK tofu live in ironbar despite being genuine Nerd Font codepoints —
-/// only U+F1E6 was confirmed working by an actual live-ironbar screenshot.
-/// T19: U+F1E6 -> U+F06A5 (md-power_plug) — one-icon-family sweep
-/// (IRONBAR.md T19); it no longer needs to also stand in for net.rs's
-/// `IC_ETH`, which kept its own distinct md-ethernet glyph throughout.
-const IC_CHG: char = '\u{f06a5}';
 /// energy_savings_leaf, was U+EC1A — the eco-mode marker on the bar icon.
 /// T8b: -> U+F1BB (mountain/tree, Nerd Font Font Awesome) — U+F06C (a
 /// literal leaf) rendered as wrong CJK tofu live in ironbar; U+F1BB was
-/// confirmed working by an actual live-ironbar screenshot. See IC_CHG's
-/// comment above and IRONBAR.md's T8b entry for why a Nerd Font source
-/// alone doesn't guarantee a correct GTK4 render.
+/// confirmed working by an actual live-ironbar screenshot. See
+/// IRONBAR.md's T8b entry for why a Nerd Font source alone doesn't
+/// guarantee a correct GTK4 render.
 /// T19: U+F1BB -> U+F032A (md-leaf, an actual leaf rather than a mountain)
 /// — one-icon-family sweep (IRONBAR.md T19).
 const IC_LEAF: char = '\u{f032a}';
-
-/// battery.sh:47-57 — battery_0_bar..battery_6_bar are not contiguous
-/// codepoints, hence the table rather than an offset.
-///
-/// T8b: the seven Material Symbols "battery_N_bar" glyphs this used to
-/// return all render as wrong CJK substitutes under GTK4 on this system
-/// (see IRONBAR.md's T8b entry). JetBrainsMono Nerd Font's Font Awesome
-/// range had only five distinct battery-level glyphs, so two adjacent
-/// buckets shared a glyph (1/2 and 5/6) — the actual `pct` was always shown
-/// as text next to the icon, so that lost only the icon's own resolution,
-/// not the underlying data.
-///
-/// T19: full resolution restored — `nf-md` has a complete seven-step
-/// battery ramp, so each of the seven `(pct+8)/17` buckets now gets its own
-/// glyph. Part of the one-icon-family sweep (IRONBAR.md T19).
-pub fn ic_bat(pct: i64) -> char {
-    match (pct + 8) / 17 {
-        0 => '\u{f008e}', // md-battery_outline
-        1 => '\u{f007a}', // md-battery_10
-        2 => '\u{f007c}', // md-battery_30
-        3 => '\u{f007e}', // md-battery_50
-        4 => '\u{f0080}', // md-battery_70
-        5 => '\u{f0082}', // md-battery_90
-        _ => '\u{f0079}', // md-battery (full)
-    }
-}
-
-/// battery.sh:393-396 — `Charging`/`Not charging` show the plug icon even
-/// though `Not charging` keeps the `discharging`/`critical` *class*
-/// ([`class_for`]) — ACPI can report "Not charging" while sitting at a
-/// charge ceiling with the cable in, which reads as plugged, not draining.
-pub fn icon_for(status: &str, charge: i64) -> char {
-    match status {
-        "Charging" | "Not charging" => IC_CHG,
-        _ => ic_bat(charge),
-    }
-}
 
 /// battery.sh:398-400 — `critical` at <=20% overrides `full`/`discharging`
 /// but never `charging`.
@@ -770,20 +724,30 @@ impl Power {
 
         let charge = readf_i64(&bat, "capacity").unwrap_or_else(|| pct(lv.now, lv.full));
         let health = pct(lv.full, lv.design);
-        let icon = icon_for(&status, charge);
         let class = class_for(&status, charge);
         self.discharging = status == "Discharging";
 
         let weak = is_weak_latched();
+        // T30: the bar glyph (battery-level icon + charging plug) is dropped
+        // — the `.gauge`+`.gauge-cap` pair now IS the battery on the bar (one
+        // battery shape, not a glyph next to a second, CSS-drawn one).
+        // Charging is signalled by `.battery.charging`'s own CSS animation
+        // (style.css, `class_for` below still pushes the class); the eco
+        // leaf is the only glyph left on this pill, so `bat_text` carries
+        // just that, with no leading space (nothing precedes it any more).
         let leaf = if pm_mode == powermode::Mode::Eco {
             format!(
-                " <span size=\"115%\" rise=\"-1200\"><span foreground=\"{}\">{IC_LEAF}</span></span>",
+                "<span size=\"115%\" rise=\"-1200\"><span foreground=\"{}\">{IC_LEAF}</span></span>",
                 crate::tooltip::C_GOOD
             )
         } else {
             String::new()
         };
-        let text = format!("{} {charge}%{leaf}", barico_label(icon));
+        // T29: `charge}%` dropped — the `.gauge`(+`.gauge-cap`) fill now
+        // carries the level on the bar, same reasoning as cpu/memory's own
+        // T28 digit drop. `charge` itself is still computed above; it only
+        // feeds the popup and the level class below now.
+        let text = leaf;
 
         let secs = remaining(lv.now, lv.full, lv.rate, &status);
         let total_w = watts_num(lv.rate, voltage.unwrap_or(0), lv.unit);
@@ -869,6 +833,11 @@ impl Power {
         vars.set("bat_text", text);
         set_titled(vars, "bat_tip", &title_text, tip);
         vars.set(&class_key("battery"), class);
+        // T28: independent `#level` slot drives the `.gauge` fill — see
+        // cpu.rs's set_vars for why this never evicts `class`. `battery`
+        // stays its own module (T29 only merged cpu/memory and claude/
+        // docker), so the bare `p` prefix — no collision possible.
+        vars.set(&class_key("battery#level"), level_class("p", charge));
     }
 }
 
@@ -1143,23 +1112,7 @@ mod tests {
         assert_eq!(remaining(1_254_000, 2_944_000, 0, "Discharging"), -1);
     }
 
-    // ---------------------------------------------------------- icons/class
-
-    #[test]
-    fn ic_bat_walks_the_whole_table() {
-        assert_eq!(ic_bat(0), '\u{f008e}');
-        assert_eq!(ic_bat(100), '\u{f0079}');
-        assert_eq!(ic_bat(50), '\u{f007e}');
-        // T19: every bucket now has its own glyph — regression guard against
-        // the old shared-glyph buckets (was 1/2 and 5/6, see ic_bat's doc
-        // comment). One representative pct per bucket 0..=6.
-        let all: Vec<char> = [0, 17, 34, 51, 68, 85, 100]
-            .into_iter()
-            .map(ic_bat)
-            .collect();
-        let unique: std::collections::HashSet<char> = all.iter().copied().collect();
-        assert_eq!(unique.len(), 7, "expected 7 distinct glyphs: {all:?}");
-    }
+    // -------------------------------------------------------------- class
 
     #[test]
     fn class_for_critical_overrides_full_and_discharging_never_charging() {
@@ -1168,12 +1121,6 @@ mod tests {
         assert_eq!(class_for("Charging", 15), "charging");
         assert_eq!(class_for("Full", 100), "full");
         assert_eq!(class_for("Discharging", 50), "discharging");
-    }
-
-    #[test]
-    fn icon_for_not_charging_keeps_plug_icon() {
-        assert_eq!(icon_for("Not charging", 80), IC_CHG);
-        assert_eq!(icon_for("Discharging", 80), ic_bat(80));
     }
 
     // -------------------------------------------------------------- RAPL

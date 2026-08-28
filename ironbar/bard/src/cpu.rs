@@ -13,8 +13,8 @@
 use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::tooltip::{
-    bad, bar, barico_label, dim, esc, grade, hdur, heatbar, mono, row, sect, set_titled, C_DIM,
-    C_EMPTY,
+    bad, bar, barico_label, dim, esc, grade, hdur, heatbar, level_class, mono, row, sect,
+    set_titled, C_DIM, C_EMPTY,
 };
 use crate::vars::Vars;
 use std::collections::HashMap;
@@ -111,8 +111,30 @@ fn read_proc_stat() -> String {
 }
 
 fn set_vars(vars: &mut Vars, total: i64) {
-    vars.set("cpu_text", format!("{} {total}%", barico_label(IC_CPU)));
-    vars.set(&class_key("cpu"), class_for(total));
+    // T28: digit dropped entirely — the `.gauge` fill (genconfig.rs/
+    // style.css) now carries the magnitude on the bar; the exact number
+    // still lives in the popup. This is what the 353px->~214px reduction
+    // target actually requires (`docs/statusbar-layout.md` §3.4) — icon
+    // alone, not icon+number, is what makes the pill narrower than before
+    // despite gaining a gauge. `#level` is an independent class slot
+    // (vars.rs/mango.rs's `CLASS_PREFIX` doc comment), so it never evicts
+    // `class_for`'s own warning/normal class.
+    //
+    // T29: both slot keys move under `sysload` — `cpu` shares that node
+    // with `memory` now (`sysload_module()`'s own doc comment) — and both
+    // values gain a `cpu-`/`cl` prefix. `class_for` itself stays bare
+    // ("warning"/"normal", test-locked below): the prefix is applied only
+    // here, at the point the value is written to the shared node. Without
+    // it, memory's own bare "warning" would collide on that one node —
+    // `ipc.rs::set_class` removes an OLD value before adding the NEW one,
+    // so cpu clearing its own "warning" would delete memory's "warning" off
+    // the same GTK widget too, even though memory never changed.
+    vars.set("cpu_text", barico_label(IC_CPU));
+    vars.set(
+        &class_key("sysload#cpu"),
+        format!("cpu-{}", class_for(total)),
+    );
+    vars.set(&class_key("sysload#cpulevel"), level_class("cl", total));
 }
 
 /// Cached `atop -P PRC` history for the "Recent peaks" section, shared with

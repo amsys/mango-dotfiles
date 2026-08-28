@@ -78,6 +78,7 @@ with its own root script and is never symlinked:
 | `system/remote/` | remote access units (wayvnc, KDE Connect) | — |
 | `system/i915/` | GPU compute timeout udev rules | — |
 | `system/libvirt-net/` | libvirt network config | its own README |
+| `system/vpnguard/` | fail-closed egress + WireGuard failover — membership and order come from NetworkManager's own `connection.autoconnect-priority`, no config file, no VPN hardcoded | its own README |
 
 Run each once, and again after you change a file in its directory:
 

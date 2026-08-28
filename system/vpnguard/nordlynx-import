@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Builds a WireGuard NM profile for one NordVPN server and imports it.
+# Unprivileged, standalone — never touches vpnguard or any of its files.
+# NordVPN publishes no WireGuard config files (only OpenVPN, from the
+# manual-configuration dashboard); this pulls the same data NordVPN's own
+# app uses to configure NordLynx (WireGuard under a different name).
+#
+#   nordlynx-import <server-hostname>      # e.g. al142.nordvpn.com
+#   nordlynx-import --list [country]       # print hostname + country, no import
+#
+# The server list and each server's WireGuard public key need no
+# authentication — verified live: NordVPN's own recommendation API answers
+# without a token. The private key needs your account's access token, from
+#   https://my.nordaccount.com/dashboard/nordvpn/manual-configuration/
+#   -> "Set up NordVPN manually" -> Access token
+# saved once to ~/.config/mango/nordvpn-token (mode 0600, refused if
+# readable by anyone else). Verified live: HTTP Basic auth with username
+# "token" and the access token as password is the accepted shape (a bad
+# token gets "Unauthorized"; a malformed Basic header gets a different,
+# earlier error) — this is the one part of the flow this repo cannot fully
+# confirm without a real account token, so double-check the imported
+# profile actually handshakes before relying on it.
+#
+# The private key touches disk only for the moment `nmcli connection
+# import` needs it: written to a mode-0600 file under $XDG_RUNTIME_DIR
+# (tmpfs, gone at logout), imported, removed immediately after. From then
+# on it lives only inside NetworkManager, the same guarantee vpnguard's
+# README makes for every other profile.
+#
+# The interface's own tunnel address (10.5.0.0/16) is the value the
+# NordLynx client and community WireGuard configs for Nord are documented
+# to use — override with MANGO_NORD_ADDR if a server ever rejects it.
+#
+# The imported profile starts at autoconnect-priority=0 (not opted into
+# vpnguard's chain) and autoconnect=no — opt it in exactly like any other
+# WireGuard profile:
+#   nmcli connection modify "<name>" connection.autoconnect-priority 100
+set -uo pipefail
+
+TOKEN_FILE="${MANGO_NORD_TOKEN_FILE:-$HOME/.config/mango/nordvpn-token}"
+API="${MANGO_NORD_API:-https://api.nordvpn.com/v1}"
+ADDR="${MANGO_NORD_ADDR:-10.5.0.2/16}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+
+die() { echo "nordlynx-import: $*" >&2; exit 1; }
+
+for b in curl jq nmcli; do
+	command -v "$b" >/dev/null 2>&1 || die "missing dependency: $b"
+done
+
+[ $# -ge 1 ] || {
+	echo "usage: nordlynx-import <server-hostname>" >&2
+	echo "       nordlynx-import --list [country]" >&2
+	exit 1
+}
+
+fetch_servers() { # -> the full WireGuard-capable server list, JSON array
+	curl -sf --max-time 30 "$API/servers?filters%5Bservers_technologies%5D%5Bidentifier%5D=wireguard_udp&limit=9000"
+}
+
+if [ "$1" = --list ]; then
+	servers=$(fetch_servers) || die "could not reach NordVPN's server list"
+	if [ -n "${2:-}" ]; then
+		printf '%s' "$servers" | jq -r --arg c "$2" \
+			'.[] | select(.locations[0].country.name==$c) | .hostname + "\t" + .locations[0].country.name'
+	else
+		printf '%s' "$servers" | jq -r '.[] | .hostname + "\t" + .locations[0].country.name'
+	fi
+	exit 0
+fi
+
+HOSTNAME="$1"
+
+perm_ok() { # <path> -> 0 if not group/other readable
+	m=$(stat -c %a "$1" 2>/dev/null) || return 1
+	[ $((0$m & 0077)) -eq 0 ]
+}
+
+[ -r "$TOKEN_FILE" ] || die "no token at $TOKEN_FILE — see this script's header"
+perm_ok "$TOKEN_FILE" || die "$TOKEN_FILE is readable by group or other, refusing to read a token from it"
+TOKEN=$(head -1 "$TOKEN_FILE" | tr -d '[:space:]')
+[ -n "$TOKEN" ] || die "$TOKEN_FILE is empty"
+
+echo "==> looking up $HOSTNAME"
+servers=$(fetch_servers) || die "could not reach NordVPN's server list"
+server=$(printf '%s' "$servers" | jq -c --arg h "$HOSTNAME" '[.[] | select(.hostname==$h)] | first // empty')
+[ -n "$server" ] || die "$HOSTNAME not found (try: nordlynx-import --list)"
+
+STATION=$(printf '%s' "$server" | jq -r '.station')
+PUBKEY=$(printf '%s' "$server" | jq -r '.technologies[] | select(.identifier=="wireguard_udp") | .metadata[] | select(.name=="public_key") | .value')
+COUNTRY=$(printf '%s' "$server" | jq -r '.locations[0].country.name')
+[ -n "$STATION" ] && [ -n "$PUBKEY" ] || die "$HOSTNAME has no WireGuard station/public key in the API response"
+
+echo "==> fetching your NordLynx private key"
+cred=$(curl -sf --max-time 15 -u "token:$TOKEN" "$API/users/services/credentials") ||
+	die "credentials request failed — is the token in $TOKEN_FILE still valid?"
+PRIVKEY=$(printf '%s' "$cred" | jq -r '.nordlynx_private_key // empty')
+[ -n "$PRIVKEY" ] || die "no nordlynx_private_key in the credentials response"
+
+# `nmcli connection import type wireguard` requires the .conf filename's
+# stem to itself be a valid interface name (<=15 chars, IFNAMSIZ) — verified
+# live — and uses it as BOTH connection.id and connection.interface-name.
+# Sanitize the hostname's leading label ("al142" from "al142.nordvpn.com")
+# into that shape rather than letting nmcli reject an arbitrary name.
+SLUG=${HOSTNAME%%.*}
+SLUG=$(printf '%s' "$SLUG" | tr -c 'a-zA-Z0-9_.-' '_')
+DEV="wg_nord_${SLUG}"
+DEV=${DEV:0:15}
+NAME="NordVPN ($HOSTNAME)"
+
+CONF_PATH="$RUNTIME_DIR/$DEV.conf"
+umask 077
+cat >"$CONF_PATH" <<-EOF
+	[Interface]
+	PrivateKey = $PRIVKEY
+	Address = $ADDR
+
+	[Peer]
+	PublicKey = $PUBKEY
+	Endpoint = $STATION:51820
+	AllowedIPs = 0.0.0.0/0,::/0
+	PersistentKeepalive = 25
+EOF
+
+echo "==> importing as device $DEV"
+nmcli connection import type wireguard file "$CONF_PATH" >/dev/null || {
+	rm -f "$CONF_PATH"
+	die "import failed — does a connection named '$DEV' already exist? (nmcli connection show $DEV)"
+}
+rm -f "$CONF_PATH"
+
+nmcli connection modify "$DEV" connection.id "$NAME" connection.autoconnect no
+
+echo "==> done: '$NAME' imported ($COUNTRY, $STATION), not opted into any vpnguard chain yet"
+echo "    opt in: nmcli connection modify \"$NAME\" connection.autoconnect-priority 100"

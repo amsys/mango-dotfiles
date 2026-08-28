@@ -56,17 +56,33 @@ use std::path::{Path, PathBuf};
 /// against whatever `hover_open` already holds and no-op on a mismatch, so
 /// the worst case is a no-op rather than a wrong `hide_popup` call.
 fn popup(tip_key: &str, bar_name: &str) -> Value {
+    popup_multi(&[tip_key], bar_name)
+}
+
+/// T29: generalises `popup()` to N sections for a stacked module
+/// (`sysload`/`devload`) — one top-level popup per stack, since a nested
+/// module's own popup never registers (see `sysload_module()`'s own doc
+/// comment for why the stack can't just be N popup-bearing modules). Each
+/// `tip_key` gets its own optional title, its own body, its own optional
+/// hint, and sections after the first are preceded by their own
+/// `popup-sep` — so two sections read as two blocks, not one merged one.
+fn popup_multi(tip_keys: &[&str], bar_name: &str) -> Value {
     let mut widgets = Vec::new();
-    if crate::tooltip::TITLED.contains(&tip_key) {
-        widgets.push(
-            json!({ "type": "label", "class": "popup-title", "label": format!("#{tip_key}_title") }),
-        );
-        widgets.push(json!({ "type": "box", "class": "popup-sep" }));
-    }
-    widgets.push(json!({ "type": "label", "label": format!("#{tip_key}") }));
-    if let Some((_, hint)) = crate::tooltip::HINTS.iter().find(|(k, _)| *k == tip_key) {
-        widgets.push(json!({ "type": "box", "class": "popup-sep" }));
-        widgets.push(json!({ "type": "label", "class": "popup-hint", "label": hint }));
+    for (i, tip_key) in tip_keys.iter().enumerate() {
+        if i > 0 {
+            widgets.push(json!({ "type": "box", "class": "popup-sep" }));
+        }
+        if crate::tooltip::TITLED.contains(tip_key) {
+            widgets.push(
+                json!({ "type": "label", "class": "popup-title", "label": format!("#{tip_key}_title") }),
+            );
+            widgets.push(json!({ "type": "box", "class": "popup-sep" }));
+        }
+        widgets.push(json!({ "type": "label", "label": format!("#{tip_key}") }));
+        if let Some((_, hint)) = crate::tooltip::HINTS.iter().find(|(k, _)| k == tip_key) {
+            widgets.push(json!({ "type": "box", "class": "popup-sep" }));
+            widgets.push(json!({ "type": "label", "class": "popup-hint", "label": hint }));
+        }
     }
     json!([{
         "type": "box",
@@ -241,6 +257,23 @@ pub fn build(monitors: &[String]) -> Value {
     // T6c claudebar vars — see claude.rs.
     defaults.insert("claude_text".into(), json!(""));
     defaults.insert("claude_tip".into(), json!(""));
+    // T28 tray drawer — see `tray_toggle_module()`'s own doc comment. Same
+    // starts-closed reasoning as `tools_open` above.
+    defaults.insert("tray_open".into(), json!("false"));
+    // T28 keepass vars — see keepass.rs.
+    defaults.insert("kp_text".into(), json!(""));
+    defaults.insert("kp_tip".into(), json!(""));
+    // T28 archupdate vars — see archupdate.rs. `au_show` defaults "false":
+    // hidden until a real pending count is known, same reasoning as
+    // `hotspot_show`'s own default above.
+    defaults.insert("au_show".into(), json!("false"));
+    defaults.insert("au_text".into(), json!(""));
+    defaults.insert("au_tip".into(), json!(""));
+    // T28 music vars — see music.rs. `music_on` defaults "false": hidden
+    // until a real track is known, same reasoning as `au_show` above.
+    defaults.insert("music_on".into(), json!("false"));
+    defaults.insert("music_text".into(), json!(""));
+    defaults.insert("music_tip".into(), json!(""));
     // T-popup-vert: every TITLED key gets a matching `<key>_title` default,
     // looped from that one table rather than a second insert beside each
     // key above, so the two lists can't drift apart — see
@@ -336,7 +369,22 @@ pub fn build(monitors: &[String]) -> Value {
 /// wired in `build()`) instead of `end` borrowing it — see that function's
 /// own doc comment for why the reversal of T-next item 3 is safe.
 fn end_modules(bar_name: &str) -> Vec<Value> {
+    // T28: tray, its own toggle, then the promoted pill — see
+    // `tray_module()`'s own doc comment for why the drawer needs it.
+    // T29: `archupdate` moved out of this block into `devload`'s own
+    // second row (shares it with `docker` — see `devload_module()`'s doc
+    // comment) — `keepass` is the only pill still promoted here.
+    //
+    // T29 follow-up: the drawer itself is OFF by default now
+    // (`TRAY_DRAWER_ENABLED`) — user preference is the full tray icon list
+    // always visible, no hide-behind-toggle. `tray_toggle_module()` is
+    // simply not added when disabled; `tray_module()` itself drops its own
+    // `show_if` in the same case (see its own doc comment).
     let mut end = vec![tray_module()];
+    if TRAY_DRAWER_ENABLED {
+        end.push(tray_toggle_module());
+    }
+    end.push(keepass_module(bar_name));
     end.extend(resource_modules(bar_name));
     end.extend(tools_modules(bar_name));
     end.extend(audio_modules(bar_name));
@@ -349,18 +397,25 @@ fn end_modules(bar_name: &str) -> Vec<Value> {
 }
 
 /// Resource-monitor block (statusbar-layout.md §3.4): cpu, memory, docker,
-/// battery, claudebar — one glance-only "is this machine healthy" group,
-/// general to specific. Renamed from `leftcenter_modules` (T23): `music`
-/// moved out to `audio_modules` (§3.6, grouped with volume/mic instead —
-/// proximity by domain, not by original waybar slot), and this group's home
-/// row changed from `start` to `end` (see `end_modules()`'s own doc comment)
-/// — waybar's own `group/leftcenter` order this once mirrored no longer
-/// applies to either its position or its membership.
+/// battery, claudebar (+ archupdate) — one glance-only "is this machine
+/// healthy" group, general to specific. Renamed from `leftcenter_modules`
+/// (T23): `music` moved out to `audio_modules` (§3.6, grouped with volume/
+/// mic instead — proximity by domain, not by original waybar slot), and
+/// this group's home row changed from `start` to `end` (see
+/// `end_modules()`'s own doc comment) — waybar's own `group/leftcenter`
+/// order this once mirrored no longer applies to either its position or its
+/// membership.
+///
+/// T29: `cpu`+`memory` and `claudebar`+`docker`(+`archupdate`) each became
+/// one stacked module (`sysload_module()`/`devload_module()`) — see either
+/// function's own doc comment for why a plain two-row `custom` module,
+/// rather than nesting native modules, is the only shape that keeps every
+/// row's own state classes reachable. `battery` is unaffected: it was
+/// already a single row and stays one.
 fn resource_modules(bar_name: &str) -> Vec<Value> {
-    let mut m = cpu_modules(bar_name);
-    m.push(docker_module(bar_name));
+    let mut m = vec![sysload_module(bar_name)];
     m.extend(power_modules(bar_name));
-    m.push(claudebar_module(bar_name));
+    m.push(devload_module(bar_name));
     m
 }
 
@@ -494,14 +549,86 @@ fn spark_module() -> Value {
 /// in style.css instead (no config-side spacing/gap option exists on this
 /// module — `ironbar --print-schema` confirmed it). T9: moved from `start`
 /// to lead `end` — see `end_modules()`'s doc comment.
+///
+/// T28: gated behind `tray_open` — `TrayModule` has no per-item filter
+/// (only `icon_size`/`direction`/`prefer_theme_icons` plus the common
+/// options; every item gets `.item`, none gets a name — confirmed against
+/// the vendored `TrayModule` schema and `TrayMenu::new`), so "important vs
+/// hidden" cannot be expressed inside the tray itself. The two items worth
+/// a permanent glance (KeePassXC, Arch-Update) are rebuilt as their own
+/// pills instead — `keepass_module`, right after `tray_toggle_module`
+/// below, and Arch-Update's own pending count (T29: folded into
+/// `devload_module`'s docker row, not its own top-level pill any more) —
+/// the whole native tray collapses behind the toggle for the rest.
+/// `on_click_left` replaces the default SNI activate for every item at
+/// once (ironbar substitutes `{address}`) —
+/// `tray-click.sh` jumps to an already-open window before falling back to
+/// activate, so this is a net gain for every tray app, not a regression;
+/// the one accepted cost is NordVPN's left-click menu moving to
+/// right-click (it is the only item with `ItemIsMenu: true`, confirmed
+/// live via `busctl --user get-property ... ItemIsMenu`).
+///
+/// T29 follow-up: `TRAY_DRAWER_ENABLED` (false by default) turns the
+/// `show_if` gate off entirely rather than deleting it — user preference
+/// is every tray icon always visible, no hide-behind-toggle, but the
+/// mechanism (this gate, `tray_toggle_module()`, `tray-drawer.sh`, the
+/// `.traytoggle` CSS) stays intact for a future re-enable: flip the one
+/// constant back to `true` and all four still work unchanged.
+const TRAY_DRAWER_ENABLED: bool = false;
+
 fn tray_module() -> Value {
-    json!({
+    let mut m = json!({
         "type": "tray",
         "name": "tray",
         "class": "tray",
-        "icon_size": 16
+        "icon_size": 16,
+        "transition_type": "slide_end",
+        "on_click_left": "~/.config/ironbar/scripts/tray-click.sh {address}"
+    });
+    if TRAY_DRAWER_ENABLED {
+        m["show_if"] = json!("#tray_open");
+    }
+    m
+}
+
+/// T28: the drawer's own trigger, right after `tray` so opening it grows
+/// away from the pointer and the trigger's own X never moves (INV-1). One
+/// plain Unicode glyph (vertical ellipsis, "more" — distinct from
+/// `tools_module()`'s horizontal ellipsis trigger so the two don't read as
+/// the same button), not a Nerd Font codepoint — same rationale as
+/// `tools_module()`'s own trigger glyph.
+fn tray_toggle_module() -> Value {
+    json!({
+        "type": "custom",
+        "name": "traytoggle",
+        "class": "traytoggle",
+        "bar": [ { "type": "label", "label": "\u{22ee}" } ],
+        "tooltip": "Tray icons",
+        "on_click_left": "~/.config/ironbar/scripts/tray-drawer.sh"
     })
 }
+
+/// KeePassXC lock-state pill (T28, see keepass.rs) — promoted out of the
+/// tray drawer since lock state is glance-worthy. `on_click_left` reuses
+/// the exact named scratchpad already bound to `Alt+k` in mango/config.conf
+/// (`toggle_named_scratchpad,org.keepassxc.KeePassXC,none,keepassxc`).
+fn keepass_module(bar_name: &str) -> Value {
+    json!({
+        "type": "custom",
+        "name": "keepass",
+        "class": "keepass",
+        "bar": [ { "type": "button", "label": "#kp_text" } ],
+        "popup": popup("kp_tip", bar_name),
+        "on_mouse_enter": format!("mango-bard hover enter {bar_name} keepass -q"),
+        "on_mouse_exit": format!("mango-bard hover exit {bar_name} keepass -q"),
+        "on_click_left": "mmsg dispatch toggle_named_scratchpad,org.keepassxc.KeePassXC,none,keepassxc"
+    })
+}
+
+// T29: `archupdate` (T28, see archupdate.rs) stopped being its own
+// top-level pill — its `au_text`/`au_show`/`au_tip` ironvars and its click
+// are now a second cell on `devload`'s docker row. See
+// `devload_module()`'s own doc comment.
 
 /// T8c: split into two NAMED `custom` modules — the single unnamed module
 /// this used to be (one module, two labels) is why the clock and date ran
@@ -516,7 +643,7 @@ fn tray_module() -> Value {
 ///
 /// T-next: both gain a popup (T7c-rest, see clock.rs's `refresh_clock_tip`/
 /// `refresh_date_tip`) — click follows T7a's refresh-then-toggle-popup
-/// pattern (cpu_modules' own doc comment explains why a plain `on_click`
+/// pattern (sysload_module's own doc comment explains why a plain `on_click`
 /// can't be a combined array). Date's click launches the calendar app
 /// (T15: moved from middle- to left-click, middle-click retired bar-wide),
 /// carried over from waybar's own date left-click (clock.sh's own
@@ -537,9 +664,10 @@ fn clock_pill(bar_name: &str) -> Vec<Value> {
             // deleted tooltip used to carry moved to.
             //
             // Correction, T-hover follow-up: `on_click_left`'s
-            // refresh-then-toggle-popup is gone, same reasoning as
-            // claudebar_module()'s own doc comment — a plain detail popup
-            // with no mutating click has nothing left for a click to do
+            // refresh-then-toggle-popup is gone, same reasoning
+            // `devload_module()`'s own doc comment gives for its claude
+            // row — a plain detail popup with no mutating click has
+            // nothing left for a click to do
             // once hover owns opening it, and leaving the toggle in place
             // let a click undo what hover just opened (`ipc.rs::show_popup`
             // sends `toggle_popup` under the hood — see its doc comment).
@@ -569,7 +697,7 @@ fn clock_pill(bar_name: &str) -> Vec<Value> {
 /// pomodoro glyph is still a click target ("start a focus block"), not dead
 /// weight to hide.
 ///
-/// Click layout follows T4's rule (cpu_modules' own doc comment): left opens
+/// Click layout follows T4's rule (sysload_module's own doc comment): left opens
 /// the popup — and, while idle, `pomo click`'s own idle branch spawns
 /// focus-task.sh first, so naming a task and viewing the (then-started)
 /// block's detail happen from the same click. Left is folded from
@@ -647,7 +775,7 @@ const NET_SPINNER_GLYPH: &str = "\u{f0aa5}";
 /// the only popup content.
 fn audio_modules(bar_name: &str) -> Vec<Value> {
     vec![
-        music_module(),
+        music_module(bar_name),
         json!({
             "type": "custom",
             "name": "volume",
@@ -701,7 +829,7 @@ fn audio_modules(bar_name: &str) -> Vec<Value> {
 /// both are launches (a menu script, an external editor), never a popup
 /// toggle, so neither fights hover the way a leftover `toggle-popup` would.
 /// `net_modules` now takes `bar_name`, same shape as `audio_modules`/
-/// `cpu_modules`, to build the `hover enter|exit <bar> <widget>` commands.
+/// `sysload_module`, to build the `hover enter|exit <bar> <widget>` commands.
 fn net_modules(bar_name: &str) -> Vec<Value> {
     vec![
         json!({
@@ -753,7 +881,7 @@ fn net_modules(bar_name: &str) -> Vec<Value> {
 
 /// CPU/memory pills: T6a (see cpu.rs/memory.rs), popups added at T7a. Click
 /// migrates left -> `toggle-popup` / middle -> btop, same pattern
-/// `power_modules`/`audio_modules`/`docker_module` already established
+/// `power_modules`/`audio_modules` already established
 /// (IRONBAR.md T7a decision D7).
 ///
 /// **Corrected live, after the first D1 design (an embedded
@@ -788,30 +916,69 @@ fn net_modules(bar_name: &str) -> Vec<Value> {
 /// A leftover click toggle would fight hover's own open/close. `btop`
 /// (T15: moved from middle- to left-click) launches an external process
 /// rather than sending `toggle-popup`, so it does not fight hover either.
-fn cpu_modules(bar_name: &str) -> Vec<Value> {
-    vec![
+/// T29: `cpu` and `memory` merged into one two-row stack — replaces the
+/// two side-by-side pills this used to build. **Why a two-row nested
+/// `button` per row, not two nested `custom` modules:** a nested
+/// `WidgetOrModule::Module` is a real option in ironbar's schema, but
+/// `custom/mod.rs::add_to` (vendored source) discards the `ModuleRef` it
+/// gets back, and `style add_class`/`remove_class` resolve a module by
+/// name only through `Bar::modules()` — populated solely from the
+/// top-level `start`/`center`/`end` arrays (`bar.rs::add_modules`). A
+/// nested `cpu` module would answer "Module not found" for every
+/// `@class/cpu` push: every gauge level, every warning colour, dead. Two
+/// plain `button` rows inside one outer `box, orientation: "vertical"`
+/// (the one config-level box type that honours `orientation` — `popup()`'s
+/// own doc comment) sidesteps this entirely: everything, including a
+/// nested widget's own `on_click_left`/`show_if`, is a real top-level
+/// `WidgetConfig` field (T23, confirmed live for the popup's hold/release
+/// handlers) — nesting changes layout only, not what a widget can carry.
+///
+/// **One popup covers both rows** (`popup_multi`) — a nested widget's own
+/// popup would hit the identical "module not found" problem via
+/// `ipc.rs::show_popup`'s `widget_name` lookup, so per-row popups are not
+/// on the table here either. `on_mouse_enter`/`on_mouse_exit` therefore
+/// live on the OUTER module only, never on a row — a handler on a child
+/// fires on every pointer crossing between children (T23's hover-reveal
+/// drawer finding), which would collapse the popup before the pointer ever
+/// reached the second row.
+///
+/// Each row keeps the old single-pill shape verbatim: `widgets`
+/// (not the `label` shorthand) so the `.gauge` box can sit beside the
+/// text (`ButtonWidget` treats `label`/`widgets` as mutually exclusive —
+/// `widgets` wins), `valign: "center"` on the gauge so `BoxWidget`'s own
+/// `fill` default doesn't stretch it to the row's full height, and the
+/// same left-click into `btop` (T15).
+fn sysload_module(bar_name: &str) -> Value {
+    fn row(class: &str, text_var: &str) -> Value {
         json!({
-            "type": "custom",
-            "name": "cpu",
-            "class": "cpu",
-            "bar": [ { "type": "button", "label": "#cpu_text" } ],
-            "popup": popup("cpu_tip", bar_name),
-            "on_mouse_enter": format!("mango-bard hover enter {bar_name} cpu -q"),
-            "on_mouse_exit": format!("mango-bard hover exit {bar_name} cpu -q"),
-            // T15: left-click, not middle — middle-click retired bar-wide.
+            "type": "button",
+            "class": class,
+            "widgets": [
+                { "type": "label", "label": format!("#{text_var}") },
+                { "type": "box", "class": "gauge", "valign": "center" }
+            ],
             "on_click_left": "kitty --class mango-monitor -e btop"
-        }),
-        json!({
-            "type": "custom",
-            "name": "memory",
-            "class": "memory",
-            "bar": [ { "type": "button", "label": "#mem_text" } ],
-            "popup": popup("mem_tip", bar_name),
-            "on_mouse_enter": format!("mango-bard hover enter {bar_name} memory -q"),
-            "on_mouse_exit": format!("mango-bard hover exit {bar_name} memory -q"),
-            "on_click_left": "kitty --class mango-monitor -e btop"
-        }),
-    ]
+        })
+    }
+    json!({
+        "type": "custom",
+        "name": "sysload",
+        "class": "sysload",
+        // T29 follow-up: `valign: "center"` on the outer box, not just the
+        // inner gauges — `BoxWidget`'s own schema defaults `valign` to
+        // `"fill"` (the same T28 trap `sysload_module()`'s own doc comment
+        // already names for a single gauge), and here it means the two
+        // rows' combined natural height (< 40px, neither button vexpands)
+        // packs at the TOP of the bar's own 40px allocation instead of
+        // centering in it — the visible "touching top, gap at bottom" bug.
+        "bar": [ { "type": "box", "orientation": "vertical", "valign": "center", "widgets": [
+            row("row-cpu", "cpu_text"),
+            row("row-mem", "mem_text")
+        ] } ],
+        "popup": popup_multi(&["cpu_tip", "mem_tip"], bar_name),
+        "on_mouse_enter": format!("mango-bard hover enter {bar_name} sysload -q"),
+        "on_mouse_exit": format!("mango-bard hover exit {bar_name} sysload -q")
+    })
 }
 
 /// Battery pill: T5 (see power.rs). Bar-global, like `net_modules()` — one
@@ -827,12 +994,25 @@ fn cpu_modules(bar_name: &str) -> Vec<Value> {
 /// stream — no lazy detail build needed here, unlike cpu/memory). Powermode
 /// (T15: moved from middle- to left-click) and right (powertop) are
 /// untouched otherwise.
+///
+/// T29: gains a third widget, `.gauge-cap` — a small filled square right of
+/// the gauge so the pair reads as a battery (rectangle + terminal nub)
+/// instead of a plain rounded bar. Battery only: `sysload_module()`'s two
+/// gauges stay bare, this is what visually marks battery as the one gauge
+/// that means "charge remaining" rather than "load". `bat_text` itself
+/// drops its `NN%` (power.rs) — the gauge now carries the level the same
+/// way T28 already made it carry cpu/memory's.
 fn power_modules(bar_name: &str) -> Vec<Value> {
     vec![json!({
         "type": "custom",
         "name": "battery",
         "class": "battery",
-        "bar": [ { "type": "button", "label": "#bat_text" } ],
+        // T28: same `widgets`-not-`label` reasoning as sysload_module().
+        "bar": [ { "type": "button", "widgets": [
+            { "type": "label", "label": "#bat_text" },
+            { "type": "box", "class": "gauge", "valign": "center" },
+            { "type": "box", "class": "gauge-cap", "valign": "center" }
+        ] } ],
         "popup": popup("bat_tip", bar_name),
         "on_mouse_enter": format!("mango-bard hover enter {bar_name} battery -q"),
         "on_mouse_exit": format!("mango-bard hover exit {bar_name} battery -q"),
@@ -841,61 +1021,62 @@ fn power_modules(bar_name: &str) -> Vec<Value> {
     })]
 }
 
-/// Docker pill: T6b (see docker.rs). Bar-global, one Docker daemon, not one
-/// per monitor. Click layout (IRONBAR.md T6b decision D4) follows T4/T5:
-/// left opens the popup (the container list that used to live under
-/// docker-menu.sh's own summary), right keeps waybar's own left-click
-/// (config.jsonc:60, the rofi quick-actions menu) — docker-menu.sh itself is
-/// untouched, only the gesture that reaches it moves.
+/// T29: `claudebar` and `docker` merged into one two-row stack, the same
+/// shape and for the same reason as `sysload_module()` (see its own doc
+/// comment for the nested-module class-update dead end and the
+/// one-popup-per-stack consequence) — read that comment first, it is not
+/// repeated here. `archupdate` (T28, see archupdate.rs) folds in as a
+/// second cell on the docker row rather than getting a third row of its
+/// own: three 40px-tall rows read as noise, and a pending-updates count is
+/// no busier than docker's own count, so the two share a row as two
+/// buttons side by side (`show_if: "#au_show"` still hides the cell at
+/// zero, exactly as the old standalone pill did).
 ///
-/// T-hover: `on_click_left`'s plain `toggle-popup` is gone — hover opens/
-/// closes it instead (marks `docker_due`, same "already stays fresh off its
-/// own event stream" reasoning as `power_modules`). Right-click
-/// (docker-menu.sh) is untouched.
-fn docker_module(bar_name: &str) -> Value {
+/// Clicks carry over unchanged: right-click on the claude row opens the
+/// usage page (T6c); right-click on the docker cell opens docker-menu.sh
+/// (T6b D4); left-click on the updates cell runs `arch-update` (T28). None
+/// of the three has a left-click toggle any more — carried over from the
+/// old `claudebar_module`'s own fix: `ipc.rs::show_popup` sends
+/// `toggle_popup` under the hood, so a leftover click toggle on a
+/// hover-opened, no-mutating-click popup would just close what hover had
+/// just opened.
+fn devload_module(bar_name: &str) -> Value {
     json!({
         "type": "custom",
-        "name": "docker",
-        "class": "docker",
-        "bar": [ { "type": "button", "label": "#docker_text" } ],
-        "popup": popup("docker_tip", bar_name),
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} docker -q"),
-        "on_mouse_exit": format!("mango-bard hover exit {bar_name} docker -q"),
-        "on_click_right": "~/.config/ironbar/scripts/docker-menu.sh"
+        "name": "devload",
+        "class": "devload",
+        // T29 follow-up: `valign: "center"` — same fix, same reason, as
+        // `sysload_module()`'s own comment.
+        "bar": [ { "type": "box", "orientation": "vertical", "valign": "center", "widgets": [
+            {
+                "type": "button",
+                "class": "row-claude",
+                "label": "#claude_text",
+                "on_click_right": "xdg-open https://claude.ai/settings/usage"
+            },
+            { "type": "box", "class": "row-svc", "widgets": [
+                {
+                    "type": "button",
+                    "class": "cell-docker",
+                    "label": "#docker_text",
+                    "on_click_right": "~/.config/ironbar/scripts/docker-menu.sh"
+                },
+                {
+                    "type": "button",
+                    "class": "cell-au",
+                    "show_if": "#au_show",
+                    "label": "#au_text",
+                    "on_click_left": "kitty --class mango-monitor -e arch-update"
+                }
+            ] }
+        ] } ],
+        "popup": popup_multi(&["claude_tip", "docker_tip", "au_tip"], bar_name),
+        "on_mouse_enter": format!("mango-bard hover enter {bar_name} devload -q"),
+        "on_mouse_exit": format!("mango-bard hover exit {bar_name} devload -q")
     })
 }
 
-/// Claude usage pill: T6c (see claude.rs). Bar-global, one account, not one
-/// per monitor — same shape as `docker_module()`. Click follows T7a's
-/// refresh-then-toggle-popup pattern before this stage; right click keeps
-/// waybar's own `on-click` (config.jsonc:261, opening the usage settings
-/// page).
-///
-/// **Correction, T-hover follow-up:** the plan's own scoped removal list
-/// (cpu/memory/docker/battery/volume/bluetooth) missed that `claudebar` has
-/// the exact same shape — a plain detail popup with no mutating click, so
-/// nothing distinguishes it from the six that did lose their toggle. Leaving
-/// `on_click_left`'s toggle in place caused a real bug, not just a
-/// theoretical overlap: `toggle_popup` is also what `ipc.rs::show_popup`
-/// sends now (`ironbar`'s own `show_popup` command rejects every `custom`
-/// module — see `ipc.rs`'s doc comment), so a click arriving after hover
-/// already opened the popup would close it again. Fixed the same way as
-/// cpu/memory: `on_click_left` dropped entirely, `on_mouse_enter`/
-/// `on_mouse_exit` are the only way this popup opens now.
-fn claudebar_module(bar_name: &str) -> Value {
-    json!({
-        "type": "custom",
-        "name": "claudebar",
-        "class": "claudebar",
-        "bar": [ { "type": "button", "label": "#claude_text" } ],
-        "popup": popup("claude_tip", bar_name),
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} claudebar -q"),
-        "on_mouse_exit": format!("mango-bard hover exit {bar_name} claudebar -q"),
-        "on_click_right": "xdg-open https://claude.ai/settings/usage"
-    })
-}
-
-/// Hotspot pill: T6b (see hotspot.rs). Bar-global, like `docker_module()`.
+/// Hotspot pill: T6b (see hotspot.rs). Bar-global, like `keepass_module()`.
 ///
 /// T15: middle-click retired bar-wide, and hotspot moves onto the same
 /// hover-opens-the-popup pattern as every other converted pill (T-hover) —
@@ -939,31 +1120,27 @@ fn remote_module(bar_name: &str) -> Value {
     })
 }
 
-/// Native `music` module, replacing waybar's `mpris` built-in
-/// (config.jsonc:62-69). `playerctld` is waybar's own MPRIS proxy choice;
-/// ironbar's `music` module talks to MPRIS directly, so no `player_type`
-/// override is needed — the default already covers this.
-///
-/// T8c: `truncate` added — config.jsonc:66's `dynamic-len: 30` had no
-/// ironbar counterpart, so a long track title could grow this module
-/// without bound and push `power` off the right edge of the screen (one of
-/// three unbounded-width causes found this stage; see `window_module()`
-/// and `build()`'s `"height"` for the other two).
-///
-/// T23: this cap is necessary but not sufficient for INV-1 (statusbar-
-/// layout.md) now that `music` sits mid-block in `audio_modules()`, not at
-/// a growth end — `truncate` bounds the MAX width but not the MIN, so an
-/// empty "nothing playing" string would still let `volume`/`mic` shift
-/// left of where they sit while a track is showing. `.music`'s own CSS
-/// `min-width` (style.css) closes that gap; this function only supplies
-/// the cap the CSS reserves against.
-fn music_module() -> Value {
+/// T28: `custom` module fed by music.rs, replacing the native `music`
+/// module this used to be (config.jsonc:62-69's own `mpris` built-in,
+/// ported at T8c). The native module renders through GTK4's
+/// `set_label_escaped` (confirmed against the vendored source,
+/// `modules/music/mod.rs`), which can only ever show plain text — the
+/// two-line dim-app/plain-title markup `mango.rs::window_text` uses for the
+/// window pill needs a real `<span>` string, which only a daemon-fed
+/// ironvar can supply. `show_if` replaces the old `truncate`-only emptiness
+/// handling: the pill now disappears entirely with nothing loaded, instead
+/// of reserving space for an empty string (`music.rs`'s own `music_on`
+/// doc comment).
+fn music_module(bar_name: &str) -> Value {
     json!({
-        "type": "music",
+        "type": "custom",
         "name": "music",
         "class": "music",
-        "truncate": { "mode": "end", "max_length": 30 },
-        "tooltip": "Now playing — click to play/pause",
+        "show_if": "#music_on",
+        "bar": [ { "type": "button", "label": "#music_text" } ],
+        "popup": popup("music_tip", bar_name),
+        "on_mouse_enter": format!("mango-bard hover enter {bar_name} music -q"),
+        "on_mouse_exit": format!("mango-bard hover exit {bar_name} music -q"),
         "on_click_left": "playerctl play-pause"
     })
 }
@@ -1590,7 +1767,7 @@ mod tests {
         let names: Vec<&str> = start.iter().map(|m| m["name"].as_str().unwrap()).collect();
         assert_eq!(names.first(), Some(&"spark"));
         assert_eq!(names.last(), Some(&"win"));
-        for name in ["cpu", "memory", "docker", "battery", "claudebar", "music"] {
+        for name in ["sysload", "devload", "battery", "music"] {
             assert!(
                 !names.contains(&name),
                 "{name} must not still be in start"
@@ -1599,23 +1776,24 @@ mod tests {
     }
 
     #[test]
-    fn cpu_memory_docker_battery_claudebar_sit_together_in_end() {
+    fn sysload_battery_devload_sit_together_in_end() {
         // T23: the resource block (statusbar-layout.md §3.4) — general to
-        // specific: cpu -> memory -> docker -> battery -> claudebar. `music`
-        // is deliberately absent: it moved to `audio_modules()` instead (see
-        // that function's own doc comment) — grouped with volume/mic by
-        // domain, not kept alongside the machine-health pills.
+        // specific: cpu+memory -> battery -> claude+docker(+archupdate).
+        // T29 merged cpu/memory into `sysload` and claudebar/docker/
+        // archupdate into `devload` — see `resource_modules()`'s own doc
+        // comment. `music` is deliberately absent: it moved to
+        // `audio_modules()` instead (see that function's own doc comment)
+        // — grouped with volume/mic by domain, not kept alongside the
+        // machine-health pills.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
         let tray = names.iter().position(|n| *n == "tray").unwrap();
-        let cpu = names.iter().position(|n| *n == "cpu").unwrap();
-        let memory = names.iter().position(|n| *n == "memory").unwrap();
-        let docker = names.iter().position(|n| *n == "docker").unwrap();
+        let sysload = names.iter().position(|n| *n == "sysload").unwrap();
         let battery = names.iter().position(|n| *n == "battery").unwrap();
-        let claudebar = names.iter().position(|n| *n == "claudebar").unwrap();
-        assert!(tray < cpu, "resource block must follow tray in end");
-        assert!(cpu < memory && memory < docker && docker < battery && battery < claudebar);
+        let devload = names.iter().position(|n| *n == "devload").unwrap();
+        assert!(tray < sysload, "resource block must follow tray in end");
+        assert!(sysload < battery && battery < devload);
     }
 
     #[test]
@@ -1633,10 +1811,16 @@ mod tests {
         let mut names = HashSet::new();
         collect_module_names(&json!({"start": start, "center": center, "end": end}), &mut names);
         let expected = [
-            "spark", "win", "clock", "date", "pomo", "tray", "cpu", "memory", "docker", "battery",
-            "claudebar", "tools", "colorpicker", "darkmode", "snip", "inhibit", "music", "volume",
+            "spark", "win", "clock", "date", "pomo", "tray", "sysload", "battery", "devload",
+            "tools", "colorpicker", "darkmode", "snip", "inhibit", "music", "volume",
             "mic", "net-spinner", "wifi", "eth", "netsec", "hotspot", "remote", "bluetooth",
             "power",
+            // T28: the pill promoted out of the tray drawer it gates
+            // (T29: `archupdate` is no longer one of these — it folded
+            // into `devload`'s docker row). `traytoggle` itself is gone
+            // from this list — the drawer is disabled by default now
+            // (`TRAY_DRAWER_ENABLED`), so its trigger is never generated.
+            "keepass",
         ];
         for name in expected {
             assert!(names.contains(name), "{name} missing after reorder");
@@ -1645,14 +1829,17 @@ mod tests {
             assert!(names.contains(&ws_module("eDP-1", tag)));
         }
         assert!(names.contains(&ws_module_ov("eDP-1")));
-        // 27 named non-tag modules + 9 tags + 1 overview = 37 names, but
-        // `tools` itself has no popup/module content beyond its own name —
-        // it is real, so the raw count is 37, not 36; the "36 visible
-        // modules" claim in statusbar-layout.md counts the drawer as one
-        // slot, not two (trigger + itself). Assert the real, larger set
-        // size instead of restating that approximation as a second source
-        // of truth.
-        assert_eq!(names.len(), 37);
+        // T29: 26 named non-tag modules (30 pre-T29 minus `cpu`/`memory`/
+        // `docker`/`claudebar`/`archupdate`, plus `sysload`/`devload`,
+        // minus `traytoggle` now that the drawer defaults off) + 9 tags +
+        // 1 overview = 36 names, but `tools` itself has no popup/module
+        // content beyond its own name — it is real, so the raw count is
+        // 36, not the historical "36 visible modules" claim in
+        // statusbar-layout.md for a DIFFERENT reason than before (that
+        // claim counted each drawer as one slot, not one per
+        // trigger+child — with the tray drawer off, the two counts now
+        // agree by coincidence, not because the reasoning matches).
+        assert_eq!(names.len(), 36);
     }
 
     // T23: `end_no_longer_carries_the_leftcenter_modules` (a T8d regression
@@ -1677,58 +1864,52 @@ mod tests {
     }
 
     #[test]
-    fn docker_hover_targets_its_own_bar_name_and_drops_the_click_toggle() {
-        // T23: `docker` is part of `resource_modules()`, which lives in
-        // `end` now — see that function's own doc comment.
-        // T-hover: plain toggle-popup on_click_left is gone — right-click
-        // (docker-menu.sh) stays untouched.
+    fn devload_hover_targets_its_own_bar_name_and_nested_clicks_survive() {
+        // T29: `claudebar`+`docker`(+`archupdate`) merged into `devload`
+        // (see `devload_module()`'s own doc comment) — the hover
+        // enter/exit that used to sit on each pill now sits only on the
+        // outer module (T23: a handler on a nested row would fire on every
+        // crossing between rows), but each row/cell keeps its own click as
+        // a real nested `WidgetConfig` field.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let docker = end.iter().find(|m| m["name"] == "docker").unwrap();
-        assert!(docker.get("on_click_left").is_none());
-        assert!(docker["on_mouse_enter"]
+        let devload = end.iter().find(|m| m["name"] == "devload").unwrap();
+        assert!(devload.get("on_click_left").is_none());
+        assert!(devload["on_mouse_enter"]
             .as_str()
             .unwrap()
             .contains("bar-eDP-1"));
-        assert!(docker["on_mouse_exit"]
+        assert!(devload["on_mouse_exit"]
             .as_str()
             .unwrap()
             .contains("bar-eDP-1"));
-        assert_eq!(
-            docker["on_click_right"],
-            json!("~/.config/ironbar/scripts/docker-menu.sh")
-        );
 
-        let fallback = build(&[]);
-        let fb_end = fallback["end"].as_array().unwrap();
-        let fb_docker = fb_end.iter().find(|m| m["name"] == "docker").unwrap();
-        assert!(fb_docker["on_mouse_enter"]
-            .as_str()
-            .unwrap()
-            .contains("bar-default"));
-    }
-
-    #[test]
-    fn claudebar_popup_targets_its_own_bar_name() {
-        // T23: `claudebar` is part of `resource_modules()`, which lives in
-        // `end` now — see that function's own doc comment.
-        let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let claudebar = end.iter().find(|m| m["name"] == "claudebar").unwrap();
-        assert!(claudebar.get("on_click_left").is_none());
-        assert!(claudebar["on_mouse_enter"]
-            .as_str()
-            .unwrap()
-            .contains("bar-eDP-1"));
+        let rows = devload["bar"][0]["widgets"].as_array().unwrap();
+        let claude_row = &rows[0];
+        assert_eq!(claude_row["class"], json!("row-claude"));
+        assert!(claude_row.get("on_click_left").is_none());
         assert_eq!(
-            claudebar["on_click_right"],
+            claude_row["on_click_right"],
             json!("xdg-open https://claude.ai/settings/usage")
         );
 
+        let svc_cells = rows[1]["widgets"].as_array().unwrap();
+        let docker_cell = svc_cells.iter().find(|c| c["class"] == "cell-docker").unwrap();
+        assert_eq!(
+            docker_cell["on_click_right"],
+            json!("~/.config/ironbar/scripts/docker-menu.sh")
+        );
+        let au_cell = svc_cells.iter().find(|c| c["class"] == "cell-au").unwrap();
+        assert_eq!(au_cell["show_if"], json!("#au_show"));
+        assert_eq!(
+            au_cell["on_click_left"],
+            json!("kitty --class mango-monitor -e arch-update")
+        );
+
         let fallback = build(&[]);
         let fb_end = fallback["end"].as_array().unwrap();
-        let fb_claudebar = fb_end.iter().find(|m| m["name"] == "claudebar").unwrap();
-        assert!(fb_claudebar["on_mouse_enter"]
+        let fb_devload = fb_end.iter().find(|m| m["name"] == "devload").unwrap();
+        assert!(fb_devload["on_mouse_enter"]
             .as_str()
             .unwrap()
             .contains("bar-default"));
@@ -1784,43 +1965,50 @@ mod tests {
     // ---- T7a additions
 
     #[test]
-    fn cpu_and_memory_hover_targets_its_own_bar_name_and_drops_the_click_toggle() {
-        // T23: `cpu`/`memory` are part of `resource_modules()`, which lives
-        // in `end` now — see that function's own doc comment.
-        // T-hover: the refresh-then-toggle-popup on_click_left is gone —
-        // hover carries the bar name instead (main.rs's hover state machine
-        // runs the cpu-detail/mem-detail refresh before opening).
+    fn sysload_hover_targets_its_own_bar_name_and_rows_keep_their_click() {
+        // T29: `cpu`/`memory` merged into one `sysload` stack (see
+        // `sysload_module()`'s own doc comment) — hover moves to the outer
+        // module (main.rs's hover state machine now runs both
+        // cpu-detail/mem-detail refreshes before opening one popup), but
+        // each row keeps its own `btop` click as a nested `WidgetConfig`.
         // T15: btop moved from middle- to left-click.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        for name in ["cpu", "memory"] {
-            let module = end.iter().find(|m| m["name"] == name).unwrap();
-            assert!(module["on_mouse_enter"]
-                .as_str()
-                .unwrap()
-                .contains("bar-eDP-1"));
-            assert!(module["on_mouse_exit"]
-                .as_str()
-                .unwrap()
-                .contains("bar-eDP-1"));
+        let sysload = end.iter().find(|m| m["name"] == "sysload").unwrap();
+        assert!(sysload["on_mouse_enter"]
+            .as_str()
+            .unwrap()
+            .contains("bar-eDP-1"));
+        assert!(sysload["on_mouse_exit"]
+            .as_str()
+            .unwrap()
+            .contains("bar-eDP-1"));
+        assert!(sysload.get("on_click_left").is_none());
+
+        let rows = sysload["bar"][0]["widgets"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for (row, class) in rows.iter().zip(["row-cpu", "row-mem"]) {
+            assert_eq!(row["class"], json!(class));
             assert_eq!(
-                module["on_click_left"],
+                row["on_click_left"],
                 json!("kitty --class mango-monitor -e btop")
             );
-            assert!(module.get("on_click_middle").is_none());
-            // T-popup-vert: popup is one outer vertical box now (see
-            // popup()'s own doc comment); no poke widget inside it either —
-            // title, sep, content label, sep, hint label, no widget doing a
-            // refresh-on-open the S2 finding ruled out.
-            let popup = module["popup"].as_array().unwrap();
-            assert_eq!(popup.len(), 1);
-            assert_eq!(popup[0]["widgets"].as_array().unwrap().len(), 5);
+            assert!(row.get("on_click_middle").is_none());
         }
+
+        // T-popup-vert: popup is one outer vertical box (see popup()'s own
+        // doc comment); `popup_multi` gives each of the two sections its
+        // own title/sep/body/sep/hint (5 widgets), plus one leading
+        // separator between them (T29) — 11 total, no poke widget inside
+        // either section the S2 finding ruled out.
+        let popup = sysload["popup"].as_array().unwrap();
+        assert_eq!(popup.len(), 1);
+        assert_eq!(popup[0]["widgets"].as_array().unwrap().len(), 11);
 
         let fallback = build(&[]);
         let fb_end = fallback["end"].as_array().unwrap();
-        let fb_cpu = fb_end.iter().find(|m| m["name"] == "cpu").unwrap();
-        assert!(fb_cpu["on_mouse_enter"]
+        let fb_sysload = fb_end.iter().find(|m| m["name"] == "sysload").unwrap();
+        assert!(fb_sysload["on_mouse_enter"]
             .as_str()
             .unwrap()
             .contains("bar-default"));
@@ -1908,9 +2096,9 @@ mod tests {
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
         assert_eq!(names.first(), Some(&"tray"));
-        let cpu = names.iter().position(|n| *n == "cpu").unwrap();
+        let sysload = names.iter().position(|n| *n == "sysload").unwrap();
         let volume = names.iter().position(|n| *n == "volume").unwrap();
-        assert!(cpu < volume, "resources must precede audio in end");
+        assert!(sysload < volume, "resources must precede audio in end");
     }
 
     #[test]
@@ -2083,12 +2271,14 @@ mod tests {
 
     #[test]
     fn native_modules_carry_their_own_class() {
-        // T23: `music` is part of `audio_modules()`, which lives in `end`
-        // now (grouped with volume/mic — see that function's own doc
-        // comment), not `start`.
+        // T28: `music` dropped out of this group — it is a `custom` module
+        // now, fed by music.rs (see `music_module()`'s own doc comment for
+        // why: the native module's `set_label_escaped` render path can't
+        // carry the two-line markup the window pill uses). `bluetooth` and
+        // `tray` are still the real native modules on this bar.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        for name in ["music", "bluetooth", "tray"] {
+        for name in ["bluetooth", "tray"] {
             let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert_eq!(m["type"], json!(name));
             assert_eq!(m["class"], json!(name));
@@ -2148,18 +2338,17 @@ mod tests {
 
         let win = start.iter().find(|m| m["name"] == "win").unwrap();
         assert!(win["tooltip"].is_string());
-        // T23: `music` is part of `audio_modules()`, which lives in `end`
-        // now (grouped with volume/mic — see that function's own doc
-        // comment), not `start`.
-        let music = end.iter().find(|m| m["name"] == "music").unwrap();
-        assert!(music["tooltip"].is_string(), "music missing a tooltip");
         // T19: wifi/eth/netsec moved out of this group — see below.
         let mic = end.iter().find(|m| m["name"] == "mic").unwrap();
         assert!(mic["tooltip"].is_string(), "mic missing a tooltip");
 
-        // T23: all five are part of `resource_modules()`, which lives in
-        // `end` now — see that function's own doc comment.
-        for name in ["cpu", "memory", "docker", "battery", "claudebar"] {
+        // T23: all three are part of `resource_modules()`, which lives in
+        // `end` now — see that function's own doc comment (T29: `cpu`/
+        // `memory`/`docker`/`claudebar` are `sysload`/`devload` now). T28:
+        // `music` joins this group — it lost its static tooltip the same
+        // way these did, when it converted from a native module to a
+        // hover-popup `custom` one (`music_module()`'s own doc comment).
+        for name in ["sysload", "devload", "battery", "music"] {
             let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert!(
                 m["tooltip"].is_null(),
@@ -2196,14 +2385,20 @@ mod tests {
         // that already had a `popup` field, except `window` (left out of
         // the plan's own list — see the stage's IRONBAR.md entry).
         // T23: cpu/memory/docker/battery/claudebar are part of
-        // `resource_modules()` (now in `end`); clock/date/pomo are part of
-        // `time_modules()` (now in `center` on every bar) — see both
-        // functions' own doc comments.
+        // `resource_modules()` (now in `end`, and now `sysload`/`battery`/
+        // `devload` after T29 — see that function's own doc comment);
+        // clock/date/pomo are part of `time_modules()` (now in `center` on
+        // every bar) — see both functions' own doc comments.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        for name in ["cpu", "memory", "docker", "battery", "claudebar"] {
+        // T28: `music`/`keepass` join this group — same hover-opens-the-
+        // popup shape as the resource pills. T29: `archupdate` drops out
+        // of this list — it is no longer a top-level module (folded into
+        // `devload`'s docker row), so it has no `on_mouse_enter` of its
+        // own to check here any more.
+        for name in ["sysload", "devload", "battery", "music", "keepass"] {
             let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert!(
                 m["on_mouse_enter"].is_string(),
@@ -2367,18 +2562,50 @@ mod tests {
         // way the old refresh-then-toggle pattern could; the test below
         // checks for that string instead of requiring the key's absence.
         // T23: cpu/memory/docker/battery/claudebar are part of
-        // `resource_modules()` (now in `end`); clock/date are part of
-        // `time_modules()` (now in `center` on every bar).
+        // `resource_modules()` (now in `end`, now `sysload`/`battery`/
+        // `devload` after T29 — see that function's own doc comment);
+        // clock/date are part of `time_modules()` (now in `center` on
+        // every bar).
         let cfg = build(&["eDP-1".to_string()]);
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        for name in ["cpu", "memory", "docker", "battery", "claudebar"] {
+        for name in ["sysload", "devload", "battery"] {
             let m = end.iter().find(|m| m["name"] == name).unwrap();
             if let Some(click) = m.get("on_click_left").and_then(|v| v.as_str()) {
                 assert!(
                     !click.contains("toggle-popup"),
                     "{name}'s on_click_left must not send toggle-popup: {click}"
                 );
+            }
+        }
+        // T29: `sysload`'s two rows and `devload`'s claude row/docker cell
+        // carry their own click, nested — same guard, one level down.
+        for (module, class) in [
+            ("sysload", "row-cpu"),
+            ("sysload", "row-mem"),
+            ("devload", "row-claude"),
+        ] {
+            let m = end.iter().find(|m| m["name"] == module).unwrap();
+            let rows = m["bar"][0]["widgets"].as_array().unwrap();
+            let row = rows.iter().find(|r| r["class"] == class).unwrap();
+            if let Some(click) = row.get("on_click_left").and_then(|v| v.as_str()) {
+                assert!(
+                    !click.contains("toggle-popup"),
+                    "{module}.{class}'s on_click_left must not send toggle-popup: {click}"
+                );
+            }
+        }
+        {
+            let devload = end.iter().find(|m| m["name"] == "devload").unwrap();
+            let svc_cells = devload["bar"][0]["widgets"][1]["widgets"].as_array().unwrap();
+            for cell in svc_cells {
+                if let Some(click) = cell.get("on_click_left").and_then(|v| v.as_str()) {
+                    assert!(
+                        !click.contains("toggle-popup"),
+                        "devload.{}'s on_click_left must not send toggle-popup: {click}",
+                        cell["class"]
+                    );
+                }
             }
         }
         for name in ["clock", "date"] {
@@ -2402,12 +2629,20 @@ mod tests {
                 );
             }
         }
-        // bluetooth/docker/claudebar/clock carry no on_click_left at all —
-        // still true, and worth pinning so a future edit that adds one
-        // notices this test instead of sliding past it silently.
-        for name in ["docker", "claudebar"] {
-            let m = end.iter().find(|m| m["name"] == name).unwrap();
-            assert!(m.get("on_click_left").is_none());
+        // bluetooth/clock carry no on_click_left at all, and neither do
+        // devload's claude row or docker cell (the au cell is the one
+        // exception — it runs arch-update, checked separately) — still
+        // true, and worth pinning so a future edit that adds one notices
+        // this test instead of sliding past it silently.
+        {
+            let devload = end.iter().find(|m| m["name"] == "devload").unwrap();
+            assert!(devload.get("on_click_left").is_none());
+            let rows = devload["bar"][0]["widgets"].as_array().unwrap();
+            let claude_row = rows.iter().find(|r| r["class"] == "row-claude").unwrap();
+            assert!(claude_row.get("on_click_left").is_none());
+            let svc_cells = rows[1]["widgets"].as_array().unwrap();
+            let docker_cell = svc_cells.iter().find(|c| c["class"] == "cell-docker").unwrap();
+            assert!(docker_cell.get("on_click_left").is_none());
         }
         let clock = center.iter().find(|m| m["name"] == "clock").unwrap();
         assert!(clock.get("on_click_left").is_none());

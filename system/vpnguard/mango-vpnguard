@@ -1,0 +1,955 @@
+#!/usr/bin/env bash
+# Root-owned VPN-guard helper. The only thing in this repo that flips ufw's
+# outgoing default, brings a WireGuard tunnel up or down, or writes
+# /run/mango-vpnguard/state. Everything else — deciding WHEN to arm, reading
+# connectivity, showing the notification with its buttons, choosing and
+# ordering the VPNs — is userspace (ironbar's net.sh / mango-bard, or plain
+# `nmcli`) and never needs root. Same split as mango-hotspot / mango-powermode.
+#
+# NetworkManager is the only source of truth. There is no vpnguard config
+# file — every WireGuard connection NM already knows about is a candidate,
+# read live:
+#
+#   connection.autoconnect-priority > 0   in the default-route chain, dialled
+#                                          highest-first; 0 (NM's own default)
+#                                          means "not managed by vpnguard"
+#   connection.autoconnect = yes          an always-on companion, brought up
+#                                          alongside whichever chain entry wins
+#   connection.interface-name             the device
+#   wireguard.peers[0].endpoint           the dial port to open while blocked
+#   wireguard.peers[0].allowed-ips        the routes, and which family this
+#                                          peer carries (the other family's
+#                                          default route gets flushed)
+#
+# Opting a profile in or out, and setting its priority, is one unprivileged
+# `nmcli connection modify` — no root, no file to edit, no installer to
+# re-run. This helper never creates, clones or imports a profile; that is the
+# user's job (or nordlynx-import's, for a NordVPN server), same as `nmcli
+# connection add` always was.
+#
+# State machine (one state at a time, in $STATE_FILE):
+#   unconfigured  no profile has autoconnect-priority>0 or autoconnect=yes —
+#              nothing to guard. `arm`/`auto` are a no-op so a fresh install
+#              never blocks all outgoing traffic before anything is chosen.
+#   blocked    ufw default deny outgoing; only LAN, DHCP and every managed
+#              profile's dial endpoint are open. No default route out.
+#   portal     blocked, plus DNS/80/443 to anywhere — a captive portal you
+#              cannot reach is a portal you cannot sign in to. Real exposure
+#              window, entered only while NM reports connectivity portal or
+#              limited, left the moment it reaches full.
+#   vpn:<name> the winning connection's name, verbatim (spaces and all) —
+#              its device is the default route; ufw allows out on it per its
+#              allowed-ips. Any always-on companion is up too.
+#   unsecured  ufw restored to whatever it was before the first `arm`.
+#
+# Every verb below is reached one of two ways: the NM dispatcher runs this
+# directly as root (no sudo needed, dispatcher scripts already run as root),
+# or the user session calls it through the fixed sudoers rules in
+# sudoers.d-mango-vpnguard. `up` is the one verb with a payload — an NM
+# connection name can contain spaces and parens, so it cannot be a sudoers
+# literal. It arrives as `CONN=<name>` on stdin, same idiom as
+# mango-powermode's `apply`, and is re-validated against the live chain
+# (a closed set derived from NM at call time) before anything is dialled.
+#
+#   mango-vpnguard arm                 # deny-by-default, LAN/DHCP/dial-ports only
+#   mango-vpnguard portal              # relax for a captive-portal login
+#   mango-vpnguard portal-close        # re-tighten once connectivity is full
+#   mango-vpnguard up                  # dial one chain entry ('CONN=<name>' on stdin)
+#   mango-vpnguard unsecure            # restore pre-guard ufw, remember this uplink
+#   mango-vpnguard disarm              # restore pre-guard ufw unconditionally
+#   mango-vpnguard protect             # forget any opt-out, arm and dial on this network
+#   mango-vpnguard auto                # dispatcher entry point: arm/portal/dial as needed
+#   mango-vpnguard devices             # print every managed interface name
+#   mango-vpnguard list                # print the managed profiles, one per line
+#   mango-vpnguard status              # print the current state, as a sentence
+#   mango-vpnguard help                # print this verb list and the state legend
+#   mango-vpnguard test                # self-check, no root needed
+#
+# See `mango-vpnguard help` for the same list at the terminal.
+set -uo pipefail
+
+# Overridable so `test` runs against fixture binaries instead of the real
+# machine — same idiom as MANGO_PM_* in mango-powermode.
+IP_BIN="${MANGO_VG_IP:-ip}"
+NMCLI_BIN="${MANGO_VG_NMCLI:-nmcli}"
+WG_BIN="${MANGO_VG_WG:-wg}"
+UFW_BIN="${MANGO_VG_UFW:-ufw}"
+IW_BIN="${MANGO_VG_IW:-iw}"
+IPTABLES_BIN="${MANGO_VG_IPTABLES:-iptables}"
+IP6TABLES_BIN="${MANGO_VG_IP6TABLES:-ip6tables}"
+
+RUN_DIR="${MANGO_VG_RUN_DIR:-/run/mango-vpnguard}"
+STATE_FILE="$RUN_DIR/state"
+UPLINK_FILE="$RUN_DIR/uplink"
+UNSECURED_FILE="$RUN_DIR/unsecured-key"
+UFW_SNAP_DIR="$RUN_DIR/ufw-snapshot"
+UFW_ETC="${MANGO_VG_UFW_ETC:-/etc/ufw}"
+LOCK_FILE="$RUN_DIR/lock"
+
+# Total seconds `auto`/`up` may spend walking the chain. A backstop against a
+# config listing more profiles than fit in one dial — not the mechanism that
+# keeps the NM dispatcher's 90s watchdog safe (the dispatcher hands the real
+# work to `systemd-run --no-block`, see dispatcher-90-mango-vpnguard).
+BUDGET="${MANGO_VG_BUDGET:-90}"
+
+TAB="$(printf '\t')"
+
+warn() { echo "mango-vpnguard: $*" >&2; }
+
+# ---------------------------------------------------------------- validation
+
+# host:port, still worth checking: a malformed value in NM's own data (never
+# something this helper writes) would otherwise reach ufw as a bad argv word
+# and just silently fail to open a dial port.
+valid_endpoint() {
+	_p=${1##*:}
+	_h=${1%:*}
+	case "$_p" in '' | *[!0-9]*) return 1 ;; esac
+	[ "$_p" -ge 1 ] && [ "$_p" -le 65535 ] || return 1
+	[ -n "$_h" ] || return 1
+	case "$_h" in *[!a-zA-Z0-9.:_-]*) return 1 ;; esac
+}
+
+# ---------------------------------------------------------------- NM reads
+
+# nmcli -g escapes every ':' (and ';', '\') in a value with a backslash, since
+# ':' would otherwise be ambiguous with -t's field separator. Undoes that —
+# generic "a backslash escapes the next character" unescape, so it also
+# covers '\;' and '\\' if they ever show up.
+# Always newline-terminated: two callers (wg_names, conn_routes) use this as
+# the direct action inside a `while read` loop, and need one line out per
+# line in — command-substitution callers strip it same as any trailing \n.
+unescape() { printf '%s\n' "$1" | sed 's/\\\(.\)/\1/g'; }
+
+# -> one NM connection name per line, WireGuard-type only. Strips the known
+# ":wireguard" suffix rather than splitting on the first ':', so a name that
+# itself contains a colon still comes out whole.
+wg_names() {
+	"$NMCLI_BIN" -t -f NAME,TYPE connection show 2>/dev/null | while IFS= read -r line; do
+		case "$line" in
+		*:wireguard) unescape "${line%:wireguard}" ;;
+		esac
+	done
+}
+
+conn_priority() { "$NMCLI_BIN" -g connection.autoconnect-priority connection show "$1" 2>/dev/null; }
+conn_autoconnect() { "$NMCLI_BIN" -g connection.autoconnect connection show "$1" 2>/dev/null; }
+conn_dev() { "$NMCLI_BIN" -g connection.interface-name connection show "$1" 2>/dev/null; }
+
+# <name> -> "host:port", unescaped, first peer only (a client tunnel has one).
+conn_endpoint() {
+	_peer=$("$NMCLI_BIN" -g wireguard.peers connection show "$1" 2>/dev/null | head -1)
+	unescape "$(printf '%s\n' "$_peer" | grep -o 'endpoint=[^ ]*' | head -1 | cut -d= -f2-)"
+}
+
+# <name> -> one allowed-ips prefix per line, unescaped. ';' is nmcli's own
+# list separator here (never escaped — a CIDR or host:port never contains a
+# literal ';'), so a plain split is safe.
+conn_routes() {
+	_peer=$("$NMCLI_BIN" -g wireguard.peers connection show "$1" 2>/dev/null | head -1)
+	_raw=$(printf '%s\n' "$_peer" | grep -o 'allowed-ips=[^ ]*' | head -1 | cut -d= -f2-)
+	printf '%s\n' "$_raw" | tr ';' '\n' | while IFS= read -r _p; do
+		[ -n "$_p" ] && unescape "$_p"
+	done
+}
+
+# <name> -> ipv4 | ipv6 | both | none, from which families its routes carry.
+# FAMILY=ipv4/ipv6 means the OTHER family's default route must be flushed
+# once this peer is up — left pointing at the bare uplink, it would leak once
+# ufw's egress opens for this device.
+conn_family() {
+	_v4=0 _v6=0
+	# A piped `while read` runs in a subshell, so _v4/_v6 set inside it would
+	# be lost — split on newline only (route prefixes never contain one) and
+	# loop in this shell instead.
+	_oldIFS=$IFS
+	IFS='
+'
+	set -f
+	for _p in $(conn_routes "$1"); do
+		case "$_p" in *:*) _v6=1 ;; *) _v4=1 ;; esac
+	done
+	set +f
+	IFS=$_oldIFS
+	if [ "$_v4" = 1 ] && [ "$_v6" = 1 ]; then
+		echo both
+	elif [ "$_v6" = 1 ]; then
+		echo ipv6
+	elif [ "$_v4" = 1 ]; then
+		echo ipv4
+	else
+		echo none
+	fi
+}
+
+# -> priority<TAB>autoconnect<TAB>name, one line per WireGuard connection.
+wg_conns() {
+	wg_names | while IFS= read -r _name; do
+		[ -n "$_name" ] || continue
+		printf '%s\t%s\t%s\n' "$(conn_priority "$_name")" "$(conn_autoconnect "$_name")" "$_name"
+	done
+}
+
+# -> chain names, highest autoconnect-priority first. Priority 0 (NM's own
+# default) means "not opted in".
+vpn_chain() {
+	wg_conns | awk -F"$TAB" '$1+0>0' | sort -t"$TAB" -k1,1nr | cut -d"$TAB" -f3
+}
+
+# -> always-on companion names (autoconnect=yes), one per line.
+vpn_always() {
+	wg_conns | awk -F"$TAB" '$2=="yes"{print $3}'
+}
+
+# ---------------------------------------------------------------- discovery
+
+# The physical/managed uplink: connected, and not a tunnel/bridge kind. Same
+# TUNNEL_KINDS exclusion bard/src/net.rs already uses for its own classifier.
+detect_uplink() {
+	"$NMCLI_BIN" -t -f DEVICE,TYPE,STATE dev status 2>/dev/null |
+		awk -F: '$3=="connected" && $2!~/^(wireguard|tun|vpn|loopback|bridge)$/ {print $1; exit}'
+}
+
+lan_subnet() { # <uplink> -> the LAN's own on-link subnet, or empty
+	"$IP_BIN" -4 route show dev "$1" scope link 2>/dev/null | awk '/proto kernel/{print $1; exit}'
+}
+
+wifi_bssid() { # <uplink> -> BSSID if associated to Wi-Fi, else empty
+	"$IW_BIN" dev "$1" link 2>/dev/null | awk '/^Connected to/{print $3; exit}'
+}
+
+# "SSID@BSSID" for Wi-Fi, "wired@<dev>" otherwise — a stable identity for the
+# per-uplink unsecured opt-out, independent of DHCP-assigned addresses.
+uplink_key() { # <uplink>
+	bssid=$(wifi_bssid "$1")
+	if [ -n "$bssid" ]; then
+		ssid=$("$NMCLI_BIN" -t -f active,ssid dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}')
+		printf '%s@%s' "$ssid" "$bssid"
+	else
+		printf 'wired@%s' "$1"
+	fi
+}
+
+current_uplink() { cat "$UPLINK_FILE" 2>/dev/null || detect_uplink; }
+
+# ---------------------------------------------------------------- state file
+
+state_write() {
+	mkdir -p "$RUN_DIR"
+	chmod 755 "$RUN_DIR"
+	printf '%s\n' "$1" >"$STATE_FILE"
+	chmod 644 "$STATE_FILE"
+}
+state_read() { cat "$STATE_FILE" 2>/dev/null || echo unknown; }
+
+# ---------------------------------------------------------------- ufw snapshot
+
+# First-arm-wins: captured once per boot, never overwritten by a later arm —
+# same shape as mango-powermode's baseline_get/put, for the same reason
+# (arm/disarm/arm must always restore the ORIGINAL policy, not whatever the
+# guard itself last set). Also captures whether ufw was enabled at all: a
+# fresh box commonly has it installed but disabled, and `arm` turns it on —
+# `disarm` must turn it back off, not just restore the rule files.
+ufw_snapshot() {
+	[ -f "$UFW_SNAP_DIR/user.rules" ] && return 0
+	mkdir -p "$UFW_SNAP_DIR"
+	cp -p "$UFW_ETC/user.rules" "$UFW_SNAP_DIR/user.rules" 2>/dev/null || true
+	cp -p "$UFW_ETC/user6.rules" "$UFW_SNAP_DIR/user6.rules" 2>/dev/null || true
+	awk -F= '/^ENABLED=/{print $2}' "$UFW_ETC/ufw.conf" 2>/dev/null >"$UFW_SNAP_DIR/enabled" || true
+}
+
+ufw_restore() {
+	if [ -f "$UFW_SNAP_DIR/user.rules" ]; then
+		cp -p "$UFW_SNAP_DIR/user.rules" "$UFW_ETC/user.rules"
+		cp -p "$UFW_SNAP_DIR/user6.rules" "$UFW_ETC/user6.rules"
+		if [ -f "$UFW_SNAP_DIR/enabled" ] && [ "$(cat "$UFW_SNAP_DIR/enabled")" != yes ]; then
+			"$UFW_BIN" --force disable >/dev/null 2>&1 || true
+		else
+			"$UFW_BIN" --force reload >/dev/null 2>&1 || true
+		fi
+		rm -rf "$UFW_SNAP_DIR"
+	else
+		echo "mango-vpnguard: no snapshot found, leaving ufw as-is" >&2
+	fi
+	docker_chain_disarm
+}
+
+# ------------------------------------------------------- docker egress guard
+
+# ufw only sets the host's own OUTPUT policy; a running container's egress is
+# FORWARDed, and Docker inserts its own ACCEPT rules ahead of ufw's in that
+# chain — `blocked` never covered it otherwise. A private chain jumped from
+# DOCKER-USER, so cleanup is deleting our own chain and never touches
+# Docker's rules. Skipped entirely if DOCKER-USER does not exist (no Docker,
+# or no bridge network yet).
+docker_chain_arm() { # <uplink>
+	for _ipt in "$IPTABLES_BIN" "$IP6TABLES_BIN"; do
+		command -v "$_ipt" >/dev/null 2>&1 || continue
+		"$_ipt" -L DOCKER-USER -n >/dev/null 2>&1 || continue
+		"$_ipt" -N MANGO-VPNGUARD 2>/dev/null || "$_ipt" -F MANGO-VPNGUARD
+		"$_ipt" -C DOCKER-USER -j MANGO-VPNGUARD 2>/dev/null || "$_ipt" -I DOCKER-USER -j MANGO-VPNGUARD
+		"$_ipt" -A MANGO-VPNGUARD -o "$1" -j DROP
+	done
+}
+
+# Called once a tunnel wins: let container traffic out the winning device.
+# Inserted ABOVE the uplink DROP added by docker_chain_arm.
+docker_chain_allow() { # <dev>
+	for _ipt in "$IPTABLES_BIN" "$IP6TABLES_BIN"; do
+		command -v "$_ipt" >/dev/null 2>&1 || continue
+		"$_ipt" -L MANGO-VPNGUARD -n >/dev/null 2>&1 || continue
+		"$_ipt" -C MANGO-VPNGUARD -o "$1" -j RETURN 2>/dev/null || "$_ipt" -I MANGO-VPNGUARD 1 -o "$1" -j RETURN
+	done
+}
+
+docker_chain_disarm() {
+	for _ipt in "$IPTABLES_BIN" "$IP6TABLES_BIN"; do
+		command -v "$_ipt" >/dev/null 2>&1 || continue
+		"$_ipt" -D DOCKER-USER -j MANGO-VPNGUARD 2>/dev/null || true
+		"$_ipt" -F MANGO-VPNGUARD 2>/dev/null || true
+		"$_ipt" -X MANGO-VPNGUARD 2>/dev/null || true
+	done
+}
+
+# ---------------------------------------------------------------- dial lock
+
+# The NM dispatcher fires `auto` on both "up" and "connectivity-change", back
+# to back; a manual `up` from the bar can land in the same window. Two
+# concurrent dials fighting over the same nmcli profiles is worse than one
+# waiting its turn. Not an error — a duplicate trigger, or a user retrying
+# while a dial is already in flight, both exit 0.
+dial_lock() {
+	mkdir -p "$RUN_DIR"
+	exec 9>"$LOCK_FILE"
+	flock -n 9 || {
+		warn "a dial is already in progress"
+		exit 1
+	}
+}
+
+# ---------------------------------------------------------------- arm / disarm
+
+cmd_arm() {
+	chain=$(vpn_chain)
+	always=$(vpn_always)
+	if [ -z "$chain" ] && [ -z "$always" ]; then
+		# No profile has opted in yet (fresh install: every WireGuard
+		# connection sits at autoconnect-priority=0). Arming a killswitch
+		# with nothing to dial would brick outgoing traffic for no reason —
+		# stay open until the user picks something.
+		state_write unconfigured
+		warn "no WireGuard profile is opted in — nothing to guard"
+		warn "  opt one in: nmcli connection modify \"<name>\" connection.autoconnect-priority 100"
+		return 0
+	fi
+
+	ufw_snapshot
+	uplink=$(detect_uplink)
+	[ -n "$uplink" ] || {
+		echo "mango-vpnguard: no uplink detected, refusing to arm blind" >&2
+		exit 1
+	}
+	printf '%s\n' "$uplink" >"$UPLINK_FILE"
+
+	"$UFW_BIN" --force enable >/dev/null 2>&1
+	"$UFW_BIN" --force default deny outgoing >/dev/null
+
+	lan=$(lan_subnet "$uplink")
+	# Covers DHCP's reply and the LAN's own DNS server (almost always the
+	# gateway) in one rule — a separate DNS-only allow would only matter for
+	# a network whose resolver sits outside the local /24.
+	[ -n "$lan" ] && "$UFW_BIN" --force allow out on "$uplink" to "$lan" comment 'mango-vpnguard LAN' >/dev/null 2>&1
+	"$UFW_BIN" --force allow out on "$uplink" to any port 67 proto udp comment 'mango-vpnguard DHCP' >/dev/null 2>&1
+
+	printf '%s\n%s\n' "$chain" "$always" | while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		ep=$(conn_endpoint "$name")
+		valid_endpoint "$ep" || {
+			warn "$name: bad or missing endpoint, not opening a dial port for it"
+			continue
+		}
+		host=${ep%:*}
+		port=${ep##*:}
+		"$UFW_BIN" --force allow out on "$uplink" to "$host" port "$port" proto udp \
+			comment "mango-vpnguard $name dial" >/dev/null 2>&1
+		# A profile restricted to one user's session (connection.permissions
+		# non-empty) will never activate for a pre-login root dial — this
+		# runs as root here, but the same restriction also blocks the NM
+		# dispatcher's boot-time `auto`. Worth a warning, not a fix: only
+		# the user knows whether that restriction was deliberate.
+		perms=$("$NMCLI_BIN" -g connection.permissions connection show "$name" 2>/dev/null)
+		[ -n "$perms" ] && warn "$name: restricted to $perms, will not dial before login — clear with: nmcli connection modify \"$name\" connection.permissions ''"
+	done
+
+	docker_chain_arm "$uplink"
+
+	state_write blocked
+	echo "armed: default deny outgoing, uplink=$uplink lan=${lan:-none}"
+}
+
+cmd_disarm() {
+	ufw_restore
+	rm -f "$UPLINK_FILE"
+	state_write unsecured
+	echo "disarmed: ufw restored to its pre-guard snapshot"
+}
+
+# ---------------------------------------------------------------- portal
+
+cmd_portal() {
+	uplink=$(current_uplink)
+	[ -n "$uplink" ] || {
+		echo "mango-vpnguard: no uplink for portal relax" >&2
+		exit 1
+	}
+	"$UFW_BIN" --force allow out on "$uplink" to any port 53 comment 'mango-vpnguard portal DNS' >/dev/null 2>&1
+	"$UFW_BIN" --force allow out on "$uplink" to any port 80 proto tcp comment 'mango-vpnguard portal http' >/dev/null 2>&1
+	"$UFW_BIN" --force allow out on "$uplink" to any port 443 proto tcp comment 'mango-vpnguard portal https' >/dev/null 2>&1
+	state_write portal
+	echo "portal: relaxed for captive-portal login on $uplink"
+}
+
+cmd_portal_close() {
+	uplink=$(current_uplink)
+	[ -n "$uplink" ] || return 0
+	"$UFW_BIN" --force delete allow out on "$uplink" to any port 53 >/dev/null 2>&1 || true
+	"$UFW_BIN" --force delete allow out on "$uplink" to any port 80 proto tcp >/dev/null 2>&1 || true
+	"$UFW_BIN" --force delete allow out on "$uplink" to any port 443 proto tcp >/dev/null 2>&1 || true
+	state_write blocked
+	echo "portal-close: re-tightened on $uplink"
+}
+
+# ---------------------------------------------------------------- connect
+
+# Scopes ufw's egress on <dev> to <name>'s allowed-ips rather than a blanket
+# allow — for a full-tunnel entry allowed-ips=0.0.0.0/0 ends up equivalent to
+# "allow everything out <dev>", but a split/always entry stays scoped to
+# exactly the prefixes it is meant to carry.
+apply_routes() { # <name> <dev>
+	conn_routes "$1" | while IFS= read -r n; do
+		[ -n "$n" ] || continue
+		"$UFW_BIN" --force allow out on "$2" to "$n" comment "mango-vpnguard $1" >/dev/null 2>&1
+	done
+}
+
+apply_family() { # <name>
+	case "$(conn_family "$1")" in
+	ipv4) "$IP_BIN" -6 route flush default >/dev/null 2>&1 || true ;;
+	ipv6) "$IP_BIN" -4 route flush default >/dev/null 2>&1 || true ;;
+	esac
+}
+
+# Dials <name> and waits for a real handshake. Does NOT write state — callers
+# decide whether this was the default-route winner (cmd_up, the auto chain)
+# or a best-effort companion (bring_up_always). Endpoint rotation across
+# several ports for one peer is now expressed as several NM profiles in the
+# chain, not a loop here — NM already owns the endpoint list.
+try_connect() { # <name> -> 0 on handshake success
+	name="$1"
+	dev=$(conn_dev "$name")
+	[ -n "$dev" ] || {
+		warn "$name: no interface-name set, skipping"
+		return 1
+	}
+	"$NMCLI_BIN" device disconnect "$dev" >/dev/null 2>&1 || true
+	"$NMCLI_BIN" connection up "$name" >/dev/null 2>&1 || {
+		warn "$name: failed to activate"
+		return 1
+	}
+	# NM reports "activated" for a WireGuard link that has never handshaked —
+	# read the real handshake timestamp, not nmcli's exit code.
+	ok=0
+	for _ in $(seq 1 16); do # ~8s at 0.5s steps
+		hs=$("$WG_BIN" show "$dev" latest-handshakes 2>/dev/null | awk '{print $2}')
+		[ -n "$hs" ] && [ "$hs" != 0 ] && {
+			ok=1
+			break
+		}
+		sleep 0.5
+	done
+	if [ "$ok" = 1 ]; then
+		apply_routes "$name" "$dev"
+		apply_family "$name"
+		echo "$name: handshake"
+		return 0
+	fi
+	"$NMCLI_BIN" connection down "$name" >/dev/null 2>&1 || true
+	warn "$name: dial failed (no handshake)"
+	return 1
+}
+
+# Brings up every always-role companion whose device is not the one that just
+# won the default route (two profiles cannot share one interface). Best
+# effort: a failing companion means internal prefixes are unreachable, never
+# that the default-route winner gets torn down.
+bring_up_always() { # <winning_dev>
+	vpn_always | while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		[ "$(conn_dev "$name")" = "$1" ] && continue
+		try_connect "$name" >/dev/null 2>&1 || warn "companion '$name' did not come up"
+	done
+}
+
+cmd_up() { # manual/notification retry of one chain entry — 'CONN=<name>' on stdin
+	name=""
+	while IFS='=' read -r k v; do
+		[ "$k" = CONN ] && name="$v"
+	done
+	[ -n "$name" ] || {
+		echo "mango-vpnguard: usage: printf 'CONN=<name>\\n' | mango-vpnguard up" >&2
+		exit 1
+	}
+	vpn_chain | grep -qxF "$name" || {
+		echo "mango-vpnguard: '$name' is not a chain entry (autoconnect-priority=0, or not WireGuard)" >&2
+		exit 1
+	}
+	dial_lock
+	if try_connect "$name"; then
+		state_write "vpn:$name"
+		dev=$(conn_dev "$name")
+		docker_chain_allow "$dev"
+		bring_up_always "$dev"
+		return 0
+	fi
+	exit 1
+}
+
+# ---------------------------------------------------------------- unsecure
+
+cmd_unsecure() {
+	uplink=$(current_uplink)
+	mkdir -p "$RUN_DIR"
+	[ -n "$uplink" ] && uplink_key "$uplink" >"$UNSECURED_FILE"
+	ufw_restore
+	state_write unsecured
+	echo "unsecured: allowed for $(cat "$UNSECURED_FILE" 2>/dev/null || echo "$uplink") until this uplink changes"
+}
+
+# unsecured-for verb: net.sh/dispatcher check this before re-arming, so
+# rejoining the SAME network does not nag again, but a NEW one does.
+cmd_unsecured_for() { # <uplink> -> exit 0 if it matches the remembered opt-out
+	[ -f "$UNSECURED_FILE" ] || return 1
+	[ "$(uplink_key "$1")" = "$(cat "$UNSECURED_FILE")" ]
+}
+
+# Reverses `unsecure`/`disarm` on the CURRENT network, without waiting for a
+# network change. Forgets any opt-out, then walks the same path `auto` would
+# take on a fresh uplink: `cmd_auto`'s uplink-changed check sees no recorded
+# uplink and arms, then dials the chain.
+cmd_protect() {
+	rm -f "$UNSECURED_FILE" "$UPLINK_FILE"
+	cmd_auto
+}
+
+# ---------------------------------------------------------------- auto
+
+# Called by the dispatcher on every "up" and "connectivity-change" event
+# (handed off via `systemd-run --no-block`, so this runs outside the NM
+# dispatcher's own 90s watchdog — see dispatcher-90-mango-vpnguard). Thin
+# decision layer over the verbs above. Notification-with-buttons on a failed
+# dial is NOT done here: this runs as root with no session to notify. net.sh
+# polls $STATE_FILE and prompts when it stays `blocked` after connectivity
+# reaches full — same split as the rest of this file (root state, userspace
+# UI).
+cmd_auto() {
+	dial_lock
+	uplink=$(detect_uplink)
+	[ -n "$uplink" ] || return 0 # no managed uplink right now — nothing to do
+
+	if [ -z "$(vpn_chain)" ] && [ -z "$(vpn_always)" ]; then
+		state_write unconfigured
+		return 0
+	fi
+
+	prev_uplink=$(cat "$UPLINK_FILE" 2>/dev/null || echo "")
+	if [ "$uplink" != "$prev_uplink" ]; then
+		if cmd_unsecured_for "$uplink"; then
+			printf '%s\n' "$uplink" >"$UPLINK_FILE"
+			state_write unsecured
+			echo "auto: $uplink is a remembered unsecured network, staying unarmed"
+			return 0
+		fi
+		cmd_arm
+	fi
+
+	conn=$("$NMCLI_BIN" -t -f CONNECTIVITY general 2>/dev/null | head -1)
+	case "$conn" in
+	portal | limited)
+		[ "$(state_read)" = portal ] || cmd_portal
+		;;
+	full)
+		st=$(state_read)
+		if [ "$st" = portal ]; then
+			cmd_portal_close
+			st=blocked
+		fi
+		case "$st" in
+		vpn:* | unsecured) : ;; # already settled
+		*)
+			SECONDS=0
+			won=0
+			# vpn_chain lines can contain spaces and parens — split ONLY on
+			# newline here, and disable globbing, so a name like
+			# "ProtonVPN (DE317)" survives the word-split as one word.
+			oldIFS=$IFS
+			IFS='
+'
+			set -f
+			for name in $(vpn_chain); do
+				[ "$SECONDS" -lt "$BUDGET" ] || {
+					echo "mango-vpnguard: dial budget (${BUDGET}s) exhausted, stopping the chain" >&2
+					break
+				}
+				if try_connect "$name"; then
+					state_write "vpn:$name"
+					dev=$(conn_dev "$name")
+					docker_chain_allow "$dev"
+					bring_up_always "$dev"
+					won=1
+					break
+				fi
+			done
+			set +f
+			IFS=$oldIFS
+			[ "$won" = 1 ] || echo "mango-vpnguard: no configured VPN came up — state stays blocked" >&2
+			;;
+		esac
+		;;
+	*) : ;; # none/unknown — offline, nothing to relax or dial
+	esac
+}
+
+# ---------------------------------------------------------------- devices / list
+
+cmd_devices() { # -> one managed interface name per line, for the NM dispatcher
+	{ vpn_chain
+	vpn_always; } | while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		conn_dev "$name"
+	done | sort -u
+}
+
+cmd_list() {
+	rows=$(wg_conns | while IFS="$TAB" read -r prio ac name; do
+		[ -n "$name" ] || continue
+		if [ "${prio:-0}" -gt 0 ] 2>/dev/null; then
+			role=default
+		elif [ "$ac" = yes ]; then
+			role=always
+		else
+			continue
+		fi
+		printf '%s\t%s\t%s\t%s\n' "${prio:-0}" "$role" "$(conn_dev "$name")" "$name"
+	done)
+	# Chain entries first, highest priority first (net.sh numbers them in this
+	# order); always-on companions after, order among themselves unimportant.
+	printf '%s\n' "$rows" | awk -F"$TAB" '$2=="default"' | sort -t"$TAB" -k1,1nr
+	printf '%s\n' "$rows" | awk -F"$TAB" '$2=="always"'
+}
+
+# ---------------------------------------------------------------- status / test
+
+# One sentence for the state token, for a human reading a terminal. Nothing
+# parses this: net.sh and net.rs read $STATE_FILE directly for the token
+# itself (`install.sh` is the only caller of this verb, and only checks the
+# exit code), so the wording here is free to change.
+cmd_status() {
+	st=$(state_read)
+	case "$st" in
+	vpn:*) echo "protected — ${st#vpn:}" ;;
+	blocked) echo "blocked — nothing can leave until a tunnel connects" ;;
+	portal) echo "sign-in needed — captive portal on this network" ;;
+	unsecured) echo "not protected — traffic is leaving in the clear" ;;
+	unconfigured) echo "not protected — no tunnel chosen yet" ;;
+	*) echo "not running — no state recorded" ;;
+	esac
+}
+
+cmd_help() {
+	cat <<-'EOF'
+		usage: mango-vpnguard <verb>
+
+		  arm                 deny-by-default, LAN/DHCP/dial-ports only
+		  disarm              restore pre-guard ufw unconditionally
+		  protect             forget any opt-out, arm and dial on this network
+		  unsecure            restore pre-guard ufw, remember this uplink
+		  portal              relax for a captive-portal login
+		  portal-close        re-tighten once connectivity is full
+		  up                  dial one chain entry ('CONN=<name>' on stdin)
+		  auto                dispatcher entry point: arm/portal/dial as needed
+		  devices             print every managed interface name
+		  list                print the managed profiles, one per line
+		  status              print the current state, as a sentence
+		  test                self-check, no root needed
+
+		state (in /run/mango-vpnguard/state):
+		  vpn:<name>    protected — <name> is carrying outgoing traffic
+		  blocked       nothing can leave until a tunnel connects
+		  portal        captive portal — sign in, then it dials out
+		  unsecured     not protected — traffic is leaving in the clear
+		  unconfigured  not protected — no tunnel chosen yet
+	EOF
+}
+
+cmd_test() {
+	for b in "$UFW_BIN" "$NMCLI_BIN" "$WG_BIN" "$IP_BIN"; do
+		command -v "$b" >/dev/null 2>&1 || {
+			echo "mango-vpnguard test: missing binary: $b" >&2
+			exit 1
+		}
+	done
+
+	valid_endpoint 203.0.113.10:51820 || {
+		echo "valid_endpoint should accept host:port"
+		exit 1
+	}
+	valid_endpoint 203.0.113.10:0 && {
+		echo "valid_endpoint should reject port 0"
+		exit 1
+	}
+	valid_endpoint 203.0.113.10:70000 && {
+		echo "valid_endpoint should reject port > 65535"
+		exit 1
+	}
+	valid_endpoint 203.0.113.10 && {
+		echo "valid_endpoint should reject a missing port"
+		exit 1
+	}
+	valid_endpoint '203.0.113.10:51820;reboot' && {
+		echo "valid_endpoint should reject a shell metacharacter"
+		exit 1
+	}
+
+	[ "$(unescape 'fd10\:10\:\:1/128')" = "fd10:10::1/128" ] || {
+		echo "unescape should turn fd10\\:10\\:\\:1/128 into fd10:10::1/128"
+		exit 1
+	}
+	[ "$(unescape '149.88.19.225\:51820')" = "149.88.19.225:51820" ] || {
+		echo "unescape should turn an escaped endpoint colon into a plain one"
+		exit 1
+	}
+
+	T=$(mktemp -d)
+	trap 'rm -rf "$T"' EXIT
+	mkdir -p "$T/bin"
+
+	# STATE_FILE etc. were already expanded from the old RUN_DIR at
+	# top-level parse time, so the paths derived from it need re-pointing.
+	RUN_DIR="$T/run"
+	STATE_FILE="$RUN_DIR/state"
+	UPLINK_FILE="$RUN_DIR/uplink"
+	UNSECURED_FILE="$RUN_DIR/unsecured-key"
+	UFW_SNAP_DIR="$RUN_DIR/ufw-snapshot"
+	LOCK_FILE="$RUN_DIR/lock"
+
+	state_write "vpn:ProtonVPN (DE317)"
+	[ "$(state_read)" = "vpn:ProtonVPN (DE317)" ] || {
+		echo "state round-trip failed for a name with a space and parens"
+		exit 1
+	}
+
+	# --- wg_conns / vpn_chain / vpn_always against a fixture nmcli ---
+	cat >"$T/bin/nmcli" <<-'EOF'
+		#!/bin/sh
+		case "$*" in
+		"-t -f NAME,TYPE connection show")
+			printf 'Test VPN:wireguard\nProtonVPN (DE317):wireguard\nHome Gateway:wireguard\nIdle VPN:wireguard\nOther:vpn\n' ;;
+		"-g connection.autoconnect-priority connection show Test VPN") echo 10 ;;
+		"-g connection.autoconnect-priority connection show ProtonVPN (DE317)") echo 20 ;;
+		"-g connection.autoconnect-priority connection show Home Gateway") echo 0 ;;
+		"-g connection.autoconnect-priority connection show Idle VPN") echo 0 ;;
+		"-g connection.autoconnect connection show Test VPN") echo no ;;
+		"-g connection.autoconnect connection show ProtonVPN (DE317)") echo no ;;
+		"-g connection.autoconnect connection show Home Gateway") echo yes ;;
+		"-g connection.autoconnect connection show Idle VPN") echo no ;;
+		"-g connection.interface-name connection show Test VPN") echo wg_test ;;
+		"-g connection.interface-name connection show ProtonVPN (DE317)") echo nauthiz-DE-317 ;;
+		"-g connection.interface-name connection show Home Gateway") echo wg_home ;;
+		"-g wireguard.peers connection show Test VPN")
+			printf '%s\n' 'K1= allowed-ips=0.0.0.0/0 endpoint=203.0.113.10\:51820 persistent-keepalive=25' ;;
+		"-g wireguard.peers connection show ProtonVPN (DE317)")
+			printf '%s\n' 'K2= allowed-ips=0.0.0.0/0;::/0 endpoint=149.88.19.225\:51820 persistent-keepalive=25' ;;
+		"-g wireguard.peers connection show Home Gateway")
+			printf '%s\n' 'K3= allowed-ips=10.0.0.0/16 endpoint=203.0.113.20\:51820 persistent-keepalive=25' ;;
+		esac
+	EOF
+	chmod +x "$T/bin/nmcli"
+	NMCLI_BIN="$T/bin/nmcli"
+
+	[ "$(vpn_chain | tr '\n' '|')" = "ProtonVPN (DE317)|Test VPN|" ] || {
+		echo "vpn_chain should list DE317 (prio 20) before Test VPN (prio 10), Idle VPN (prio 0) excluded"
+		echo "got: $(vpn_chain | tr '\n' '|')"
+		exit 1
+	}
+	[ "$(vpn_always | tr '\n' '|')" = "Home Gateway|" ] || {
+		echo "vpn_always should list only the autoconnect=yes profile"
+		exit 1
+	}
+	[ "$(conn_family "ProtonVPN (DE317)")" = both ] || {
+		echo "conn_family should read 'both' from 0.0.0.0/0;::/0"
+		exit 1
+	}
+	[ "$(conn_family "Test VPN")" = ipv4 ] || {
+		echo "conn_family should read 'ipv4' from a v4-only allowed-ips"
+		exit 1
+	}
+	[ "$(conn_endpoint "ProtonVPN (DE317)")" = "149.88.19.225:51820" ] || {
+		echo "conn_endpoint should unescape the endpoint colon"
+		exit 1
+	}
+
+	printf 'CONN=Idle VPN\n' | cmd_up >/dev/null 2>&1 && {
+		echo "cmd_up should reject a profile with autoconnect-priority=0 (Idle VPN)"
+		exit 1
+	}
+
+	# --- conn_family in isolation, v6-only ---
+	cat >"$T/bin/nmcli-v6" <<-'EOF'
+		#!/bin/sh
+		printf '%s\n' 'K= allowed-ips=::/0 endpoint=203.0.113.10\:1 persistent-keepalive=25'
+	EOF
+	chmod +x "$T/bin/nmcli-v6"
+	NMCLI_BIN="$T/bin/nmcli-v6"
+	[ "$(conn_family x)" = ipv6 ] || {
+		echo "conn_family should read 'ipv6' from a v6-only allowed-ips"
+		exit 1
+	}
+
+	# --- empty chain must not touch ufw ---
+	cat >"$T/bin/nmcli-empty" <<-'EOF'
+		#!/bin/sh
+		case "$*" in
+		"-t -f NAME,TYPE connection show") printf 'Other:vpn\n' ;;
+		esac
+	EOF
+	chmod +x "$T/bin/nmcli-empty"
+	NMCLI_BIN="$T/bin/nmcli-empty"
+	cat >"$T/bin/ufw-unreached" <<-'EOF'
+		#!/bin/sh
+		echo "ufw should not have been called" >&2
+		exit 1
+	EOF
+	chmod +x "$T/bin/ufw-unreached"
+	UFW_BIN="$T/bin/ufw-unreached"
+	cmd_arm
+	[ "$(state_read)" = unconfigured ] || {
+		echo "cmd_arm with an empty chain should write state 'unconfigured'"
+		exit 1
+	}
+
+	cat >"$T/bin/nmcli" <<-'EOF'
+		#!/bin/sh
+		case "$*" in
+		"-t -f DEVICE,TYPE,STATE dev status")
+			printf 'wlo1:wifi:connected\nwg_test:wireguard:connected\ndocker0:bridge:connected\n' ;;
+		"-t -f active,ssid dev wifi")
+			printf 'no:OtherNet\nyes:HomeNet\n' ;;
+		esac
+	EOF
+	chmod +x "$T/bin/nmcli"
+	NMCLI_BIN="$T/bin/nmcli"
+	[ "$(detect_uplink)" = wlo1 ] || {
+		echo "detect_uplink should pick wlo1, not wg_test or docker0"
+		exit 1
+	}
+
+	cat >"$T/bin/ip" <<-'EOF'
+		#!/bin/sh
+		echo "192.168.5.0/24 dev wlo1 proto kernel scope link src 192.168.5.102"
+	EOF
+	chmod +x "$T/bin/ip"
+	IP_BIN="$T/bin/ip"
+	[ "$(lan_subnet wlo1)" = 192.168.5.0/24 ] || {
+		echo "lan_subnet parsed the wrong subnet"
+		exit 1
+	}
+
+	cat >"$T/bin/iw" <<-'EOF'
+		#!/bin/sh
+		echo "Connected to aa:bb:cc:dd:ee:ff (on wlo1)"
+	EOF
+	chmod +x "$T/bin/iw"
+	IW_BIN="$T/bin/iw"
+	[ "$(uplink_key wlo1)" = "HomeNet@aa:bb:cc:dd:ee:ff" ] || {
+		echo "uplink_key built the wrong wifi identity"
+		exit 1
+	}
+
+	cat >"$T/bin/iw-none" <<-'EOF'
+		#!/bin/sh
+		true
+	EOF
+	chmod +x "$T/bin/iw-none"
+	IW_BIN="$T/bin/iw-none"
+	[ "$(uplink_key eno2)" = "wired@eno2" ] || {
+		echo "uplink_key should fall back to wired@<dev> off wifi"
+		exit 1
+	}
+
+	# --- status sentences ---
+	state_write "vpn:ProtonVPN (DE317)"
+	[ "$(cmd_status)" = "protected — ProtonVPN (DE317)" ] || {
+		echo "status should read the connection name out of vpn:<name>"
+		exit 1
+	}
+	state_write unsecured
+	[ "$(cmd_status)" = "not protected — traffic is leaving in the clear" ] || {
+		echo "status should describe 'unsecured' in plain words"
+		exit 1
+	}
+	rm -f "$STATE_FILE"
+	[ "$(cmd_status)" = "not running — no state recorded" ] || {
+		echo "status should not claim 'blocked' when no state file exists"
+		exit 1
+	}
+
+	# --- help goes to stdout, exit 0 ---
+	cmd_help >/dev/null || {
+		echo "help should exit 0"
+		exit 1
+	}
+
+	# --- protect forgets the opt-out ---
+	: >"$UNSECURED_FILE"
+	: >"$UPLINK_FILE"
+	cat >"$T/bin/nmcli-none" <<-'EOF'
+		#!/bin/sh
+		true
+	EOF
+	chmod +x "$T/bin/nmcli-none"
+	NMCLI_BIN="$T/bin/nmcli-none"
+	cmd_protect >/dev/null
+	[ -f "$UNSECURED_FILE" ] && {
+		echo "protect should remove the remembered opt-out"
+		exit 1
+	}
+	[ -f "$UPLINK_FILE" ] && {
+		echo "protect should remove the remembered uplink"
+		exit 1
+	}
+
+	echo ok
+}
+
+# ---------------------------------------------------------------- dispatch
+
+case "${1:-}" in
+arm) cmd_arm ;;
+disarm) cmd_disarm ;;
+portal) cmd_portal ;;
+portal-close) cmd_portal_close ;;
+up) cmd_up ;;
+unsecure) cmd_unsecure ;;
+unsecured-for) cmd_unsecured_for "${2:?usage: unsecured-for <uplink>}" ;;
+protect) cmd_protect ;;
+auto) cmd_auto ;;
+devices) cmd_devices ;;
+list) cmd_list ;;
+status) cmd_status ;;
+help) cmd_help ;;
+test) cmd_test ;;
+*)
+	echo "mango-vpnguard: unknown verb '${1:-}' — run 'mango-vpnguard help'" >&2
+	exit 1
+	;;
+esac

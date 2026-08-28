@@ -9,6 +9,11 @@ Nothing machine-specific is hardcoded. Values come from three places:
    place. See [power.md](power.md).
 3. Environment variables, listed below.
 
+vpnguard has no config file: which WireGuard profiles it guards, and in
+what order, is read live from NetworkManager's own
+`connection.autoconnect-priority` and `connection.autoconnect`. See
+`system/vpnguard/README.md`.
+
 ## mango/local.conf
 
 | Value | Why it is per-machine |
@@ -43,7 +48,22 @@ Nothing machine-specific is hardcoded. Values come from three places:
 | `MANGO_PACMAN_LCK` | `/var/lib/pacman/db.lck` | `busy.sh` |
 | `MANGO_AI_DIR` / `MANGO_AI_MODEL` | `~/.local/share/rofi-ai` / a free OpenRouter model | `rofi/ai.sh` |
 | `MANGO_TOOLTIP_DELAY_MS` | `80` | the GTK tooltip shim |
+| `MANGO_VG_BUDGET` | `90` (seconds) | `mango-vpnguard auto`'s dial-chain backstop |
+| `MANGO_VG_STATE_FILE` | `/run/mango-vpnguard/state` | `net.sh`, bard |
+| `MANGO_VG_BIN` | `mango-vpnguard` | `net.sh` (points `list` at a fixture during `--selftest`) |
+| `MANGO_REMOTE_WG_DEV` | the config's `ROLE=always` VPN device | `system/remote/install.sh` |
 
 Sysfs path overrides exist for tests (`MANGO_CPU_SYS`, `MANGO_RAPL_*`,
 `MANGO_UPOWER_DIR`, `MANGO_BACKLIGHT_DIR`, `MANGO_PM_*`); the defaults are
 correct on a normal system.
+
+## Non-mango application preferences
+
+Not this repo's config, but noted here because mango's window placement
+(one window per tag) depends on them. `install-config.sh` does not manage
+these files — the app rewrites its own config on exit, so symlinking it
+into the repo would just lose the setting on the app's next close.
+
+| App | File | Value | Why |
+|---|---|---|---|
+| Master PDF Editor | `~/.config/Code Industry/Master PDF Editor.conf` | `open_one_window=false` | With `true` (the app's own default), a second document opened while a Master PDF Editor window already exists on another tag becomes a tab in that window instead of a new one on the tag you are viewing. Set to `false` on this machine (2026-08-28) so every opened document gets its own window, mapped onto the current tag. Tradeoff: two documents opened on the *same* tag also get separate windows now, instead of tabs. |

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Installed to /etc/NetworkManager/dispatcher.d/90-mango-vpnguard by
+# system/vpnguard/install.sh. Runs as root already — NM dispatcher scripts
+# always do — so it calls mango-vpnguard directly, no sudo.
+#
+# NM passes ($1=interface, $2=action). Deliberately thin: all the decision
+# logic (arm vs. stay armed, portal vs. dial, which VPN comes next) lives in
+# `mango-vpnguard auto`, not here, so there is exactly one place that state
+# machine is written. This script only decides WHEN to call it, and ignores
+# events on the guard's own tunnel interfaces — those going up/down are OUR
+# OWN actions (mango-vpnguard up/auto), not a new network to react to;
+# reacting to them here would be a feedback loop. The device list comes from
+# `devices`, which reads NetworkManager live, so it stays correct as chain
+# entries and companions are added or removed by a plain `nmcli` command.
+#
+# The dial itself can take longer than NM's 90s dispatcher watchdog once
+# several VPNs each hold several endpoints — `systemd-run --no-block` hands
+# the real work to a transient unit and lets this script return at once.
+set -uo pipefail
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+
+is_guard_dev() {
+	/usr/local/bin/mango-vpnguard devices 2>/dev/null | grep -qxF "$IFACE"
+}
+
+[ -n "$IFACE" ] && is_guard_dev && exit 0
+
+case "$ACTION" in
+up | connectivity-change)
+	exec systemd-run --unit=mango-vpnguard-dial --collect --no-block \
+		/usr/local/bin/mango-vpnguard auto
+	;;
+*) exit 0 ;;
+esac

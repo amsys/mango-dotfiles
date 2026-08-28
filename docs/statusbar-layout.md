@@ -28,7 +28,7 @@ CLI).
 | --- | --- | --- |
 | `start` | launcher → tags → focus | `spark` → `ws-1…9` + `ws-ov` → `win` |
 | `center` | time | `clock` → `date` → `pomo` |
-| `end` | tray → resources → tools → audio → connectivity → session | `tray` → `cpu` `memory` `docker` `battery` `claudebar` → tools-drawer(`colorpicker` `darkmode` `snip`) `inhibit` → `music` `volume` `mic` → `net-spinner` `wifi` `eth` `netsec` `hotspot` `remote` `bluetooth` → `power` |
+| `end` | tray → resources → tools → audio → connectivity → session | `tray` `traytoggle` `keepass` → `sysload`(`cpu`+`memory` rows) `battery` `devload`(`claude` row, `docker`+`archupdate` row) → tools-drawer(`colorpicker` `darkmode` `snip`) `inhibit` → `music` `volume` `mic` → `net-spinner` `wifi` `eth` `netsec` `hotspot` `remote` `bluetooth` → `power` |
 
 The fallback bar (no monitor matched, so no tag block — see §3.1) carries the
 same blocks minus `ws-*`.
@@ -90,12 +90,14 @@ absolute X MUST be constant across all states.
 
 ### INV-5 — Fixed-width numerics
 
-Any module rendering a changing **digit string** — `cpu`, `memory`,
-`battery`, `claudebar` (percentages, 1-3 digits), `docker` (a container
-count with no digit cap — checked against `docker.rs`, not assumed from a
-typical dev-box count) and `clock`/`date`/`pomo` (fixed-format, but
-proportional digit widths still shimmer on substitution) — MUST render at
-constant width.
+Any module rendering a changing **digit string** — `battery` (percentage),
+`sysload` (`cpu`+`memory` rows — icon and `.gauge` only since T28, no digit
+of their own, but the reserve still guards the icon/gauge envelope),
+`devload` (`claude` row's percentage + countdown, `docker`/`archupdate`
+cells — a container count with no digit cap, checked against `docker.rs`,
+not assumed from a typical dev-box count) and `clock`/`date`/`pomo`
+(fixed-format, but proportional digit widths still shimmer on substitution)
+— MUST render at constant width.
 
 - `font-feature-settings: "tnum" 1` (tabular figures) on both the module's
   own node and its `label` descendant (the T17 GTK4 inheritance trap: a
@@ -190,19 +192,94 @@ none of the three needs a corner-quality click target.
 
 | # | Module | Interaction | Width | Rationale |
 | - | --- | --- | --- | --- |
-| 7 | `tray` | click → app menus | variable | Leads `end` so its own growth is absorbed by itself alone (INV-1) — the only variable-width member of `end`. |
+| 7 | `tray` | click → app window or menu | variable | Leads `end` so its own growth is absorbed by itself alone (INV-1) — the only variable-width member of `end`. Always visible (T29 follow-up: `TRAY_DRAWER_ENABLED = false`) — see below. |
+| 7c | `keepass` | click → show/hide KeePassXC | fixed | Promoted out of the drawer — lock state is glance-worthy. |
+
+**T28 — the tray drawer.** Ironbar's native `tray` module has no per-item
+filter (only `icon_size`/`direction`/`prefer_theme_icons` plus the common
+options — every item gets the same `.item` class, none gets a name), so
+"important vs. hidden" cannot be expressed inside the tray itself. The item
+worth a permanent glance on this machine (KeePassXC) is rebuilt as its own
+pill instead of being kept out of the drawer. `tray`'s own `on_click_left` is
+also overridden (`tray-click.sh {address}`) — it jumps to an already-open
+window before falling back to SNI `Activate`, so a tray click can no longer
+hide a window that lives on another tag. The one accepted regression:
+NordVPN is the only tray item with `ItemIsMenu: true` (confirmed live via
+`busctl --user get-property`), so its left-click menu moves to right-click.
+
+**T29 follow-up — drawer disabled by default.** User preference: the tray
+icon list should always be visible, no hide-behind-toggle. `genconfig.rs`'s
+`TRAY_DRAWER_ENABLED` constant (default `false`) turns off both `tray`'s own
+`show_if: "#tray_open"` gate and the `traytoggle` module entirely when
+disabled — the drawer mechanism itself (`tray_toggle_module()`,
+`tray-drawer.sh`, the `.traytoggle` CSS) is untouched and still works the
+moment the constant flips back to `true`.
+
+**T29 — Arch-Update leaves this block.** It was promoted here at T28 for
+the same "glance-worthy pending count" reason `keepass` still is, but folds
+into the `devload` stack's docker row instead now — see §3.4's own T29
+entry for why.
 
 ### 3.4 `end`, block 2 — resources
 
-`cpu`, `memory`, `docker`, `battery`, `claudebar` — one glance-only ambient
-group, hover popup per pill, click launches an external tool (`btop`,
-`powermode.sh`, `powertop`) or, for docker, a right-click menu.
+`cpu`, `memory`, `docker`, `battery`, `claudebar`, `archupdate` — one
+glance-only ambient group, hover popup per pill/stack, click launches an
+external tool (`btop`, `powermode.sh`, `powertop`, `arch-update`) or, for
+docker, a right-click menu.
 
-Grouped by **proximity/common region**: these five answer one question — "is
-this machine healthy" — read in one saccade rather than five separate stops.
-Order within the block is itself a reading of load, from general to specific:
-cpu → memory → docker (processes) → battery (power) → claudebar (an external
-budget, least tied to the machine itself).
+Grouped by **proximity/common region**: these answer one question — "is
+this machine healthy" — read in one saccade rather than several separate
+stops. Order within the block is itself a reading of load, from general to
+specific: cpu → memory → docker (processes) → battery (power) → claude (an
+external budget, least tied to the machine itself) → archupdate (routine
+maintenance, not health).
+
+**T28 — gauges replace the percentage.** `cpu`/`memory` drop their digit
+entirely (icon + a horizontal `.gauge` box only — the gauge now carries the
+magnitude on the bar; the exact number stays in the popup). `battery` keeps
+its icon+digit+`%` text and gains a `.gauge` alongside it. `docker` is
+unchanged. The gauge itself is a nested empty `box.gauge` widget
+(`ButtonWidget`'s `label` and `widgets` fields are mutually exclusive —
+`widgets` wins — confirmed against the vendored ironbar source), filled by a
+CSS `linear-gradient` hard stop selected by a `pNN` (5%-step) class the
+daemon pushes on an **independent** class slot (`@class/<module>#level`, the
+same `#`-suffix convention netsec's own `eco` class already established) —
+so it never evicts the pill's own `warning`/`critical` state class. The fill
+and border both use `currentColor`, so a warning/critical pill's gauge turns
+`@urgent` automatically, with no separate per-state gauge rule needed.
+Ironbar's `progress` widget was rejected for this: its `value` is a
+`ScriptInput` (a polling subprocess), exactly the shape `mango-bard` exists
+to replace.
+
+**T29 — two-row stacks, battery gets a terminal nub, the countdown comes
+back.** `cpu`+`memory` merge into one `sysload` module (two rows, one on
+top of the other); `claudebar`+`docker`+`archupdate` merge into one
+`devload` module (a claude row, then a docker+updates row). A nested
+`custom` *module* cannot work here: ironbar's `style add_class`/
+`remove_class` resolve a target only by walking the bar's own top-level
+`start`/`center`/`end` arrays (`bar.rs::add_modules`), and a nested
+module's own `ModuleRef` is discarded on the way in
+(`modules/custom/mod.rs::add_to`, vendored source) — so a nested `cpu`
+module would answer "Module not found" for every class push: every gauge
+level, every warning colour, dead. Each stack is instead one top-level
+module whose `bar` is a `box, orientation: "vertical"` holding plain
+`button`/`box` rows — a nested plain widget keeps its own `on_click_left`/
+`show_if` as a real field (T23, confirmed live for popup hold/release), so
+nothing about a row's own behavior is lost, only its ability to register
+its own IPC-addressable class or popup. That is the one real cost: **one
+popup per stack**, covering every row (`popup_multi`), and every row's
+state/level class lands on the stack's single shared node instead of a
+node of its own — which forces a `<slot>-<value>` naming convention
+(`cpu-warning`/`mem-warning`, `cl45`/`ml45`, `claude-critical`,
+`dok-warning`, `au-pending`) so one row's state transition (remove old
+value, add new) can never delete a sibling row's still-current class off
+that same node. `battery` gains a small `.gauge-cap` square right of its
+existing gauge, filled with `currentColor` like the gauge itself, so the
+pair reads as a battery (rectangle + terminal nub) rather than a plain
+rounded bar; its own `NN%` digit is dropped the same way cpu/memory's was
+at T28, since the gauge now carries the level. `claudebar`'s countdown,
+dropped at T28 to shrink a pill that used to stand alone, comes back now
+that it shares a row with nothing else demanding the width.
 
 ### 3.5 `end`, block 3 — tools
 
@@ -232,9 +309,9 @@ provides for a reveal-on-hover group.
 `music`, `volume`, `mic` — one domain by proximity/common region: what's
 playing, and what the machine is doing with sound.
 
-- **`music`** — MPRIS, truncated to 30 chars (`truncate.max_length`) so it
-  cannot grow past its slot; it sits mid-block, not at a growth end, so
-  INV-1 requires this fixed cap rather than open-ended width.
+- **`music`** — MPRIS via `playerctl --follow` (music.rs), truncated to 24
+  chars so it cannot grow past its slot; it sits mid-block, not at a growth
+  end, so INV-1 requires this fixed cap rather than open-ended width.
   - **T26 deviation:** the CSS carried a `min-width: 220px` reserve against
     that cap. Live measurement found real track titles never approach 30
     chars, so the reserve sat empty behind whatever short title (or
@@ -242,10 +319,24 @@ playing, and what the machine is doing with sound.
     reserve is removed; `volume`/`mic` now shift when a track starts or
     ends. That is a discrete, user-caused event, not the per-tick reflow
     INV-1 guards against, so it is accepted rather than reserved against.
+  - **T28: native `music` module replaced with a `custom` one.** The native
+    module renders through GTK4's `set_label_escaped` (confirmed against
+    the vendored source, `modules/music/mod.rs`) — real text only, never
+    markup — so it could never carry the two-line dim-app/plain-title
+    markup the window pill (§3.1) uses. `music.rs` now feeds `music_text`
+    directly, in that same two-line shape. `show_if: "#music_on"` replaces
+    T26's truncation-only emptiness handling: the pill disappears entirely
+    with nothing loaded (or paused with no track) instead of reserving
+    space for an empty string — T26's own "discrete, user-caused event"
+    reasoning applies unchanged.
 - **`volume`** — icon only on the bar (percentage moved to the popup, T9);
   left click opens a 5s mixer, right the full mixer, scroll adjusts.
-- **`mic`** — mute-state icon, renders empty when unmuted so the common case
-  contributes no width.
+- **`mic`** — mute-state icon, renders empty when unmuted. T29: it used to
+  share `.volume`'s `min-width: 20px` reserve, which kept reserving a full
+  icon's width even while empty — the actual cause of a visible gap
+  between `volume` and `wifi`. `mic` now has no reserve of its own, so the
+  common (unmuted) case really does contribute no width; muting shifts
+  `wifi` by one icon width, the same trade already accepted for `music`.
 
 ### 3.7 `end`, block 5 — connectivity
 
@@ -306,7 +397,8 @@ builder returns):
 // genconfig.rs::build(), per real monitor bar
 "start":  start_modules(&bar_name),   // spark, workspace_pills(), win
 "center": time_modules(&bar_name),    // clock, date, pomo
-"end":    end_modules(&bar_name),     // tray, resource_modules(), tools_modules(),
+"end":    end_modules(&bar_name),     // tray, keepass,
+                                       // resource_modules(), tools_modules(),
                                        // audio_modules(), net_modules(), hotspot,
                                        // remote, bluetooth, power
 ```
@@ -319,9 +411,15 @@ fn start_modules(bar_name: &str) -> Vec<Value> {
     m
 }
 
+// T29 follow-up: TRAY_DRAWER_ENABLED = false by default — tray_toggle_module()
+// is only pushed, and tray_module()'s own show_if only set, when true.
 fn end_modules(bar_name: &str) -> Vec<Value> {
-    let mut end = vec![tray_module()];      // INV-1: leads end, variable width
-    end.extend(resource_modules(bar_name)); // cpu, memory, docker, battery, claudebar
+    let mut end = vec![tray_module()]; // INV-1: leads end
+    if TRAY_DRAWER_ENABLED {
+        end.push(tray_toggle_module());
+    }
+    end.push(keepass_module(bar_name));     // promoted out of the tray drawer
+    end.extend(resource_modules(bar_name)); // sysload, battery, devload
     end.extend(tools_modules(bar_name));    // tools drawer, inhibit
     end.extend(audio_modules(bar_name));    // music, volume, mic
     end.extend(net_modules(bar_name));      // net-spinner, wifi, eth, netsec
@@ -331,6 +429,15 @@ fn end_modules(bar_name: &str) -> Vec<Value> {
     end.push(power_module());
     end
 }
+
+// T29: sysload (cpu+memory) and devload (claude, docker+archupdate) are
+// each one top-level module — a vertical `box` of plain button/box rows,
+// not nested `custom` modules (a nested module's own class updates never
+// reach ironbar's style IPC — see sysload_module()'s own doc comment).
+fn sysload_module(bar_name: &str) -> Value { /* box, orientation: vertical,
+    widgets: [row-cpu button, row-mem button] */ }
+fn devload_module(bar_name: &str) -> Value { /* box, orientation: vertical,
+    widgets: [row-claude button, row-svc box[cell-docker, cell-au]] */ }
 ```
 
 The tools drawer:
@@ -367,22 +474,39 @@ CSS (`src/matugen/templates/ironbar/style.css`; selectors are classes set by
 
 /* INV-5 — tabular figures on both nodes (T17 trap), min-width on the
    module's own node ONLY — a reserve, not a centred box (see §2's own
-   distinction from INV-4's `.ws`). volume/mic are icon-only (T9) —
-   min-width alone, no tnum, per §2's own distinction. */
-.cpu, .memory, .docker, .battery, .claudebar, .clock, .date, .pomo,
-.cpu label, .memory label, .docker label, .battery label, .claudebar label,
+   distinction from INV-4's `.ws`). volume is icon-only (T9) — min-width
+   alone, no tnum, per §2's own distinction. */
+.sysload, .devload, .battery, .clock, .date, .pomo,
+.sysload label, .devload label, .battery label,
 .clock label, .date label, .pomo label {
   font-feature-settings: "tnum" 1;
 }
-.cpu, .memory { min-width: 58px; }  /* realistic max + 1 digit slack, T25 */
-.docker { min-width: 45px; }
-.battery { min-width: 80px; }
-.claudebar { min-width: 145px; }
+.sysload { min-width: 40px; }       /* T29: icon + .gauge per row, no digit */
+.battery { min-width: 56px; }       /* T29: gauge + gauge-cap, digit dropped */
+.devload { min-width: 131px; }      /* T29: claude row's countdown is back */
 .clock { min-width: 50px; }
 .date  { min-width: 84px; }
 .pomo  { min-width: 52px; }
-.volume, .mic { min-width: 20px; }
-.music { min-width: 220px; } /* INV-1: reserves music's own truncated cap */
+.volume { min-width: 20px; }
+.keepass { min-width: 20px; }       /* T28 — icon-only, same as volume */
+/* T29: `.mic` reserve dropped — it was the real cause of the volume-wifi
+   gap (§3.6's own T29 entry). T26: music has no reserve (dropped, see
+   §3.6's own T26 deviation) — the .music selector above shares the
+   icon-font stack rule only. */
+
+/* T28 — INV-5's gauge variant: the fill's own width IS the value, so
+   there is nothing to reserve beyond the box's own fixed size (§3.4).
+   T29: cpu/memory share `sysload`'s one node, so their level class needs
+   its own prefix per row (`clNN`/`mlNN`, scoped `.clNN .row-cpu .gauge`)
+   — a bare `pNN` on both would let one row's transition delete the
+   other's still-current class off that shared node. `battery` keeps the
+   bare `pNN` — still its own module, no collision possible. */
+.gauge { min-width: 24px; min-height: 10px; border: 1px solid currentColor; }
+.p50 .gauge { background: linear-gradient(to right, currentColor 50%, transparent 50%); }
+.cl50 .row-cpu .gauge { background: linear-gradient(to right, currentColor 50%, transparent 50%); }
+.ml50 .row-mem .gauge { background: linear-gradient(to right, currentColor 50%, transparent 50%); }
+/* ...one rule per 5%-step class, 0 through 100, for each of p/cl/ml
+   (style.css has all 63). */
 ```
 
 ---
@@ -398,12 +522,15 @@ whatever else is on screen.
 - [ ] Fling pointer to top-right at full speed → `power` **menu** opens; no action fires, no state changes.
 - [ ] Start/quit a tray application → no module other than the tray changes position.
 - [ ] Focus a window with a 100-character title → tags and `spark` do not move.
-- [ ] `cpu`/`memory`/`docker`/`battery`/`claudebar` each transition realistic
-      max → rare overflow (99%→100%, 99→999, 100%→100%+eco leaf, with/without
-      the stale-cache marker) → `tray` (leftmost in `end`) does not shift by
-      a single pixel. `center` is the wrong subject for these five: they
-      moved from `start` to `end` at T23, and `end` is right-anchored, so
-      growth pushes `end`'s own leftmost member, `tray` (T25).
+- [ ] `sysload`/`battery`/`devload` each transition realistic max → rare
+      overflow (either gauge row at 99%→100%, docker 9→99, 100%→100%+eco
+      leaf, with/without the stale-cache marker) → `tray` (leftmost in
+      `end`) does not shift by a single pixel. `center` is the wrong
+      subject for these three: they moved from `start` to `end` at T23,
+      and `end` is right-anchored, so growth pushes `end`'s own leftmost
+      member, `tray` (T25). T29's own reserve numbers for `.sysload`/
+      `.battery`/`.devload` are estimates, not yet live-measured — this is
+      the check that corrects them.
 - [ ] `pomo` idle → running → idle: `center` width unchanged.
 - [ ] All 9 tags visible with every tag empty; `ws-ov` toggled on and off with no shift in `wifi`'s position.
 - [ ] Tag 9 → overview → tag 1 transition: no button width change.

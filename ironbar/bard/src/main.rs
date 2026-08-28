@@ -3,6 +3,7 @@
 //! /home/martin/work/mango-dotfiles/IRONBAR.md for the full design and the
 //! T0 spike findings this implementation is built on.
 
+mod archupdate;
 mod audio;
 mod claude;
 mod clock;
@@ -14,9 +15,11 @@ mod docker;
 mod genconfig;
 mod hotspot;
 mod ipc;
+mod keepass;
 mod keepawake;
 mod mango;
 mod memory;
+mod music;
 mod net;
 mod pomo;
 mod power;
@@ -28,6 +31,7 @@ mod tooltip;
 mod vars;
 mod wheel;
 
+use archupdate::Archupdate;
 use audio::Audio;
 use claude::Claude;
 use clock::Clock;
@@ -37,9 +41,11 @@ use darkmode::Darkmode;
 use docker::Docker;
 use hotspot::Hotspot;
 use ipc::IronbarIpc;
+use keepass::Keepass;
 use keepawake::Keepawake;
 use mango::Mango;
 use memory::Memory;
+use music::Music;
 use net::Net;
 use pomo::Pomo;
 use remote::Remote;
@@ -373,6 +379,8 @@ async fn dispatch_refresh(
     keepawake: &mut Keepawake,
     darkmode: &mut Darkmode,
     claude: &mut Claude,
+    keepass: &mut Keepass,
+    archupdate: &Archupdate,
     pm_mode: powermode::Mode,
     stats: &mut Stats,
     regrade_due: &mut Option<Instant>,
@@ -459,6 +467,11 @@ async fn dispatch_refresh(
         // keepawake.sh's toggle() pokes this on the actual state-change
         // edge — same shape as remote's arm above.
         "keepawake" => keepawake.refresh(vars).await,
+        // T28: forces a resync right as the popup opens — cheap (two
+        // small forks), same reasoning as hotspot/remote/keepawake above.
+        "keepass" => keepass.refresh(vars).await,
+        // T28: pure file read, no fork — safe to call unconditionally.
+        "archupdate" => archupdate.refresh(vars),
         // switchwall.sh pokes this after every matugen regen — T6b D3.
         "darkmode" => darkmode.refresh(vars).await,
         // T6c: pure render (cache read only — never a fork), fired either by
@@ -486,58 +499,77 @@ async fn dispatch_refresh(
             keepawake.refresh(vars).await;
             darkmode.refresh(vars).await;
             claude.refresh(vars);
+            keepass.refresh(vars).await;
+            archupdate.refresh(vars);
         }
     }
 }
 
-/// Maps a hover target's ironbar widget name to the `dispatch_refresh` topic
-/// that keeps its popup content current. Most hover widgets share their
-/// module name as the topic (`battery`, `volume`, `docker` — all three just
-/// mark their own `_due` var, since their event streams already keep them
-/// fresh); the four modules whose popup is a lazily-built detail tip (T7a/
-/// T7c-rest) use their own `-detail` topic instead, and `claudebar`'s module
-/// name differs from its refresh topic (`claude`).
+/// Maps a hover target's ironbar widget name to the `dispatch_refresh`
+/// topics that keep its popup content current — a slice, not a single
+/// topic, because T29 merged `cpu`/`memory` into one `sysload` module and
+/// `claudebar`/`docker`/`archupdate` into one `devload` module (a nested
+/// module's own class updates never reach ironbar's style IPC — see
+/// `sysload_module()`'s own doc comment — so each stack has to be one
+/// top-level module with one popup covering every row). Most other hover
+/// widgets still share their module name as their one topic (`battery`,
+/// `volume` — both just mark their own `_due` var, since their event
+/// streams already keep them fresh); the modules whose popup is a
+/// lazily-built detail tip (T7a/T7c-rest) use their own `-detail` topic
+/// instead.
 ///
-/// `None` means "skip `dispatch_refresh` entirely", not "fall through to the
-/// generic full resync" — two cases: `bluetooth` is a native module with no
-/// daemon-tracked ironvar at all (nothing here could refresh), and a
-/// workspace tag pill's tip is already kept live by `mango.apply()` off its
-/// own `mmsg watch` event stream (mango.rs), so it never goes stale between
-/// hovers. Calling the fallback resync for either would cost a real refresh
-/// cycle for no matching content.
+/// An empty slice means "skip `dispatch_refresh` entirely", not "fall
+/// through to the generic full resync" — two cases: `bluetooth` is a native
+/// module with no daemon-tracked ironvar at all (nothing here could
+/// refresh), and a workspace tag pill's tip is already kept live by
+/// `mango.apply()` off its own `mmsg watch` event stream (mango.rs), so it
+/// never goes stale between hovers. Calling the fallback resync for either
+/// would cost a real refresh cycle for no matching content.
 ///
-/// T15: `hotspot` joins the `battery`/`volume`/`docker` group — its own
-/// module name doubles as its refresh topic (`main.rs:379`), same as those
-/// three, now that hover opens its popup instead of a click. `inhibit`
-/// (the widget) maps to the `keepawake` topic instead — see its own match
-/// arm below for why the two names differ here.
+/// T15: `hotspot` joins the `battery`/`volume` group — its own module name
+/// doubles as its refresh topic (`main.rs:379`), same as those two, now
+/// that hover opens its popup instead of a click. `inhibit` (the widget)
+/// maps to the `keepawake` topic instead — see its own match arm below for
+/// why the two names differ here.
 ///
-/// T19: `wifi`/`eth`/`netsec` join the `cpu`/`memory`/`clock`/`date` group —
+/// T19: `wifi`/`eth`/`netsec` join the `sysload`/`clock`/`date` group —
 /// each maps to its own `-detail` topic (`wifi-detail`/`eth-detail`/
-/// `sec-detail`), not its own module name, for the same reason those four
-/// do: the popup content is lazily built, not already kept fresh by an
-/// event stream the way `battery`/`volume`/`docker`/`hotspot` are.
-fn hover_refresh_topic(widget: &str) -> Option<&str> {
+/// `sec-detail`), not its own module name, for the same reason those do:
+/// the popup content is lazily built, not already kept fresh by an event
+/// stream the way `battery`/`volume`/`hotspot` are.
+fn hover_refresh_topics(widget: &str) -> &'static [&'static str] {
     match widget {
-        "cpu" => Some("cpu-detail"),
-        "memory" => Some("mem-detail"),
-        "clock" => Some("clock-detail"),
-        "date" => Some("date-detail"),
-        "claudebar" => Some("claude"),
-        "wifi" => Some("wifi-detail"),
-        "eth" => Some("eth-detail"),
-        "netsec" => Some("sec-detail"),
-        "battery" | "volume" | "docker" | "hotspot" | "remote" => Some(widget),
+        // T29: one topic per stacked row, all refreshed together — the
+        // popup is one box covering every row (`popup_multi`), so there is
+        // no way to refresh only the row under the pointer.
+        "sysload" => &["cpu-detail", "mem-detail"],
+        "devload" => &["claude", "docker", "archupdate"],
+        "clock" => &["clock-detail"],
+        "date" => &["date-detail"],
+        "wifi" => &["wifi-detail"],
+        "eth" => &["eth-detail"],
+        "netsec" => &["sec-detail"],
+        "battery" => &["battery"],
+        "volume" => &["volume"],
+        "hotspot" => &["hotspot"], // T15
+        "remote" => &["remote"],
+        "keepass" => &["keepass"], // T28
+        // T28: `music` is already kept live off its own `playerctl
+        // --follow` stream (music.rs) — same "never goes stale between
+        // hovers" reasoning this doc comment gives for a workspace tag
+        // pill's tip, not the "no ironvar at all" reasoning it gives for
+        // bluetooth.
+        "music" => &[],
         // Widget/class name ("inhibit") and refresh topic ("keepawake")
         // deliberately differ here: the pill kept its old `inhibit`
         // name/class to reuse the existing style.css selectors and
         // ironvars, but the collector, unit, and script are all named
         // `keepawake` (keepawake.rs/keepawake.sh/mango-keepawake.service).
-        // Mapping straight to `Some(widget)` like the group above would
+        // Mapping straight to `&[widget]` like the group above would
         // dispatch an unmatched "inhibit" topic into the catch-all resync
         // arm instead of the targeted one.
-        "inhibit" => Some("keepawake"),
-        _ => None,
+        "inhibit" => &["keepawake"],
+        _ => &[],
     }
 }
 
@@ -641,6 +673,11 @@ async fn run() -> Result<(), String> {
     let mut pm_mode = pm.mode;
     let mut pm_fd = AsyncFd::new(pm).map_err(|e| format!("powermode AsyncFd: {e}"))?;
 
+    // T28: same shape as `pm`/`pm_fd` above — one file's inode, no fork ever.
+    let archupdate = Archupdate::new().map_err(|e| format!("arch-update watch: {e}"))?;
+    let mut archupdate_fd =
+        AsyncFd::new(archupdate).map_err(|e| format!("arch-update AsyncFd: {e}"))?;
+
     let control_listener = control::listen().map_err(|e| format!("control socket: {e}"))?;
     let control_path = control::socket_path();
 
@@ -666,6 +703,8 @@ async fn run() -> Result<(), String> {
     let mut keepawake = Keepawake::new();
     let mut darkmode = Darkmode::new();
     let mut claude = Claude::new();
+    let mut keepass = Keepass::new();
+    let mut music = Music::new();
     let mut vars = Vars::new();
     let mut ipc = IronbarIpc::new();
     let mut stats = Stats::new();
@@ -785,6 +824,18 @@ async fn run() -> Result<(), String> {
         dirty_since.get_or_insert_with(Instant::now);
     }
     claude::spawn_fetch();
+
+    // T28: keepass/archupdate need an explicit startup refresh (no
+    // snapshot companion — hotspot/darkmode's own reasoning above applies
+    // here too); archupdate is a pure file read like darkmode's own.
+    keepass.refresh(&mut vars).await;
+    if vars.has_dirty() {
+        dirty_since.get_or_insert_with(Instant::now);
+    }
+    archupdate_fd.get_ref().refresh(&mut vars);
+    if vars.has_dirty() {
+        dirty_since.get_or_insert_with(Instant::now);
+    }
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| format!("sigterm handler: {e}"))?;
@@ -965,6 +1016,32 @@ async fn run() -> Result<(), String> {
                 }
             }
 
+            // T28: `busctl --user monitor` line — every event re-resolves
+            // and re-reads the collection's `Locked` property directly
+            // (keepass.rs's own doc comment explains why this isn't
+            // narrowed further). Cheap and infrequent, so a direct refresh
+            // here needs no `_due` debounce, same as hotspot/remote/
+            // keepawake's own event-poked refreshes below.
+            line = keepass.mon.next_line() => {
+                let _ = line;
+                keepass.refresh(&mut vars).await;
+                if vars.has_dirty() {
+                    dirty_since.get_or_insert_with(Instant::now);
+                }
+            }
+
+            // T28: `playerctl --follow` line — already the fully-parsed
+            // state (music.rs's own doc comment), so this is render only,
+            // no fork, no debounce needed.
+            line = music.mon.next_line() => {
+                if music.ingest_line(&line) {
+                    music.apply(&mut vars);
+                    if vars.has_dirty() {
+                        dirty_since.get_or_insert_with(Instant::now);
+                    }
+                }
+            }
+
             line = mango.monitors.next_doc() => {
                 stats.mmsg_events += 1;
                 if mango.ingest_monitors(&line) {
@@ -1023,6 +1100,25 @@ async fn run() -> Result<(), String> {
                 }
             }
 
+            // T28: same shape as `pm_fd` above, minus the mode-change
+            // branching — every event just means "re-read the two count
+            // files", which `refresh()` (a pure file read, no fork) does
+            // unconditionally.
+            r = archupdate_fd.readable_mut() => {
+                match r {
+                    Ok(mut guard) => {
+                        let inner = guard.get_inner_mut();
+                        inner.on_event();
+                        inner.refresh(&mut vars);
+                        guard.clear_ready();
+                        if vars.has_dirty() {
+                            dirty_since.get_or_insert_with(Instant::now);
+                        }
+                    }
+                    Err(e) => eprintln!("mango-bard: arch-update fd error: {e}"),
+                }
+            }
+
             accepted = control_listener.accept() => {
                 if let Ok((mut stream, _)) = accepted {
                     if let Ok(line) = control::read_line(&mut stream).await {
@@ -1041,7 +1137,8 @@ async fn run() -> Result<(), String> {
                                 dispatch_refresh(
                                     &topic, &mut vars, &mut mango, &mut net, &mut audio,
                                     &mut power, &mut cpu, &mut mem, &mut docker, &mut hotspot,
-                                    &mut remote, &mut keepawake, &mut darkmode, &mut claude, pm_mode, &mut stats,
+                                    &mut remote, &mut keepawake, &mut darkmode, &mut claude,
+                                    &mut keepass, archupdate_fd.get_ref(), pm_mode, &mut stats,
                                     &mut regrade_due, &mut audio_due, &mut power_due,
                                     &mut docker_due,
                                 ).await;
@@ -1169,14 +1266,22 @@ async fn run() -> Result<(), String> {
                 }
             } => {
                 if let Some((bar, widget)) = hover_pending.take() {
-                    if let Some(topic) = hover_refresh_topic(&widget) {
-                        dispatch_refresh(
-                            topic, &mut vars, &mut mango, &mut net, &mut audio,
-                            &mut power, &mut cpu, &mut mem, &mut docker, &mut hotspot,
-                            &mut remote, &mut keepawake, &mut darkmode, &mut claude, pm_mode, &mut stats,
-                            &mut regrade_due, &mut audio_due, &mut power_due,
-                            &mut docker_due,
-                        ).await;
+                    let topics = hover_refresh_topics(&widget);
+                    if !topics.is_empty() {
+                        // T29: `sysload`/`devload` each carry more than one
+                        // topic (one popup, several rows) — run them in
+                        // sequence, not concurrently: each call only holds
+                        // its `&mut` borrows for the statement it's in.
+                        for topic in topics {
+                            dispatch_refresh(
+                                topic, &mut vars, &mut mango, &mut net, &mut audio,
+                                &mut power, &mut cpu, &mut mem, &mut docker, &mut hotspot,
+                                &mut remote, &mut keepawake, &mut darkmode, &mut claude,
+                                &mut keepass, archupdate_fd.get_ref(), pm_mode, &mut stats,
+                                &mut regrade_due, &mut audio_due, &mut power_due,
+                                &mut docker_due,
+                            ).await;
+                        }
                     } else if widget == "pomo" {
                         // Passive peek only — `pomo.refresh()` is a pure
                         // render from already-current state, never the
@@ -1251,6 +1356,8 @@ async fn run() -> Result<(), String> {
                 audio.pactl_mon.kill();
                 power.udev_mon.kill();
                 docker.events_mon.kill();
+                keepass.mon.kill();
+                music.mon.kill();
                 control::unlink(&control_path);
                 return Ok(());
             }
@@ -1425,30 +1532,39 @@ mod tests {
     }
 
     #[test]
-    fn hover_refresh_topic_maps_lazy_detail_and_alias_widgets() {
-        assert_eq!(hover_refresh_topic("cpu"), Some("cpu-detail"));
-        assert_eq!(hover_refresh_topic("memory"), Some("mem-detail"));
-        assert_eq!(hover_refresh_topic("clock"), Some("clock-detail"));
-        assert_eq!(hover_refresh_topic("date"), Some("date-detail"));
-        assert_eq!(hover_refresh_topic("claudebar"), Some("claude"));
-        assert_eq!(hover_refresh_topic("battery"), Some("battery"));
-        assert_eq!(hover_refresh_topic("volume"), Some("volume"));
-        assert_eq!(hover_refresh_topic("docker"), Some("docker"));
-        assert_eq!(hover_refresh_topic("hotspot"), Some("hotspot")); // T15
-        assert_eq!(hover_refresh_topic("remote"), Some("remote"));
-                                                                     // T19
-        assert_eq!(hover_refresh_topic("wifi"), Some("wifi-detail"));
-        assert_eq!(hover_refresh_topic("eth"), Some("eth-detail"));
-        assert_eq!(hover_refresh_topic("netsec"), Some("sec-detail"));
+    fn hover_refresh_topics_maps_lazy_detail_and_alias_widgets() {
+        // T29: one merged popup per stack, one topic per row.
+        assert_eq!(
+            hover_refresh_topics("sysload"),
+            ["cpu-detail", "mem-detail"]
+        );
+        assert_eq!(
+            hover_refresh_topics("devload"),
+            ["claude", "docker", "archupdate"]
+        );
+        assert_eq!(hover_refresh_topics("clock"), ["clock-detail"]);
+        assert_eq!(hover_refresh_topics("date"), ["date-detail"]);
+        assert_eq!(hover_refresh_topics("battery"), ["battery"]);
+        assert_eq!(hover_refresh_topics("volume"), ["volume"]);
+        assert_eq!(hover_refresh_topics("hotspot"), ["hotspot"]); // T15
+        assert_eq!(hover_refresh_topics("remote"), ["remote"]);
+                                                                   // T19
+        assert_eq!(hover_refresh_topics("wifi"), ["wifi-detail"]);
+        assert_eq!(hover_refresh_topics("eth"), ["eth-detail"]);
+        assert_eq!(hover_refresh_topics("netsec"), ["sec-detail"]);
+        // T28
+        assert_eq!(hover_refresh_topics("keepass"), ["keepass"]);
     }
 
     #[test]
-    fn hover_refresh_topic_skips_bluetooth_and_workspace_pills() {
+    fn hover_refresh_topics_skips_bluetooth_and_workspace_pills() {
         // bluetooth: native module, no daemon-tracked ironvar to refresh.
         // workspace pills: already kept fresh by mango.apply()'s own event
         // stream. Neither should fall through to the generic full resync.
-        assert_eq!(hover_refresh_topic("bluetooth"), None);
-        assert_eq!(hover_refresh_topic("ws-eDP-1-1"), None);
-        assert_eq!(hover_refresh_topic("pomo"), None); // handled separately
+        assert!(hover_refresh_topics("bluetooth").is_empty());
+        assert!(hover_refresh_topics("ws-eDP-1-1").is_empty());
+        assert!(hover_refresh_topics("pomo").is_empty()); // handled separately
+        // T28: music is already kept live off its own event stream.
+        assert!(hover_refresh_topics("music").is_empty());
     }
 }

@@ -48,7 +48,7 @@ impl Remote {
         vars.set("remote_text", barico(IC_REMOTE));
 
         let mut tip = String::new();
-        tip.push_str(&sect("", "wg_hetzner + hotspot only"));
+        tip.push_str(&sect("", "VPN tunnel + hotspot only"));
         tip.push_str(&kv("VNC", if self.vnc_up { "on" } else { "off" }));
         tip.push_str(&kv(
             "KDE Connect",

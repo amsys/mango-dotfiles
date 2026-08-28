@@ -203,7 +203,10 @@ pub fn window_tip(client: Option<&Value>) -> String {
     }
 }
 
-fn truncate_ellipsis(s: &str, n: usize) -> String {
+/// pub: music.rs reuses this verbatim for its own two-line pill (T28) —
+/// same truncation rule as `window_text` above, so the two pills read as
+/// one visual language.
+pub fn truncate_ellipsis(s: &str, n: usize) -> String {
     match s.char_indices().nth(n) {
         Some((idx, _)) => format!("{}…", &s[..idx]),
         None => s.to_string(),

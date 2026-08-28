@@ -70,6 +70,19 @@ pub const IC_WIFIOFF: char = '\u{f05aa}'; // md-wifi_off
 pub const IC_ETH: char = '\u{f0200}'; // md-ethernet
 pub const IC_ETHOFF: char = '\u{f0202}'; // md-ethernet_cable_off
 
+/// Written by system/vpnguard/mango-vpnguard, world-readable — see
+/// `guard_state_to_verdict`.
+const GUARD_STATE_PATH: &str = "/run/mango-vpnguard/state";
+
+/// How long `Blocked` must persist before `spawn_guard_notify` fires — see
+/// `Net::track_guard_blocked`. mango-vpnguard now walks a priority-ordered
+/// chain of configured VPNs (each with its own endpoint list) rather than
+/// one fixed 4-port rotation, so the real dial can run well past the ~20s
+/// that sufficed for a single VPN. 45s is comfortably past a typical
+/// chain's worst case while still well under `MANGO_VG_BUDGET`'s 90s
+/// backstop (vpnguard/README.md, "Why the dispatcher hands off").
+const GUARD_NOTIFY_GRACE: Duration = Duration::from_secs(45);
+
 fn class_key(module: &str) -> String {
     format!("{CLASS_PREFIX}{module}")
 }
@@ -85,6 +98,14 @@ pub enum Verdict {
     DnsLeak,
     Conflict,
     Secure,
+    /// vpnguard has ufw's outgoing default set to deny and no tunnel is up
+    /// yet — the ONE verdict `classify()` itself never produces (see
+    /// `guard_state_to_verdict`). Shares `IC_LOCK` with `Secure`/`DnsLeak`
+    /// rather than a new, unverified codepoint: T18's own lesson (this
+    /// file's header comment) is that a plausible-looking Nerd Font glyph
+    /// still needs a live `pango-view` check before it is trusted, and
+    /// "locked" reads correctly for a state where nothing gets out at all.
+    Blocked,
 }
 
 impl Verdict {
@@ -97,6 +118,7 @@ impl Verdict {
             Verdict::DnsLeak => "dnsleak",
             Verdict::Conflict => "conflict",
             Verdict::Secure => "secure",
+            Verdict::Blocked => "blocked",
         }
     }
 
@@ -106,7 +128,7 @@ impl Verdict {
             Verdict::Portal => IC_PORTAL,
             Verdict::Open => IC_OPEN,
             Verdict::Exposed => IC_EXPOSED,
-            Verdict::DnsLeak | Verdict::Secure => IC_LOCK,
+            Verdict::DnsLeak | Verdict::Secure | Verdict::Blocked => IC_LOCK,
             Verdict::Conflict => IC_CONFLICT,
         }
     }
@@ -162,6 +184,32 @@ pub fn classify(
         return Verdict::Conflict;
     }
     Verdict::Secure
+}
+
+/// vpnguard's `/run/mango-vpnguard/state` (system/vpnguard/mango-vpnguard),
+/// read fresh at each call site and layered ON TOP of `classify()` rather
+/// than folded into it — `classify()` stays the exact port of net.sh's own
+/// function (its 21-case test block above depends on that), and vpnguard is
+/// a signal net.sh's classify() does not have.
+///
+/// Only `blocked` and `portal` override: those are enforcement states where
+/// `classify()`'s route/DNS signals would either be uninformative (nothing
+/// routes while blocked) or actively misleading (during the portal window,
+/// ufw briefly opens the physical uplink — `classify()` would correctly
+/// call that "Exposed", but the bar should say "sign in", not "leaking").
+/// `vpn:<name>` grades `Secure` on the verified handshake alone, ahead of
+/// `classify()`'s own route/DNS heuristics — a confirmed tunnel is stronger
+/// evidence than inferring one from routes. `unsecured` and `unconfigured`
+/// fall through to `classify()`: ufw is restored to normal in both, so its
+/// read of the actual link is correct there. Same for a missing or
+/// unrecognised state (guard not installed, or not yet armed this boot).
+fn guard_state_to_verdict(state: &str) -> Option<Verdict> {
+    match state.trim() {
+        "blocked" => Some(Verdict::Blocked),
+        "portal" => Some(Verdict::Portal),
+        s if s.starts_with("vpn:") => Some(Verdict::Secure),
+        _ => None,
+    }
 }
 
 // --------------------------------------------------------------- link_sec
@@ -449,6 +497,18 @@ pub struct Net {
     /// in-process, so no file is needed. See `throughput_str`/
     /// `throughput_delta`.
     throughput: HashMap<String, ThroughputSample>,
+    /// When the guard verdict first went `Blocked` this episode — `None`
+    /// once it leaves `Blocked` (dialled out, or the user chose unsecured).
+    /// Drives the grace delay before `spawn_guard_notify` fires; see
+    /// `regrade`'s own comment for why this lives here and not in a shell
+    /// script (net.sh only runs on a click, never on a silent dial
+    /// failure).
+    guard_blocked_since: Option<Instant>,
+    /// One notification per `Blocked` episode, not one per `regrade()` —
+    /// without this a burst of `nmcli monitor` lines while still blocked
+    /// would stack a fresh `notify-send --wait` on top of one already
+    /// waiting on the user.
+    guard_notified: bool,
 }
 
 /// One iface's previous byte counters + when they were read, for
@@ -473,6 +533,8 @@ impl Net {
             nm_busy: false,
             rssi_tick: 0,
             throughput: HashMap::new(),
+            guard_blocked_since: None,
+            guard_notified: false,
         }
     }
 
@@ -599,11 +661,14 @@ impl Net {
         let carrier_up = carrier.trim() == "1";
 
         let sec = link_sec_pure(&wifi_row, carrier_up);
-        let verdict = classify(&conn, sec, &v4, &v6, &tuns_str, &dns_str, nconf);
+        let guard_state = std::fs::read_to_string(GUARD_STATE_PATH).unwrap_or_default();
+        let verdict = guard_state_to_verdict(&guard_state)
+            .unwrap_or_else(|| classify(&conn, sec, &v4, &v6, &tuns_str, &dns_str, nconf));
 
         vars.set(&class_key("netsec"), verdict.as_str());
         self.set_eco_class(vars, pm_mode);
         vars.set("sec_text", barico(verdict.icon()));
+        self.track_guard_blocked(verdict);
 
         let eth_class = if !carrier_up {
             "disconnected"
@@ -640,6 +705,26 @@ impl Net {
         let pct = rssi_pct(rssi);
         vars.set("wifi_text", format!("{} {}%", barico_label(arc(pct)), pct));
         vars.set(&class_key("wifi"), wifi_css_class(pct));
+    }
+
+    /// Fires the buttoned "could not dial out" notification once per
+    /// `Blocked` episode, `GUARD_NOTIFY_GRACE` after it started — long
+    /// enough for `mango-vpnguard auto`'s own chain walk (run by the NM
+    /// dispatcher via `systemd-run`, not this daemon) to have had a real
+    /// attempt. Lives here rather than in net.sh because net.sh only runs
+    /// on a click: nothing calls it when a dial fails silently in the
+    /// background.
+    fn track_guard_blocked(&mut self, verdict: Verdict) {
+        if verdict != Verdict::Blocked {
+            self.guard_blocked_since = None;
+            self.guard_notified = false;
+            return;
+        }
+        let since = *self.guard_blocked_since.get_or_insert_with(Instant::now);
+        if !self.guard_notified && since.elapsed() >= GUARD_NOTIFY_GRACE {
+            self.guard_notified = true;
+            spawn_guard_notify();
+        }
     }
 
     /// T19: rate for `dev` since the last call for that same `dev`, as
@@ -721,15 +806,18 @@ impl Net {
                 == "1";
 
         let sec = link_sec_pure(&wifi_row, carrier_up);
-        let verdict = classify(
-            &conn,
-            sec,
-            &v4,
-            &v6,
-            &tuns_str,
-            &dns_str,
-            conflicts.len() as u32,
-        );
+        let guard_state = std::fs::read_to_string(GUARD_STATE_PATH).unwrap_or_default();
+        let verdict = guard_state_to_verdict(&guard_state).unwrap_or_else(|| {
+            classify(
+                &conn,
+                sec,
+                &v4,
+                &v6,
+                &tuns_str,
+                &dns_str,
+                conflicts.len() as u32,
+            )
+        });
 
         let uplink = match sec {
             "open" | "wep" | "wpa" => self.wifi_dev.clone(),
@@ -937,6 +1025,22 @@ impl Net {
             tip.push_str(&dim(&format!(
                 "connectivity: {conn} — click to open the login page"
             )));
+            tip.push('\n');
+        }
+
+        if verdict == Verdict::Blocked {
+            tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
+            tip.push_str(&dim("outgoing traffic denied by default — dialling the tunnel"));
+            tip.push('\n');
+        }
+
+        if let Some(name) = guard_state.trim().strip_prefix("vpn:") {
+            tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
+            tip.push_str(&dim(&format!("protected · {}", esc(name))));
+            tip.push('\n');
+        } else if guard_state.trim() == "unsecured" {
+            tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
+            tip.push_str(&dim("guard off — traffic is leaving in the clear"));
             tip.push('\n');
         }
 
@@ -1302,6 +1406,7 @@ fn verdict_headline(v: Verdict) -> &'static str {
         Verdict::DnsLeak => "Tunnelled, but DNS leaks",
         Verdict::Conflict => "Encrypted, but routes overlap",
         Verdict::Secure => "Encrypted end to end",
+        Verdict::Blocked => "Nothing can leave — connecting a tunnel",
     }
 }
 
@@ -1683,6 +1788,62 @@ async fn tunnel_rows(link_show_json: &Value) -> Vec<(String, String, String)> {
     rows
 }
 
+// ---------------------------------------------------------- detached forks
+//
+// Same reasoning as power.rs's own "detached forks" section: this must
+// never block the event loop. It goes further than `spawn_detached` there —
+// `notify-send -A ... --wait` can sit for as long as the user takes to
+// click, which is why this bypasses cmd.rs's `run()` entirely (its
+// CMD_TIMEOUT is 2s, wrong on purpose everywhere else) and calls
+// `tokio::process::Command` directly, inside its own `tokio::spawn`.
+
+/// One buttoned notification, then acts on whichever key came back on
+/// stdout (`notify-send -A NAME=Label` prints NAME). Dismissing the
+/// notification, or picking "Leave it blocked", prints nothing matched here —
+/// state stays `blocked`, unchanged. Only three buttons: which VPN to try
+/// is a live NetworkManager set now (any WireGuard connection with
+/// autoconnect-priority>0 — see system/vpnguard/README.md), and a static
+/// notification cannot grow one button per chain entry — per-VPN choice
+/// lives in the rofi picker (net.sh's `guard_section`), which lists them
+/// all. "Try again" calls `protect`, not `auto`, so it also works if the
+/// user had opted out (`unsecure`) since this notification was scheduled.
+fn spawn_guard_notify() {
+    tokio::spawn(async move {
+        let out = Command::new("notify-send")
+            .args([
+                "-a",
+                "mango-bard",
+                "-u",
+                "critical",
+                "-h",
+                "string:x-canonical-private-synchronous:mango-vpnguard",
+                "-A",
+                "retry=Try again",
+                "-A",
+                "unsecure=Go unprotected",
+                "-A",
+                "stay=Leave it blocked",
+                "VPN guard",
+                "Could not connect any tunnel. \
+                 Traffic stays blocked until you choose.",
+            ])
+            .output()
+            .await;
+        let Ok(out) = out else { return };
+        let action = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let verb: &[&str] = match action.as_str() {
+            "retry" => &["protect"],
+            "unsecure" => &["unsecure"],
+            _ => return, // "stay", dismissed, or mako not running — leave it blocked
+        };
+        let _ = Command::new("sudo")
+            .arg("mango-vpnguard")
+            .args(verb)
+            .status()
+            .await;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1777,6 +1938,31 @@ mod tests {
             classify("full", "wpa", "wg0", "", "wg0", "wg0", 0),
             Verdict::Secure
         );
+    }
+
+    // ---- guard_state_to_verdict(): vpnguard's state file, layered on top
+    // of classify() rather than folded into it (see the function's doc).
+    #[test]
+    fn guard_state_blocked_and_portal_override() {
+        assert_eq!(guard_state_to_verdict("blocked"), Some(Verdict::Blocked));
+        assert_eq!(guard_state_to_verdict("blocked\n"), Some(Verdict::Blocked));
+        assert_eq!(guard_state_to_verdict("portal"), Some(Verdict::Portal));
+    }
+
+    #[test]
+    fn guard_state_vpn_overrides_to_secure() {
+        assert_eq!(guard_state_to_verdict("vpn:full"), Some(Verdict::Secure));
+        assert_eq!(
+            guard_state_to_verdict("vpn:ProtonVPN (DE317)\n"),
+            Some(Verdict::Secure)
+        );
+    }
+
+    #[test]
+    fn guard_state_settled_or_missing_defers_to_classify() {
+        for s in ["unsecured", "unconfigured", "", "unknown", "garbage\n"] {
+            assert_eq!(guard_state_to_verdict(s), None, "state {s:?} should defer");
+        }
     }
 
     // ---- link_sec(): the deliberate POSIX case-fallthrough (net.sh:247-255).

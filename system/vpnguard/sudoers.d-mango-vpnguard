@@ -1,0 +1,23 @@
+# Installed to /etc/sudoers.d/mango-vpnguard (0440) by system/vpnguard/install.sh.
+#
+# Lets the user session (net.sh's VPN picker, mango-bard's buttoned failure
+# notification, both unprivileged) arm, retry a dial, or drop to unsecured
+# without a password prompt. Every verb is a fixed, argument-exact line —
+# sudoers matches the command line literally.
+#
+# "up" takes no argv: an NM connection name can contain spaces and parens, so
+# it cannot be a sudoers literal. It arrives as "CONN=<name>" on stdin, which
+# sudoers cannot see or restrict, so mango-vpnguard re-validates it against
+# the live chain (autoconnect-priority>0) before dialling anything — same
+# reasoning as sudoers.d-mango-powermode's stdin payload.
+#
+# Not listed: status, list, devices, help, test — none of them touch the
+# system, so none of them need root.
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard arm
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard disarm
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard portal
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard portal-close
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard unsecure
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard protect
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard auto
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard up

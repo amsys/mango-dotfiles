@@ -14,8 +14,8 @@
 use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::tooltip::{
-    bad, bar, barico_label, dim, esc, good, grade, hcount, hkib, mono, row, sect, set_titled,
-    C_DIM,
+    bad, bar, barico_label, dim, esc, good, grade, hcount, hkib, level_class, mono, row, sect,
+    set_titled, C_DIM,
 };
 use crate::vars::Vars;
 use std::collections::HashMap;
@@ -84,8 +84,19 @@ pub fn class_for(pct: i64, swap_pct: i64) -> &'static str {
 }
 
 fn set_vars(vars: &mut Vars, pct: i64, swap_pct: i64) {
-    vars.set("mem_text", format!("{} {pct}%", barico_label(IC_MEM)));
-    vars.set(&class_key("memory"), class_for(pct, swap_pct));
+    // T28: digit dropped entirely — see cpu.rs's set_vars for the gauge/
+    // `#level`-slot/width-target reasoning, identical here.
+    //
+    // T29: both slot keys move under `sysload`, both values gain a
+    // `mem-`/`ml` prefix — see cpu.rs's set_vars for why the prefix has to
+    // sit here (at the point of writing to the shared node) rather than
+    // inside `class_for` itself.
+    vars.set("mem_text", barico_label(IC_MEM));
+    vars.set(
+        &class_key("sysload#mem"),
+        format!("mem-{}", class_for(pct, swap_pct)),
+    );
+    vars.set(&class_key("sysload#memlevel"), level_class("ml", pct));
 }
 
 /// pgfault, pgmajfault, `/proc/uptime` seconds — the previous sample

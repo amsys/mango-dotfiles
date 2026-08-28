@@ -286,6 +286,9 @@ pub(crate) const HINTS: &[(&str, &str)] = &[
     ("inhibit_tip", "click: toggle keep-awake"),
     ("docker_tip", "right-click: menu"),
     ("claude_tip", "right-click: settings"),
+    ("kp_tip", "click: show/hide KeePassXC"),
+    ("au_tip", "click: run arch-update"),
+    ("music_tip", "click: play/pause"),
     (
         "wifi_tip",
         "click: pick a network · right-click: edit connections",
@@ -328,6 +331,9 @@ pub(crate) const TITLED: &[&str] = &[
     "wifi_tip",
     "eth_tip",
     "sec_tip",
+    "kp_tip",
+    "au_tip",
+    "music_tip",
 ];
 
 /// `vars.set` for a popup that carries a title. Splits what a `tip` string
@@ -347,6 +353,25 @@ pub fn set_titled(vars: &mut Vars, key: &str, title_text: &str, body: String) {
     let title_key = format!("{key}_title");
     vars.set(&title_key, title(title_text).trim_end_matches('\n').to_string());
     vars.set(key, body);
+}
+
+/// T28: CSS class for a horizontal gauge fill, one per 5 percentage points
+/// (`<prefix>0`..`<prefix>100`) — shared by cpu/memory/battery so style.css
+/// needs the 21-step `linear-gradient` ramp written once per prefix, not
+/// once per pill. Rounds down, not to nearest: a `p85` gauge fills to the
+/// 85% stop exactly, never past the real value.
+///
+/// T29: takes a `prefix` (`"p"`/`"cl"`/`"ml"`) instead of hardcoding `p` —
+/// `cpu` and `memory` now push their level class onto `sysload`'s single
+/// shared node (see `sysload_module()`'s own doc comment for why they
+/// can't be separate top-level modules any more), so `p45`/`p45` from both
+/// would be indistinguishable and, worse, identical values never re-fire a
+/// dirty `style add_class`/`remove_class` pair — the daemon would think
+/// memory's `p45` was already applied by cpu. Distinct prefixes keep the
+/// two independent. `battery` keeps the bare `p` prefix — it is still its
+/// own module, no collision possible.
+pub fn level_class(prefix: &str, pct: i64) -> String {
+    format!("{prefix}{}", (pct.clamp(0, 100) / 5) * 5)
 }
 
 /// docker.sh:50-57 `dot()`: a colour-graded status dot for `class` in
@@ -540,6 +565,27 @@ pub fn window_list(wins: &[Win]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_class_rounds_down_to_the_nearest_5_and_clamps() {
+        assert_eq!(level_class("p", 0), "p0");
+        assert_eq!(level_class("p", 4), "p0");
+        assert_eq!(level_class("p", 5), "p5");
+        assert_eq!(level_class("p", 87), "p85");
+        assert_eq!(level_class("p", 100), "p100");
+        assert_eq!(level_class("p", 104), "p100");
+        assert_eq!(level_class("p", -1), "p0");
+    }
+
+    #[test]
+    fn level_class_prefix_keeps_cpu_and_memory_independent_on_sysload() {
+        // T29: cpu/memory share one node (`sysload`) — distinct prefixes
+        // are what keeps a same-percentage coincidence from looking like
+        // "already applied" to the dirty-tracking flush.
+        assert_eq!(level_class("cl", 45), "cl45");
+        assert_eq!(level_class("ml", 45), "ml45");
+        assert_ne!(level_class("cl", 45), level_class("ml", 45));
+    }
 
     #[test]
     fn winrows_pads_to_widest_appid_and_widest_stays_unpadded() {
@@ -803,6 +849,7 @@ mod tests {
         assert_eq!(
             keys,
             vec![
+                "au_tip",
                 "bat_tip",
                 "claude_tip",
                 "cpu_tip",
@@ -811,7 +858,9 @@ mod tests {
                 "eth_tip",
                 "hotspot_tip",
                 "inhibit_tip",
+                "kp_tip",
                 "mem_tip",
+                "music_tip",
                 "pomo_tip",
                 "remote_tip",
                 "sec_tip",
@@ -829,6 +878,7 @@ mod tests {
         assert_eq!(
             keys,
             vec![
+                "au_tip",
                 "bat_tip",
                 "claude_tip",
                 "clk_tip",
@@ -838,7 +888,9 @@ mod tests {
                 "eth_tip",
                 "hotspot_tip",
                 "inhibit_tip",
+                "kp_tip",
                 "mem_tip",
+                "music_tip",
                 "remote_tip",
                 "sec_tip",
                 "vol_tip",

@@ -277,7 +277,11 @@ impl Docker {
                 // net.sh does mid-scan; no error pill, no tofu.
                 vars.set("docker_text", "");
                 set_titled(vars, "docker_tip", "Docker", String::new());
-                vars.set(&class_key("docker"), "");
+                // T29: `docker` shares `devload`'s node with `claude`/
+                // `archupdate` now (`devload_module()`'s own doc comment)
+                // — "" clears docker's own slot without touching theirs,
+                // so it stays bare, not prefixed.
+                vars.set(&class_key("devload#docker"), "");
                 return;
             }
         };
@@ -289,7 +293,14 @@ impl Docker {
             format!("{} {running}", barico_label(IC_DOCKER)),
         );
         set_titled(vars, "docker_tip", "Docker", build_tip(&rows, stopped, projects));
-        vars.set(&class_key("docker"), class_for(&rows));
+        // T29: prefixed so a real "warning"/"normal" collision with
+        // `claude`'s or `archupdate`'s own value on the same shared node
+        // can never happen — see cpu.rs's set_vars for the cross-talk
+        // mechanism this guards against.
+        vars.set(
+            &class_key("devload#docker"),
+            format!("dok-{}", class_for(&rows)),
+        );
     }
 }
 

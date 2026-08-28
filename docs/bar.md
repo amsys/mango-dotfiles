@@ -48,15 +48,15 @@ End (tray → resources → tools → audio → connectivity → session):
 
 | Pill | Shows | Click |
 |---|---|---|
-| tray | — | app menus |
-| cpu | usage; popup: per-core bars, temperature, top processes, recent peaks from atop | `btop` |
-| memory | usage; popup: RAM/swap meters, page faults, top processes, DIMM data | `btop` |
-| docker | container count; popup: container list | right: docker menu |
-| battery | charge; popup: health, cycle count, watts, time estimate, power attribution | left: power mode toggle; right: powertop |
-| claudebar | Claude usage | right: usage settings |
+| tray | hidden unless the drawer is open | app window or menu (jumps to an open window first) |
+| traytoggle | drawer trigger | open/close the tray drawer |
+| keepass | KeePassXC lock state | show/hide KeePassXC |
+| sysload | two rows stacked: cpu icon + gauge above memory icon + gauge; one popup covers both (exact %, per-core bars, temperature, top processes, recent peaks from atop; RAM/swap meters, page faults, DIMM data) | either row: `btop` |
+| battery | icon + gauge + terminal-nub cap; popup: health, cycle count, watts, time estimate, power attribution | left: power mode toggle; right: powertop |
+| devload | two rows stacked: Claude usage above a docker container count + pending-update count (hidden at zero); one popup covers all three | claude row right: usage settings; docker cell right: docker menu; updates cell left: run `arch-update` |
 | tools | hover-expandable drawer: colorpicker, darkmode, snip | hover to reveal |
 | inhibit | keep-awake state | toggle keep-awake |
-| music | MPRIS track | play/pause |
+| music | now playing, two-line (dim artist above, title below); hidden with nothing loaded | play/pause |
 | volume, mic | audio | `pavucontrol-qt`; scroll: volume |
 | net-spinner, wifi, eth, netsec | network state and a security grade | menus; see below |
 | hotspot | hidden unless active | left: menu; right: toggle |
@@ -99,6 +99,8 @@ The daemon covers the data collection. Interactive actions stay in
 | `remote.sh` | toggles `wayvnc.service` + `kdeconnectd.service` |
 | `darkmode.sh` | light/dark toggle, then re-theme |
 | `clock.sh --calendar` | focus or start the calendar app |
+| `tray-click.sh` | tray `on_click_left` — jumps to an already-open window, else SNI `Activate` |
+| `tray-drawer.sh` | toggles the tray drawer open/closed |
 | `tooltip.sh` | shared popup text helpers, sourced by the scripts above |
 
 ## Pomodoro
@@ -116,4 +118,5 @@ that replaces its predecessor. Breaks open a full-screen overlay
 
 `mango-bard` has unit tests (`cargo test` in `ironbar/bard/`). The scripts
 keep the repo convention: `net.sh --selftest`, and `test` subcommands on
-`clock.sh`, `docker-menu.sh`, and `hotspot.sh`.
+`clock.sh`, `docker-menu.sh`, `hotspot.sh`, `tray-click.sh`, and
+`tray-drawer.sh`.

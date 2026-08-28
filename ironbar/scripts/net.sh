@@ -15,11 +15,13 @@ set -u
 WIFI_DEV="${MANGO_WIFI_DEV:-wlo1}"
 ETH_DEV="${MANGO_ETH_DEV:-eno2}"
 
-# Vendor apps regenerate their profiles behind your back; the picker only
-# offers tunnels you imported yourself. Matched against the profile name.
-EXCLUDE_RE='(ProtonVPN|Nord|NordLynx|PVPN)'
+# Written by system/vpnguard/mango-vpnguard, world-readable — no root
+# needed to read it (net.rs's guard_state_to_verdict reads the same file).
+GUARD_STATE_FILE="${MANGO_VG_STATE_FILE:-/run/mango-vpnguard/state}"
+VG_BIN="${MANGO_VG_BIN:-mango-vpnguard}"
 
 TAB=$(printf '\t')
+RULE='<span alpha="30%">──────────────────────────────────────</span>'
 
 notify() { notify-send -a mango-bard "Network" "$1"; }
 
@@ -36,14 +38,164 @@ active_tunnels() {
 		done
 }
 
-# uuid<TAB>type<TAB>name for every saved tunnel the vendor apps didn't generate
-vpn_profiles() {
+# Action rows only, as action<TAB>arg<TAB>label — no status prose. The
+# ironbar pill already says protected/not; the picker's job is what to do
+# about it, not to repeat that. `action` is empty for a row Enter does
+# nothing on; none of these carry an arg, so field 2 is always empty.
+guard_action_rows() { # <state>
+	case "$1" in
+	vpn:*)
+		printf 'disarm\t\t▸  Turn protection off\n'
+		;;
+	blocked)
+		printf 'protect\t\t▸  Try again\n'
+		printf 'unsecure\t\t▸  Go without protection\n'
+		;;
+	portal)
+		# Rarely reached: sec_click's own connectivity check (below) already
+		# intercepts the live case before the menu is ever built. This is the
+		# fallback for a state file left over from a moment ago.
+		printf 'portal-open\t\t▸  Open the sign-in page\n'
+		;;
+	# unsecured, unconfigured, and unknown/garbage (no state file — guard not
+	# installed, or not armed this boot) all land here. Must NOT offer
+	# "disarm" — that claims protection is on, which for an unknown state it
+	# almost certainly is not.
+	*)
+		printf 'protect\t\t▸  Turn protection on\n'
+		;;
+	esac
+}
+
+# uuid<TAB>type<TAB>name for every WireGuard/OpenVPN profile NM knows about,
+# unfiltered — a named function, not a $VAR binary like VG_BIN, so the
+# selftest overrides it by name instead of stubbing a binary.
+all_profiles() {
 	nmcli -t -f TYPE,UUID,NAME connection show 2>/dev/null |
 		while IFS=: read -r type uuid name; do
 			case "$type" in
 			wireguard | vpn) printf '%s\t%s\t%s\n' "$uuid" "$type" "$name" ;;
 			esac
-		done | grep -Ev "$TAB$TAB?$EXCLUDE_RE" || true
+		done
+}
+
+# uuid<TAB>type<TAB>name for every profile in <group-key> — same prefix rule
+# profile_rows uses to collapse rows (the name up to its first " (", or the
+# whole name if it has none). Kept in one place so a click and a render can
+# never disagree about membership.
+#
+# Not user.data-tagged: this NM build (1.58.1) rejects the `user` setting
+# outright ("invalid or not allowed setting 'user'") on both a dummy and a
+# real WireGuard connection, so there is nowhere to store an explicit tag.
+group_members() { # <group-key>
+	all_profiles | awk -F'\t' -v g="$1" '
+		function grp(nm,   i) { i = index(nm, " ("); return i ? substr(nm, 1, i - 1) : nm }
+		grp($3) == g { print }
+	'
+}
+
+group_wg_names() { group_members "$1" | awk -F'\t' '$2 == "wireguard" { print $3 }'; }
+
+# Every WireGuard/OpenVPN profile exactly once, as one flat
+# action<TAB>arg<TAB>label table: `mango-vpnguard list` (already ordered —
+# chain entries by descending priority, then always-on companions, see
+# mango-vpnguard's cmd_list) supplies the "auto"/"always" rows; anything
+# `all_profiles` knows that `list` didn't claim is "manual" — not yet in the
+# chain (WireGuard: action "guard", opts it in) or out of vpnguard's remit
+# entirely (OpenVPN: action "toggle", plain nmcli up/down). Live state comes
+# from `active_tunnels` (passed in — sec_click already has one call's worth,
+# no need for a second), matched by name — the same field OpenVPN and
+# WireGuard both carry there.
+#
+# Profiles sharing a name prefix up to " (" — every "ProtonVPN (…)" — fold
+# into one "group" row, so a roadwarrior VPN with several servers reads as
+# one line, not one per server. A group's rank is its best (lowest-numbered,
+# i.e. highest-priority) member's rank — guaranteed to be the first member
+# seen below, since `list` already hands chain entries over in priority
+# order, ahead of always-on, ahead of manual. The second argument is a
+# TAB-separated list of expanded group keys: an expanded group keeps its
+# header row (chevron ▾, action still "group") and lists its members
+# directly below it, indented, with their real actions.
+profile_rows() { # <active_tunnels output> [expanded groups, TAB-separated]
+	list=$("$VG_BIN" list 2>/dev/null)
+	act=$1
+	all=$(all_profiles)
+
+	printf '%s\n@@@\n%s\n@@@\n%s\n' "$list" "$act" "$all" | awk -F'\t' -v expanded="${2:-}" '
+		function esc(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); return s }
+		function grp(nm,   i) { i = index(nm, " ("); return i ? substr(nm, 1, i - 1) : nm }
+		function emitrow(nm, pad,   live, action, arg, meta) {
+			live = (nm in dev) ? "●" : "○"
+			if (role[nm] == "manual" && kind[nm] == "OpenVPN") { action = "toggle"; arg = uuid[nm] }
+			else if (role[nm] == "manual") { action = "guard"; arg = nm }
+			else { action = "up"; arg = nm }
+			meta = "  " kind[nm] " · " ((rank[nm] != "") ? "auto #" rank[nm] : role[nm])
+			if (nm in dev) meta = meta " · connected · " dev[nm]
+			printf "%s\t%s\t%s<tt><span alpha=\"65%%\">%s</span></tt>  %s<span alpha=\"55%%\">%s</span>\n",
+				action, arg, pad, live, esc(nm), meta
+		}
+		$0 == "@@@" { sec++; next }
+		# section 0: vg list — prio, role, dev, name (wireguard only)
+		sec == 0 {
+			if ($4 == "") next
+			known[$4] = 1
+			if ($2 == "default") { n++; role[$4] = "auto " n; rank[$4] = n }
+			else if ($2 == "always") { role[$4] = "always" }
+			else next
+			kind[$4] = "WireGuard"
+			order[++k] = $4
+			next
+		}
+		# section 1: active tunnels — type, uuid, device, name
+		sec == 1 {
+			if ($4 != "") dev[$4] = ($3 == "" ? "up" : $3)
+			next
+		}
+		# section 2: all profiles — uuid, type, name
+		sec == 2 {
+			if ($3 == "") next
+			uuid[$3] = $1
+			if ($3 in known) next
+			role[$3] = "manual"
+			kind[$3] = ($2 == "wireguard") ? "WireGuard" : "OpenVPN"
+			order[++k] = $3
+			next
+		}
+		END {
+			# Size each group first: its first-seen slot, member count, and
+			# the rank/kind/live state of its best member.
+			for (i = 1; i <= k; i++) {
+				nm = order[i]; g = grp(nm)
+				if (!(g in gpos)) gpos[g] = i
+				gcount[g]++
+				if (!(g in gkind)) gkind[g] = kind[nm]
+				if (nm in dev) { glive[g] = 1; if (!(g in gdev)) gdev[g] = dev[nm] }
+				if (rank[nm] != "" && !(g in grank)) grank[g] = rank[nm]
+				else if (role[nm] == "always" && !(g in grank)) galways[g] = 1
+			}
+
+			nexp = split(expanded, E, "\t")
+			for (i = 1; i <= nexp; i++) if (E[i] != "") isexp[E[i]] = 1
+
+			for (i = 1; i <= k; i++) {
+				nm = order[i]; g = grp(nm)
+				if (gcount[g] > 1) {
+					if (i != gpos[g]) continue # rendered at the header slot
+					live = (g in glive) ? "●" : "○"
+					role_txt = (g in grank) ? "auto #" grank[g] : (g in galways) ? "always" : "manual"
+					meta = "  " gkind[g] " · " role_txt " · " gcount[g] " servers"
+					if (g in glive) meta = meta " · connected · " gdev[g]
+					chev = (g in isexp) ? "▾" : "▸"
+					printf "group\t%s\t<tt><span alpha=\"65%%\">%s</span></tt>  %s %s<span alpha=\"55%%\">%s</span>\n",
+						g, live, chev, esc(g), meta
+					if (g in isexp)
+						for (j = 1; j <= k; j++)
+							if (grp(order[j]) == g) emitrow(order[j], "    ")
+					continue
+				}
+				emitrow(nm, "")
+			}
+		}'
 }
 
 # dev<TAB>kind<TAB>nm-profile-name for every tunnel interface that is actually up.
@@ -207,6 +359,188 @@ wifi_busy() { # "<code> (<name>)"
 
 # --------------------------------------------------------------- --sec-click
 
+# <name> <priority-delta> — nmcli connection.autoconnect-priority, floored at
+# 1 on the way down: Ctrl+Enter, not this, is how a chain entry goes manual.
+reorder_one() {
+	cur=$(nmcli -g connection.autoconnect-priority connection show "$1" 2>/dev/null)
+	case "$cur" in '' | *[!0-9]*) cur=0 ;; esac
+	new=$((cur + $2))
+	if [ "$2" -lt 0 ] && [ "$new" -le 0 ]; then
+		new=1
+	fi
+	nmcli connection modify "$1" connection.autoconnect-priority "$new" >/dev/null 2>&1
+}
+
+# <name> -> nmcli's own output (empty on success). A chain entry (priority>0)
+# drops to 0; an always-on companion (priority 0, autoconnect=yes) is the one
+# case priority alone can't clear, so autoconnect is what's turned off there.
+manual_one() {
+	cur=$(nmcli -g connection.autoconnect-priority connection show "$1" 2>/dev/null)
+	case "$cur" in '' | *[!0-9]*) cur=0 ;; esac
+	if [ "$cur" -gt 0 ]; then
+		nmcli connection modify "$1" connection.autoconnect-priority 0 2>&1
+	else
+		nmcli connection modify "$1" connection.autoconnect no 2>&1
+	fi
+}
+
+# Dials the highest-priority WireGuard member of a group that gets a real
+# handshake — the group form of mango-vpnguard's own first-success chain
+# walk. If none of the group is opted in yet, opts every member in at a
+# fresh descending priority first: the group form of the single-row "guard"
+# action.
+group_connect() { # <group-key>
+	g=$1
+	wg=$(group_wg_names "$g")
+	[ -n "$wg" ] || {
+		notify "No WireGuard profile in $g"
+		return
+	}
+
+	oldIFS=$IFS
+	IFS='
+'
+	set -f
+	pri=$(for nm in $wg; do
+		[ -n "$nm" ] || continue
+		p=$(nmcli -g connection.autoconnect-priority connection show "$nm" 2>/dev/null)
+		case "$p" in '' | *[!0-9]*) p=0 ;; esac
+		printf '%s\t%s\n' "$p" "$nm"
+	done)
+
+	if ! printf '%s\n' "$pri" | cut -f1 | grep -qv '^0$'; then
+		p=$(($(printf '%s\n' "$wg" | grep -c .) * 10))
+		for nm in $wg; do
+			[ -n "$nm" ] || continue
+			nmcli connection modify "$nm" connection.autoconnect-priority "$p" >/dev/null 2>&1
+			p=$((p - 10))
+		done
+		pri=$(for nm in $wg; do
+			[ -n "$nm" ] || continue
+			p=$(nmcli -g connection.autoconnect-priority connection show "$nm" 2>/dev/null)
+			printf '%s\t%s\n' "${p:-0}" "$nm"
+		done)
+	fi
+
+	won=0
+	for nm in $(printf '%s\n' "$pri" | sort -t "$TAB" -k1,1nr | cut -f2); do
+		[ -n "$nm" ] || continue
+		if OUT=$(printf 'CONN=%s\n' "$nm" | sudo mango-vpnguard up 2>&1); then
+			notify "$(mango-vpnguard status)"
+			won=1
+			break
+		fi
+	done
+	[ "$won" = 1 ] || notify "No server in $g came up"
+
+	set +f
+	IFS=$oldIFS
+}
+
+group_reorder() { # <group-key> <priority-delta>
+	g=$1
+	oldIFS=$IFS
+	IFS='
+'
+	set -f
+	fails=""
+	for nm in $(group_wg_names "$g"); do
+		[ -n "$nm" ] || continue
+		reorder_one "$nm" "$2" || fails="$fails, $nm"
+	done
+	set +f
+	IFS=$oldIFS
+	[ -z "$fails" ] || notify "Failed to reorder:${fails#,}"
+}
+
+group_manual() { # <group-key>
+	g=$1
+	oldIFS=$IFS
+	IFS='
+'
+	set -f
+	fails=""
+	for nm in $(group_wg_names "$g"); do
+		[ -n "$nm" ] || continue
+		OK=$(manual_one "$nm")
+		[ -z "$OK" ] || fails="$fails, $nm"
+	done
+	set +f
+	IFS=$oldIFS
+	if [ -z "$fails" ]; then
+		notify "$g is now manual"
+	else
+		notify "Failed for:${fails#,}"
+	fi
+}
+
+# One row's worth of behaviour, for top-level rows and expanded group
+# members alike — the same profile row means the same thing in both places.
+# <act> is active_tunnels' output, needed only by "toggle".
+row_action() { # <action> <arg> <rc> <act>
+	action=$1 arg=$2 rc=$3 act=$4
+	case "$action" in
+	protect | disarm | unsecure)
+		if OUT=$(sudo mango-vpnguard "$action" 2>&1); then
+			notify "$(mango-vpnguard status)"
+		else
+			notify "$OUT"
+		fi
+		;;
+	portal-open)
+		xdg-open http://neverssl.com >/dev/null 2>&1 &
+		;;
+	# Not yet in vpnguard's guarded list: opt in at a starting priority, then
+	# dial it in the same step. Plain nmcli, no sudo, for the opt-in half —
+	# opting a profile in or out of the chain is a userspace decision.
+	guard)
+		if nmcli connection modify "$arg" connection.autoconnect-priority 10 >/dev/null 2>&1; then
+			if OUT=$(printf 'CONN=%s\n' "$arg" | sudo mango-vpnguard up 2>&1); then
+				notify "$(mango-vpnguard status)"
+			else
+				notify "$OUT"
+			fi
+		else
+			notify "Failed to add $arg"
+		fi
+		;;
+	up)
+		case "$rc" in
+		10) reorder_one "$arg" 10 || notify "Failed to reorder $arg" ;; # Shift+Enter
+		11) reorder_one "$arg" -10 || notify "Failed to reorder $arg" ;; # Alt+Enter
+		12) # Ctrl+Enter: make manual
+			OK=$(manual_one "$arg")
+			if [ -z "$OK" ]; then
+				notify "$arg is now manual"
+			else
+				notify "Failed to make $arg manual: $OK"
+			fi
+			;;
+		*) # plain Enter: dial it
+			if OUT=$(printf 'CONN=%s\n' "$arg" | sudo mango-vpnguard up 2>&1); then
+				notify "$(mango-vpnguard status)"
+			else
+				notify "$OUT"
+			fi
+			;;
+		esac
+		;;
+	toggle)
+		if printf '%s\n' "$act" | cut -f2 | grep -qxF "$arg"; then
+			OUT=$(nmcli connection down uuid "$arg" 2>&1) || notify "$OUT"
+		else
+			OUT=$(nmcli connection up uuid "$arg" 2>&1) || notify "$OUT"
+		fi
+		# No poke needed: `nmcli connection up/down` above is itself a real NM
+		# event — net.rs's `nmcli monitor` child already regrades from it
+		# (IRONBAR.md T3), the same as every other join/disconnect action.
+		;;
+	settings)
+		nm-connection-editor &
+		;;
+	esac
+}
+
 sec_click() {
 	case "$(nmcli -t -f CONNECTIVITY general 2>/dev/null | head -1)" in
 	portal | limited)
@@ -218,46 +552,86 @@ sec_click() {
 	esac
 
 	ACT=$(active_tunnels)
-	PROF=$(vpn_profiles)
-	[ -n "$PROF" ] || { notify "No VPN profiles saved"; return; }
+	STATE=$(cat "$GUARD_STATE_FILE" 2>/dev/null || echo unknown)
+	ACTIONS=$(guard_action_rows "$STATE")
 
-	# Labels are built in awk for the same reason wifi-menu.sh does it: tab is
-	# an IFS whitespace character, so `read` collapses empty fields.
-	MENU=$(printf '%s\n@@@\n%s\n' "$ACT" "$PROF" | awk -F'\t' '
-		function esc(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); return s }
-		$0 == "@@@" { prof = 1; next }
-		!prof { if ($2 != "") dev[$2] = ($3 == "" ? "up" : $3); next }
-		$1 != "" {
-			ty = ($2 == "wireguard" ? "WireGuard" : "OpenVPN")
-			mark = ($1 in dev) ? "  (connected · " dev[$1] ")" : ""
-			printf "<tt><span alpha=\"65%%\">%-10s</span></tt> %s<span alpha=\"55%%\">%s</span>\n", ty, esc($3), mark
-		}')
+	# One rofi call in a loop. Tab on a group row toggles its expansion and
+	# redraws the same list; every other accepted key acts once and returns.
+	# -selected-row puts the cursor back on the toggled header, so the
+	# expand feels in-place even though rofi restarts. EXPANDED is a
+	# TAB-separated list of open group keys (keys can contain spaces).
+	EXPANDED="" SEL=0
+	while :; do
+		PROFILES=$(profile_rows "$ACT" "$EXPANDED")
 
-	RULE='<span alpha="30%">────────────────────</span>'
-	IDX=$(printf '%s\n%s\n  Connection settings…\n' "$MENU" "$RULE" |
-		rofi -dmenu -format i -markup-rows -p "VPN" \
-			-mesg "Enter toggles the tunnel" \
-			-theme-str 'window { width: 720px; } listview { spacing: 5px; } element { padding: 9px 8px; }') || return
-	case "$IDX" in '' | *[!0-9]*) return ;; esac
+		# One flat table for the whole picker: action<TAB>arg<TAB>label.
+		# Guard actions first — the most likely pick sits on row 0, already
+		# selected — then the rule, the profiles, and settings.
+		ROWS=$(printf '%s\n\t\t%s\n%s\nsettings\t\t▸  Connection settings…' "$ACTIONS" "$RULE" "$PROFILES")
 
-	N=$(printf '%s\n' "$PROF" | grep -c . || true)
-	if [ "$IDX" -ge "$N" ]; then
-		[ "$IDX" = "$((N + 1))" ] && nm-connection-editor &
+		if printf '%s\n' "$ROWS" | cut -f1 | grep -qx group; then
+			MESG="Enter connects  ·  Tab expands a group"
+		elif printf '%s\n' "$ROWS" | cut -f1 | grep -qx up; then
+			MESG="Enter connects"
+		else
+			MESG="Enter selects"
+		fi
+		# The reorder chords work on any chain ("up") row but are only
+		# advertised while a group is open — the closed picker stays a
+		# two-gesture affair.
+		[ -z "$EXPANDED" ] || MESG="$MESG  ·  Shift/Alt+Enter reorders  ·  Ctrl+Enter makes it manual"
+
+		# kb-accept-alt/-custom/-custom-alt have to be unbound before
+		# kb-custom-N can take Shift/Alt/Ctrl+Return (same as
+		# docker-menu.sh), or rofi refuses the rebind outright ("Binding
+		# `…` is already bound"). kb-element-next holds Tab by default and
+		# needs the same clearing before kb-custom-4 can take it. Chords
+		# act on "up" rows only, Tab on "group" rows only, see below.
+		IDX=$(printf '%s\n' "$ROWS" | cut -f3- |
+			rofi -dmenu -format i -markup-rows -p "VPN" \
+				-mesg "$MESG" -selected-row "$SEL" \
+				-theme-str 'window { width: 780px; } listview { spacing: 5px; } element { padding: 9px 8px; }' \
+				-kb-element-next "" \
+				-kb-accept-alt "" -kb-accept-custom "" -kb-accept-custom-alt "" \
+				-kb-custom-1 "Shift+Return" -kb-custom-2 "Alt+Return" \
+				-kb-custom-3 "Control+Return" -kb-custom-4 "Tab")
+		RC=$?
+		[ "$RC" = 0 ] || [ "$RC" = 10 ] || [ "$RC" = 11 ] || [ "$RC" = 12 ] || [ "$RC" = 13 ] || return
+		case "$IDX" in '' | *[!0-9]*) return ;; esac
+
+		ROW=$(printf '%s\n' "$ROWS" | sed -n "$((IDX + 1))p")
+		ACTION=$(printf '%s' "$ROW" | cut -f1)
+		ARG=$(printf '%s' "$ROW" | cut -f2)
+
+		if [ "$RC" = 13 ]; then # Tab: toggle group expansion, stay open
+			[ "$ACTION" = group ] || {
+				SEL=$IDX
+				continue
+			}
+			case "$TAB$EXPANDED$TAB" in
+			*"$TAB$ARG$TAB"*)
+				EXPANDED=$(printf '%s' "$EXPANDED" | tr '\t' '\n' |
+					grep -vxF "$ARG" | paste -sd "$TAB" -)
+				;;
+			*) EXPANDED="${EXPANDED:+$EXPANDED$TAB}$ARG" ;;
+			esac
+			# The header's index is stable: the toggle only adds or
+			# removes rows below it, so the cursor lands back on it.
+			SEL=$IDX
+			continue
+		fi
+
+		[ -n "$ACTION" ] || return # status/section row, Enter does nothing
+		case "$RC" in
+		10 | 11 | 12) [ "$ACTION" = up ] || return ;;
+		esac
+		if [ "$ACTION" = group ]; then # Enter on a header dials the best member
+			group_connect "$ARG"
+			return
+		fi
+		row_action "$ACTION" "$ARG" "$RC" "$ACT"
 		return
-	fi
-
-	ROW=$(printf '%s\n' "$PROF" | sed -n "$((IDX + 1))p")
-	UUID=$(printf '%s' "$ROW" | cut -f1)
-	NAME=$(printf '%s' "$ROW" | cut -f3)
-
-	if printf '%s\n' "$ACT" | cut -f2 | grep -qxF "$UUID"; then
-		OUT=$(nmcli connection down uuid "$UUID" 2>&1) || notify "Failed to disconnect $NAME: $OUT"
-	else
-		OUT=$(nmcli connection up uuid "$UUID" 2>&1) || notify "Failed to connect $NAME: $OUT"
-	fi
-	# No poke needed: `nmcli connection up/down` above is itself a real NM
-	# event — net.rs's `nmcli monitor` child already regrades from it
-	# (IRONBAR.md T3), the same as every other join/disconnect action.
+	done
 }
 
 sec_edit() {
@@ -352,33 +726,201 @@ selftest() {
 	R6() { printf '6\t%s\t%s\t%s' "$1" "$2" "${3:-0}"; }
 
 	# the case that prompted this: one VPN's subnet swallowed by another's
-	scan 1 shadow "$(R4 10.10.0.0/20 tun0 1000)
-$(R4 10.10.0.0/16 wg0 50)"
-	scan 1 identical "$(R4 10.10.0.0/20 tun0 1000)
-$(R4 10.10.0.0/20 wg0 50)"
+	scan 1 shadow "$(R4 10.0.0.0/20 tun0 1000)
+$(R4 10.0.0.0/16 wg0 50)"
+	scan 1 identical "$(R4 10.0.0.0/20 tun0 1000)
+$(R4 10.0.0.0/20 wg0 50)"
 	# ordinary subnetting on one interface is not a conflict
-	scan 0 - "$(R4 10.10.0.0/20 tun0 1000)
-$(R4 10.10.0.0/16 tun0 1000)"
-	scan 0 - "$(R4 10.10.0.0/17 tun0)
-$(R4 10.11.0.0/17 wg0)"
+	scan 0 - "$(R4 10.0.0.0/20 tun0 1000)
+$(R4 10.0.0.0/16 tun0 1000)"
+	scan 0 - "$(R4 10.0.0.0/17 tun0)
+$(R4 10.1.0.0/17 wg0)"
 	# a host route landing inside someone else's subnet
-	scan 1 shadow "$(R4 10.10.0.5 wg0 50)
-$(R4 10.10.0.0/24 tun0 1000)"
+	scan 1 shadow "$(R4 10.0.0.5 wg0 50)
+$(R4 10.0.0.0/24 tun0 1000)"
 	# several defaults are how a VPN takes over — only a metric tie is ambiguous
 	scan 0 - "$(R4 default wlo1 600)
 $(R4 default wg0 50)"
 	scan 1 tie "$(R4 default wlo1 600)
 $(R4 default wg0 600)"
 	# IPv6, including the /64-inside-/32 case and link-local being ignored
-	scan 1 shadow "$(R6 fd10:10:1::/64 wg0 50)
-$(R6 fd10:10::/32 tun0 1000)"
-	scan 0 - "$(R6 fd10:10:1::/64 wg0)
-$(R6 fd10:10:2::/64 tun0)"
+	scan 1 shadow "$(R6 fd00:10:1::/64 wg0 50)
+$(R6 fd00:10::/32 tun0 1000)"
+	scan 0 - "$(R6 fd00:10:1::/64 wg0)
+$(R6 fd00:10:2::/64 tun0)"
 	scan 0 - "$(R6 fe80::/64 wg0)
 $(R6 fe80::/64 tun0)"
 	# families must never cross-match despite identical leading bits
-	scan 0 - "$(R4 10.10.0.0/16 tun0)
+	scan 0 - "$(R4 10.0.0.0/16 tun0)
 $(R6 ::/0 wg0)"
+
+	printf '\n-- vpnguard action rows (actions only, no status prose) --\n'
+	actionrow() { # expected row (grep pattern), state
+		got=$(guard_action_rows "$2")
+		if printf '%s\n' "$got" | grep -qF "$1"; then
+			printf 'ok    action-row  %-24s -> %s\n' "$2" "$1"
+		else
+			printf 'FAIL  action-row  %-24s -> wanted %s, got: %s\n' "$2" "$1" "$got"
+			fails=$((fails + 1))
+		fi
+	}
+	actionrow 'disarm		▸  Turn protection off' 'vpn:ProtonVPN (DE317)'
+	actionrow 'protect		▸  Try again' 'blocked'
+	actionrow 'unsecure		▸  Go without protection' 'blocked'
+	actionrow 'portal-open		▸  Open the sign-in page' 'portal'
+	actionrow 'protect		▸  Turn protection on' 'unsecured'
+	actionrow 'protect		▸  Turn protection on' 'unconfigured'
+	# missing/garbage state must never offer "disarm" — that claims protection
+	# is already on, which for an unknown state it almost certainly is not.
+	nodisarm() { # state
+		got=$(guard_action_rows "$1")
+		if printf '%s\n' "$got" | cut -f1 | grep -qx disarm; then
+			printf 'FAIL  action-row  %-24s -> offered disarm\n' "$1"
+			fails=$((fails + 1))
+		else
+			printf 'ok    action-row  %-24s -> no disarm\n' "$1"
+		fi
+	}
+	nodisarm ''
+	nodisarm 'garbage'
+
+	printf '\n-- vpnguard profile rows (NM-derived, one row per profile) --\n'
+	VGT=$(mktemp -d)
+	trap 'rm -rf "$VGT"' EXIT
+	# `list` shape: priority<TAB>role<TAB>dev<TAB>name — no id, the NM
+	# connection name (spaces and all) is the only identity. "Spare Tunnel"
+	# is WireGuard but not in `list` at all — the case that used to produce
+	# two rows (one "not guarded", one "Other VPNs") for the same profile.
+	cat >"$VGT/mango-vpnguard" <<-'EOF'
+		#!/bin/sh
+		[ "$1" = list ] && printf '10\tdefault\twg_home_full\tHome Full\n0\talways\twg_home\tHome Gateway\n'
+	EOF
+	chmod +x "$VGT/mango-vpnguard"
+	all_profiles() { # no real nmcli in a test — see its own definition
+		printf 'uuid-1\twireguard\tHome Full\n'
+		printf 'uuid-2\twireguard\tHome Gateway\n'
+		printf 'uuid-3\twireguard\tSpare Tunnel\n'
+		printf 'uuid-4\tvpn\tWork OpenVPN\n'
+	}
+	profrow() { # expected row (grep pattern)
+		if printf '%s\n' "$GOT" | grep -qF "$1"; then
+			printf 'ok    profile-row  %s\n' "$1"
+		else
+			printf 'FAIL  profile-row  wanted %s, got: %s\n' "$1" "$GOT"
+			fails=$((fails + 1))
+		fi
+	}
+	GOT=$(VG_BIN="$VGT/mango-vpnguard" profile_rows 'wireguard	uuid-1	wg_home_full	Home Full')
+	rm -rf "$VGT"
+	profrow 'up	Home Full	<tt><span alpha="65%">●</span></tt>  Home Full<span alpha="55%">  WireGuard · auto #1 · connected · wg_home_full</span>'
+	profrow 'up	Home Gateway	<tt><span alpha="65%">○</span></tt>  Home Gateway<span alpha="55%">  WireGuard · always</span>'
+	profrow 'guard	Spare Tunnel	<tt><span alpha="65%">○</span></tt>  Spare Tunnel<span alpha="55%">  WireGuard · manual</span>'
+	profrow 'toggle	uuid-4	<tt><span alpha="65%">○</span></tt>  Work OpenVPN<span alpha="55%">  OpenVPN · manual</span>'
+	# the bug this replaced the old two-source lookup for: no argument
+	# (connection name or uuid) may appear on more than one row.
+	dups=$(printf '%s\n' "$GOT" | cut -f2 | sort | uniq -d)
+	if [ -z "$dups" ]; then
+		printf 'ok    profile-row  no argument duplicated\n'
+	else
+		printf 'FAIL  profile-row  duplicated argument(s): %s\n' "$(printf '%s' "$dups" | tr '\n' ' ')"
+		fails=$((fails + 1))
+	fi
+
+	printf '\n-- vpnguard profile rows (grouping by name prefix) --\n'
+	VGT2=$(mktemp -d)
+	cat >"$VGT2/mango-vpnguard" <<-'EOF'
+		#!/bin/sh
+		[ "$1" = list ] || exit 0
+	EOF
+	chmod +x "$VGT2/mango-vpnguard"
+	all_profiles() { # three "ProtonVPN (…)" servers plus one unrelated singleton
+		printf 'uuid-a\twireguard\tProtonVPN (DE317)\n'
+		printf 'uuid-b\twireguard\tProtonVPN (MU31)\n'
+		printf 'uuid-c\tvpn\tProtonVPN (Mauritius)\n'
+		printf 'uuid-d\twireguard\tarrakis\n'
+	}
+	GROUPGOT=$(VG_BIN="$VGT2/mango-vpnguard" profile_rows '')
+	EXPGOT=$(VG_BIN="$VGT2/mango-vpnguard" profile_rows '' 'ProtonVPN')
+	rm -rf "$VGT2"
+
+	grpcheck() { # description, grep pattern against $GROUPGOT
+		if printf '%s\n' "$GROUPGOT" | grep -qF "$2"; then
+			printf 'ok    group-row    %s\n' "$1"
+		else
+			printf 'FAIL  group-row    %s -> got: %s\n' "$1" "$GROUPGOT"
+			fails=$((fails + 1))
+		fi
+	}
+	grpcheck 'three Proton servers collapse to one row' 'group	ProtonVPN	'
+	grpcheck 'the collapsed row states its member count' '3 servers'
+	grpcheck 'the collapsed row shows a closed chevron' '▸ ProtonVPN'
+	grpcheck 'an ungrouped profile still renders on its own' 'guard	arrakis	'
+	if printf '%s\n' "$GROUPGOT" | grep -qF 'ProtonVPN (DE317)'; then
+		printf 'FAIL  group-row    a grouped member must not also get its own row\n'
+		fails=$((fails + 1))
+	else
+		printf 'ok    group-row    grouped members do not also get their own row\n'
+	fi
+
+	expcheck() { # description, grep pattern against $EXPGOT
+		if printf '%s\n' "$EXPGOT" | grep -qF "$2"; then
+			printf 'ok    group-expand %s\n' "$1"
+		else
+			printf 'FAIL  group-expand %s -> got: %s\n' "$1" "$EXPGOT"
+			fails=$((fails + 1))
+		fi
+	}
+	expcheck 'an expanded group lists its members' 'guard	ProtonVPN (DE317)	'
+	expcheck '  and every member, not just one' 'guard	ProtonVPN (MU31)	'
+	expcheck '  including a non-WireGuard one' 'toggle	uuid-c	'
+	hn=$(printf '%s\n' "$EXPGOT" | grep -cF 'group	ProtonVPN	')
+	if [ "$hn" = 1 ] && printf '%s\n' "$EXPGOT" | grep -F 'group	ProtonVPN	' | grep -qF '▾'; then
+		printf 'ok    group-expand the group keeps one open (▾) header row\n'
+	else
+		printf 'FAIL  group-expand want one ▾ header row, got: %s\n' "$EXPGOT"
+		fails=$((fails + 1))
+	fi
+	hline=$(printf '%s\n' "$EXPGOT" | grep -nF 'group	ProtonVPN	' | cut -d: -f1 | head -1)
+	members=$(printf '%s\n' "$EXPGOT" | sed -n "$((hline + 1)),$((hline + 3))p" | cut -f2)
+	if [ "$members" = "$(printf 'ProtonVPN (DE317)\nProtonVPN (MU31)\nuuid-c')" ]; then
+		printf 'ok    group-expand members sit directly under the header, in order\n'
+	else
+		printf 'FAIL  group-expand member rows out of place: %s\n' "$(printf '%s' "$members" | tr '\n' ' ')"
+		fails=$((fails + 1))
+	fi
+	en=$(printf '%s\n' "$EXPGOT" | grep -c .)
+	if [ "$en" = 5 ]; then
+		printf 'ok    group-expand full list: header + 3 members + arrakis\n'
+	else
+		printf 'FAIL  group-expand want 5 rows, got %d\n' "$en"
+		fails=$((fails + 1))
+	fi
+
+	# Row-table invariant the old index maths used to need proving separately:
+	# cutting the label column and cutting the action column from the same
+	# table must stay in lock-step, row for row — that's what the flat
+	# action<TAB>arg<TAB>label table in sec_click depends on.
+	printf '\n-- row-table invariant --\n'
+	rowinv() { # <set name> <rows>
+		NROWS=$(printf '%s\n' "$2" | grep -c .)
+		i=1
+		rowfails=0
+		while [ "$i" -le "$NROWS" ]; do
+			row=$(printf '%s\n' "$2" | sed -n "${i}p")
+			act=$(printf '%s' "$row" | cut -f1)
+			arg=$(printf '%s' "$row" | cut -f2)
+			lbl=$(printf '%s' "$row" | cut -f3-)
+			[ "$row" = "$act$TAB$arg$TAB$lbl" ] || {
+				printf 'FAIL  row-table  %s row %d: label/action cut out of step with the full row\n' "$1" "$i"
+				fails=$((fails + 1))
+				rowfails=$((rowfails + 1))
+			}
+			i=$((i + 1))
+		done
+		[ "$rowfails" -gt 0 ] || printf 'ok    row-table  %s: %d row(s) in lock-step\n' "$1" "$NROWS"
+	}
+	rowinv 'guard-actions' "$(guard_action_rows blocked)"
+	rowinv 'expanded-group' "$EXPGOT"
 
 	# Regression guard for the bug that graded a wide-open box "encrypted end to
 	# end": nmcli reports an OpenVPN connection's device as the physical link it

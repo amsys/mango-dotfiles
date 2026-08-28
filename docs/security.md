@@ -48,6 +48,8 @@ user (or anything running as the user) can rewrite the script.
   is root-only upstream because of the PLATYPUS side channel
   (CVE-2020-8694). On a single-user laptop that attack does not apply, and
   RAPL is the only root-free source of per-domain power data.
-- `wayvnc.service` listens on `0.0.0.0:5900` when started. It stays
-  disabled; the bar's remote toggle starts it on demand, and the firewall
-  is expected to restrict the port.
+- `wayvnc.service` listens on `[::]:5900` (dual-stack, also serves v4)
+  when started, with no auth and no encryption. It stays disabled; the
+  bar's remote toggle starts it on demand, and ufw
+  (`system/remote/install.sh`) is the only thing restricting the port to
+  wg_hetzner and the mango hotspot — see `system/remote/README.md`.

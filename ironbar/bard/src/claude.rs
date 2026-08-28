@@ -375,7 +375,11 @@ impl Claude {
                     "Claude Usage",
                     "No usage data yet.\nRun <b>claude</b> to log in.".to_string(),
                 );
-                vars.set(&class_key("claudebar"), "critical");
+                // T29: `claudebar` shares `devload`'s node with `docker`/
+                // `archupdate` now (`devload_module()`'s own doc comment)
+                // — prefixed so this error state can't collide with
+                // either sibling's own value on that shared node.
+                vars.set(&class_key("devload#claude"), "claude-critical");
                 return;
             }
         };
@@ -389,7 +393,7 @@ impl Claude {
                     "Claude Usage",
                     "Usage cache is not valid JSON.".to_string(),
                 );
-                vars.set(&class_key("claudebar"), "critical");
+                vars.set(&class_key("devload#claude"), "claude-critical");
                 return;
             }
         };
@@ -405,16 +409,24 @@ impl Claude {
         let class = class_for(session_pct, weekly_pct, scoped_max, extra.pct);
         let stale = cache_dir().join(".stale").exists();
 
+        // T28 dropped the countdown from the bar pill to cut its width
+        // (~131px to ~62px) once it was the only pill on its own row. T29
+        // re-adds it: `claudebar` now shares `devload`'s second row with
+        // `docker`/`archupdate` (`devload_module()`'s own doc comment),
+        // so the width this stage's own reserve accounts for again —
+        // style.css's `.devload` min-width, not this pill's own.
         vars.set(
             "claude_text",
             format!(
-                "{} {session_pct}% \u{b7} {}{}",
+                "{} {session_pct}% · {}{}",
                 barico_label(IC_CLAUDE),
                 countdown(session_reset, now),
                 if stale { " \u{23f8}" } else { "" }
             ),
         );
-        vars.set(&class_key("claudebar"), class);
+        // T29: prefixed — see the two error-path `class_key` calls above
+        // for why.
+        vars.set(&class_key("devload#claude"), format!("claude-{class}"));
 
         let mut tip = String::new();
         tip.push_str(&meter_section(

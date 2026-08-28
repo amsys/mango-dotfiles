@@ -207,17 +207,17 @@ mod tests {
     fn shadow_one_vpn_subnet_swallowed_by_another() {
         // net.sh:866-867
         let out = conflict_scan(&[
-            r4("10.10.0.0/20", "tun0", 1000),
-            r4("10.10.0.0/16", "wg0", 50),
+            r4("10.0.0.0/20", "tun0", 1000),
+            r4("10.0.0.0/16", "wg0", 50),
         ]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, ConflictKind::Shadow);
         // The more specific route (/20) is reported first, per net.sh's
         // awk comment "the more specific route wins, so print it first".
-        assert_eq!(out[0].dst_a, "10.10.0.0/20");
+        assert_eq!(out[0].dst_a, "10.0.0.0/20");
         assert_eq!(out[0].dev_a, "tun0");
         assert_eq!(out[0].metric_a, 1000);
-        assert_eq!(out[0].dst_b, "10.10.0.0/16");
+        assert_eq!(out[0].dst_b, "10.0.0.0/16");
         assert_eq!(out[0].dev_b, "wg0");
         assert_eq!(out[0].metric_b, 50);
     }
@@ -226,8 +226,8 @@ mod tests {
     fn identical_same_prefix_two_devices() {
         // net.sh:868-869
         let out = conflict_scan(&[
-            r4("10.10.0.0/20", "tun0", 1000),
-            r4("10.10.0.0/20", "wg0", 50),
+            r4("10.0.0.0/20", "tun0", 1000),
+            r4("10.0.0.0/20", "wg0", 50),
         ]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, ConflictKind::Identical);
@@ -241,8 +241,8 @@ mod tests {
     fn same_device_subnetting_is_not_a_conflict() {
         // net.sh:871-872
         let out = conflict_scan(&[
-            r4("10.10.0.0/20", "tun0", 1000),
-            r4("10.10.0.0/16", "tun0", 1000),
+            r4("10.0.0.0/20", "tun0", 1000),
+            r4("10.0.0.0/16", "tun0", 1000),
         ]);
         assert!(out.is_empty());
     }
@@ -250,14 +250,14 @@ mod tests {
     #[test]
     fn no_overlap_is_not_a_conflict() {
         // net.sh:873-874
-        let out = conflict_scan(&[r4("10.10.0.0/17", "tun0", 0), r4("10.11.0.0/17", "wg0", 0)]);
+        let out = conflict_scan(&[r4("10.0.0.0/17", "tun0", 0), r4("10.1.0.0/17", "wg0", 0)]);
         assert!(out.is_empty());
     }
 
     #[test]
     fn host_route_inside_a_subnet_is_shadow() {
         // net.sh:876-877 — missing prefix length implies /32.
-        let out = conflict_scan(&[r4("10.10.0.5", "wg0", 50), r4("10.10.0.0/24", "tun0", 1000)]);
+        let out = conflict_scan(&[r4("10.0.0.5", "wg0", 50), r4("10.0.0.0/24", "tun0", 1000)]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, ConflictKind::Shadow);
     }
@@ -288,8 +288,8 @@ mod tests {
     fn ipv6_64_inside_32_is_shadow() {
         // net.sh:884-885
         let out = conflict_scan(&[
-            r6("fd10:10:1::/64", "wg0", 50),
-            r6("fd10:10::/32", "tun0", 1000),
+            r6("fd00:10:1::/64", "wg0", 50),
+            r6("fd00:10::/32", "tun0", 1000),
         ]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, ConflictKind::Shadow);
@@ -299,8 +299,8 @@ mod tests {
     fn ipv6_no_overlap() {
         // net.sh:886-887
         let out = conflict_scan(&[
-            r6("fd10:10:1::/64", "wg0", 0),
-            r6("fd10:10:2::/64", "tun0", 0),
+            r6("fd00:10:1::/64", "wg0", 0),
+            r6("fd00:10:2::/64", "tun0", 0),
         ]);
         assert!(out.is_empty());
     }
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn mixed_family_never_cross_matches() {
         // net.sh:891-892 — identical leading bits, different family.
-        let out = conflict_scan(&[r4("10.10.0.0/16", "tun0", 0), r6("::/0", "wg0", 0)]);
+        let out = conflict_scan(&[r4("10.0.0.0/16", "tun0", 0), r6("::/0", "wg0", 0)]);
         assert!(out.is_empty());
     }
 }
