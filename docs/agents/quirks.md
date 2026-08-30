@@ -77,7 +77,11 @@ in the docs/install.md checklist if it cannot be tracked as a file:
 
 - `hypridle.conf`, and anything else under `~/.config/hypr/`
 - `/usr/local/bin/keepassxc-stash-pw` + the SDDM PAM hook feeding
-  `/run/keepassxc-unlock/$USER`
+  `/run/keepassxc-unlock/$USER` — retired. `keepassxc-autounlock.sh` no longer
+  reads the stash, so both must be removed by hand (see docs/install.md)
+- `~/.config/keepassxc/keepassxc.ini` — `MinimizeOnStartup=false` shows the
+  unlock prompt at login, `MinimizeAfterUnlock=true` hides the window after
+  you unlock it. `ShowTrayIcon` and `MinimizeToTray` must stay false
 - `systemd --user` masks for `gnome-keyring-daemon.{service,socket}` → `/dev/null`
   (this is what lets KeePassXC own the Secret Service)
 - `~/.config/autostart/`, `~/.config/environment.d/`, `~/.config/mimeapps.list`

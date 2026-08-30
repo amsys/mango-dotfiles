@@ -38,6 +38,9 @@ Beyond the symlinks, `install-config.sh` also:
 - Links the systemd user units and enables `mango-bard.service` and
   `mango-sleep-lock.service`. The other units stay disabled; bar toggles
   start them on demand.
+- Links a drop-in override for the `arch-update` package's own
+  `arch-update.timer` (`Persistent=true`, `OnUnitActiveSec=1h`), so a missed
+  run replays at the next boot instead of leaving the bar pill stale.
 - Runs `switchwall.sh --noswitch` to materialize the matugen output.
 
 ## Packages
@@ -47,7 +50,7 @@ Beyond the symlinks, `install-config.sh` also:
 | Group | Packages |
 |---|---|
 | Core | `mangowm-git`ᴬ `ironbar kitty rofi-wayland mako` `wlogout`ᴬ `swaylock hypridle matugen swaybg cliphist wl-clipboard` |
-| Tools | `grim slurp swappy hyprpicker tesseract tesseract-data-eng wf-recorder brightnessctl playerctl wireplumber networkmanager nm-connection-editor iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs atop btop dmidecode imagemagick python-gobject wayvnc kdeconnect` |
+| Tools | `grim slurp swappy hyprpicker tesseract tesseract-data-eng wf-recorder brightnessctl playerctl wireplumber networkmanager nm-connection-editor iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs btop dmidecode imagemagick python-gobject wayvnc kdeconnect` |
 | Look | `fish starship eza ttf-jetbrains-mono-nerd` `adw-gtk-theme-git`ᴬ `breeze-plus`ᴬ `kde-cli-tools ttf-ibm-plex` `ttf-material-symbols-variable-git`ᴬ |
 | Shell | `fd fzf zoxide bat yazi git-delta` |
 | Optional | `keepassxc nextcloud-client dolphin` `arch-update`ᴬ |
@@ -57,10 +60,9 @@ Notes:
 
 - `adw-gtk-theme-git` provides the `adw-gtk3` themes the wallpaper switch
   toggles between. `breeze-plus` provides the matching icon themes.
-- `atop` feeds the CPU popup's "recent peaks" list. Its service must run
-  (see the checklist). `btop` opens when you click the CPU or memory pill.
-  `dmidecode` fills the DIMM cache at install time. All three degrade
-  quietly — the popup drops the section it cannot fill.
+- `btop` opens when you click the CPU or memory pill. `dmidecode` fills the
+  DIMM cache at install time. Both degrade quietly — the popup drops the
+  section it cannot fill.
 - The UI font is IBM Plex Sans (`ttf-ibm-plex`).
 
 ## Root-level installers (`system/`)
@@ -91,8 +93,6 @@ sudo system/<name>/install.sh
 This desktop depends on system state that no tracked file covers. Complete
 these steps after the first install:
 
-- [ ] `systemctl enable --now atop.service atopacct.service` — the CPU
-      popup's "recent peaks" section reads `/var/log/atop/`.
 - [ ] `/etc/systemd/logind.conf.d/10-power.conf` — set
       `HandlePowerKey=ignore` and `HandlePowerKeyLongPress=ignore` so
       `powerkey.py` owns the power button. Set
@@ -102,8 +102,18 @@ these steps after the first install:
       `CriticalPowerAction=Auto` as the last resort below the battery guard.
 - [ ] KeePassXC: add the attribute `application=mango` to the OpenRouter key
       entry. The AI chat (`Alt+I`) cannot find the key without it.
-- [ ] `/usr/local/bin/keepassxc-stash-pw` and the SDDM PAM hook that feeds
-      `/run/keepassxc-unlock/$USER` (used by `keepassxc-autounlock.sh`).
+- [ ] Remove the retired KeePassXC auto-unlock: delete
+      `/usr/local/bin/keepassxc-stash-pw` and the `pam_exec.so expose_authtok`
+      line in `/etc/pam.d/sddm` that feeds `/run/keepassxc-unlock/$USER`.
+      `keepassxc-autounlock.sh` no longer reads that stash. You now type the
+      password into the normal KeePassXC prompt at login. Set
+      `MinimizeOnStartup=false` under `[GUI]` and `MinimizeAfterUnlock=true`
+      under `[General]` in `~/.config/keepassxc/keepassxc.ini`, so the prompt
+      is visible and the window hides itself after you unlock it.
+- [ ] `/etc/pam.d/sudo` — after `system/fprint-notify/install.sh`, add
+      `auth optional pam_exec.so quiet /usr/local/bin/mango-fprint-notify`
+      above the `auth sufficient pam_fprintd.so` line. The installer prints
+      it but never edits the file. See [security.md](security.md).
 - [ ] Mask the GNOME keyring user units
       (`gnome-keyring-daemon.{service,socket}` → `/dev/null`) so KeePassXC
       owns the Secret Service.
@@ -114,6 +124,9 @@ these steps after the first install:
 - [ ] Fill in `~/.config/git/config.local` (name and email). Git refuses to
       commit without an identity.
 - [ ] Put a wallpaper in `~/Wallpapers/`.
+- [ ] `arch-update --tray` does not start. The bar's own arch-update pill
+      shows the same data; the `arch-update` package is still needed for
+      its check binary and timer.
 - [ ] Hibernate does not work on this machine: the swapfile is smaller than
       RAM and there is no `resume=` on the kernel command line. The wlogout
       Hibernate button is dead, and the battery guard suspends instead. To

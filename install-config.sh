@@ -224,10 +224,11 @@ UNITS=(
 # (ironbar/scripts/keepawake.sh) — see each unit's own comment.
 LINK_ONLY_UNITS=(
 	"systemd/wayvnc.service:wayvnc.service"
+	"systemd/wayvnc-privacy.service:wayvnc-privacy.service"
 	"systemd/kdeconnectd.service:kdeconnectd.service"
 	"systemd/mango-keepawake.service:mango-keepawake.service"
 )
-log "-- kdeconnect autostart override --"
+log "-- kdeconnect autostart + dbus-activation overrides --"
 # /etc/xdg/autostart/org.kde.kdeconnect.daemon.desktop has no OnlyShowIn
 # filter and runs kdeconnectd on every login unconditionally (live-confirmed:
 # systemd-xdg-autostart-generator turns it into
@@ -236,6 +237,28 @@ log "-- kdeconnect autostart override --"
 # (systemd/kdeconnectd.service) — see kdeconnect/org.kde.kdeconnect.daemon.desktop's
 # own comment.
 link "$REPO/kdeconnect/org.kde.kdeconnect.daemon.desktop" "$XDG_CONFIG_HOME/autostart/org.kde.kdeconnect.daemon.desktop"
+# Autostart is only half the hole: any bus call to org.kde.kdeconnect
+# (Chromium makes one at each Chromium start) D-Bus-activates kdeconnectd
+# outside systemd. This user-level service file overrides the system one
+# and makes activation fail — see its own comment.
+link "$REPO/kdeconnect/org.kde.kdeconnect.service" "${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services/org.kde.kdeconnect.service"
+# The bus watches its config files for changes, but not the service
+# directories. Without this reload the override stays inert until the
+# next login.
+if ((DRY_RUN)); then
+	log "  (dry run) would run: busctl --user ... ReloadConfig"
+elif command -v busctl >/dev/null 2>&1; then
+	busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
+		org.freedesktop.DBus ReloadConfig 2>/dev/null &&
+		log "  dbus service files reloaded"
+fi
+log
+
+log "-- arch-update.timer override --"
+# Drop-in for the arch-update package's own arch-update.timer (already
+# enabled by that package, not by this repo). link()'s mkdir -p on the
+# dest dirname creates the arch-update.timer.d/ directory as needed.
+link "$REPO/systemd/arch-update.timer.d/mango.conf" "$XDG_CONFIG_HOME/systemd/user/arch-update.timer.d/mango.conf"
 log
 
 log "-- systemd user units --"
@@ -252,7 +275,7 @@ elif command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload 2>/d
 	done
 	log "  enabled (start at the next login, via mango's config.conf; or now"
 	log "  via 'systemctl --user start <unit>')"
-	log "  linked, not enabled: wayvnc.service kdeconnectd.service"
+	log "  linked, not enabled: wayvnc.service wayvnc-privacy.service kdeconnectd.service"
 	log "  mango-keepawake.service (toggle from the bar, or"
 	log "  'systemctl --user start <unit>')"
 else

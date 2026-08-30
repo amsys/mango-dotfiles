@@ -2,18 +2,104 @@
 
 ## What this is
 
-One ironbar pill (`remote`, right end of the bar) toggles two services
+One ironbar pill (`remote`, right end of the bar) toggles four units
 together:
 
 - **wayvnc** — VNC server, the screen. Talks to mango directly (wlr-screencopy
   + virtual pointer/keyboard), no portal involved.
 - **kdeconnectd** — KDE Connect daemon, input/clipboard/files/notifications
   from a paired phone. Has no screen view of its own.
+- **mango-keepawake** — blocks idle suspend and lid-switch suspend for as
+  long as remote access is armed, so a 15-minute idle timeout does not end
+  the session out from under a remote user. Stopped again on toggle-off,
+  but only if this pill is what started it — a keep-awake you had already
+  switched on yourself from its own pill is left alone.
+- **wayvnc-privacy** — watches for a connected VNC client and blanks every
+  physical output for as long as one is connected, so nothing typed or
+  shown remotely is readable at the laptop. See "Panel blanking" below.
 
-Neither is enabled at login — `install-config.sh` links both units but does
+None is enabled at login — `install-config.sh` links all four units but does
 not `systemctl --user enable` them (see `LINK_ONLY_UNITS` there). The pill's
 click handler (`ironbar/scripts/remote.sh --toggle`) is the only thing that
 starts or stops them.
+
+## The virtual output
+
+wayvnc doesn't capture a physical panel. `--toggle` creates a headless
+output (`mmsg dispatch create_virtual_output`, named `HEADLESS-<n>` —
+wlroots increments `<n>` on every create and never reuses a name, so
+`remote.sh` re-discovers it after each create rather than hardcoding it) and
+pins wayvnc to it (`--vnc-exec`). The remote user works entirely on that
+output; the physical panels stay blanked by `wayvnc-privacy` (below) rather
+than shown. `--toggle` also regenerates and reloads the bar config, so the
+virtual output gets a full ironbar bar of its own for as long as VNC is
+armed, and loses it again on toggle-off.
+
+wayvnc resizes a headless output to match the connecting client automatically
+(built in since 0.10.1, on by default — `-R/--disable-resizing` opts out,
+and `--vnc-exec` doesn't pass it; it only ever resizes a *headless* output,
+never a physical one). No sizing code needed here.
+
+Nothing is on the virtual output at first — it's empty desktop. Move a tag
+onto it with:
+
+- **A grid click** — open the pill's popup and click a cell. Each row is a
+  physical monitor, each column a tag; the label is the same occupancy dot
+  count the real tag pills show.
+- **`SUPER+CTRL+Next`/`SUPER+CTRL+Prior`** (`--pull-next`/`--pull-prev`) —
+  cycle through every occupied tag on both physical monitors. Also the
+  pill's right-click. Reachable from a client that can only send modifiers
+  plus Tab/Esc/PgUp/PgDown/Home.
+- **`SUPER+CTRL+Home`** (`--restore`) — send the pulled tag back to its own
+  monitor.
+
+Only one tag is pulled at a time — pulling a second sends the first back
+first. The candidate list for the cycle comes from `mmsg get all-clients`,
+never `all-tags`: that command's own `client_count` field reports the
+compositor-wide client total for every occupied tag, not the tag's own
+count (verified live — worth reporting upstream, not a bug in this repo).
+Restoring is safe to call twice, and also runs automatically on VNC client
+disconnect (see "Panel blanking") and on toggle-off.
+
+## Panel blanking
+
+`wayvnc-privacy.service` watches `wayvncctl event-receive` for
+`client-connected`/`client-disconnected` and runs `wlopm --off '*'` /
+`wlopm --on '*'` on the edges, restoring only the outputs that were on
+before.
+
+This is safe *because* of how mango implements DPMS: a `wlopm --off`
+output keeps its real geometry and keeps feeding wlr-screencopy — confirmed
+live, wayvnc kept streaming a DPMS-off output to a connected client
+throughout this feature's own development. `mango/scripts/rescue-outputs.sh`
+documents the same fact from the other side (an `only_sleep` monitor is not
+the "frozen desktop" state it watches for). A crashed or killed watcher
+cannot leave the panels dark forever — the unit's `ExecStopPost` always runs
+`remote.sh --privacy-restore`, which is safe to run twice.
+
+### Why a lock, not just a blank
+
+A swaylock over the physical panels only is not possible here, for two
+reasons. First, `ext-session-lock-v1` (the protocol mango exposes, and the
+one swaylock uses) needs a lock surface on every output, `HEADLESS-<n>`
+included, or the compositor kills the client — there is no per-output
+opt-out, in the protocol or in swaylock's own flags. A lock would shut the
+remote user out of the session it exists to serve. Second, mango has one
+seat: wayvnc drives the session through a virtual keyboard and pointer on
+that same seat, so no lock surface, even one drawn on `eDP-1` alone, can
+apply to the panels without also catching the remote input.
+
+`wlopm --off '*'` stays the mechanism. The gap this leaves is real: the
+panels go dark, but the session stays unlocked, so a person at the laptop
+can still type into it. Panel blanking is privacy from onlookers, not
+authentication.
+
+`hypr/hypridle.conf`'s 10-minute blank listener calls
+`remote.sh --idle-wake` on resume rather than a bare `wlopm --on '*'`: VNC
+input resets hypridle's idle timer the same as local input does, so a bare
+`--on` would relight the panels on the next remote keystroke after any
+10-minute quiet spell. `--idle-wake` is a no-op while
+`wayvnc-privacy.service` already has the panels down for a real client.
 
 ## Why not krdp
 
@@ -52,6 +138,17 @@ There is no password and no encryption anywhere in this path. Do not run
 the broadest) on the strength of the ufw rules alone — if ufw is disarmed
 or its rules are missing, the server is reachable, unauthenticated, from
 every interface.
+
+"Off means nothing listening" needs two overrides on top of the toggle
+unit: `kdeconnect/org.kde.kdeconnect.daemon.desktop` disables the XDG
+autostart, and `kdeconnect/org.kde.kdeconnect.service` disables D-Bus
+activation of the daemon (Chromium calls the `org.kde.kdeconnect` bus
+name at each Chromium start; without the override that call started
+kdeconnectd outside the unit). With both in place, the bar toggle's
+`systemd/kdeconnectd.service` is the only path that starts kdeconnectd
+automatically. `/usr/share/applications/org.kde.kdeconnect.daemon.desktop`
+still runs the binary directly, but it is `NoDisplay=true`, so only a
+deliberate manual launch reaches it.
 
 ## KDE Connect pairing over the tunnel
 

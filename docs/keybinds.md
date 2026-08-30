@@ -35,6 +35,14 @@ and `Print` is not a text-editing key.
 | `Alt+Shift+O` | OCR a region to the clipboard |
 | `SUPER+SHIFT+T` / `+N` / `+R` | pomodoro: name task / parking-lot note / weekly review |
 | `SUPER+SHIFT+M` | mute the pomodoro chime |
+| `SUPER+CTRL+Next` / `+Prior` | remote access: pull the next/previous tag onto the VNC virtual output (`remote.sh --pull-next`/`--pull-prev`, see [bar.md](bar.md)) |
+| `SUPER+CTRL+Home` | remote access: send the pulled tag back (`remote.sh --restore`) |
+
+`SUPER+CTRL+Next`/`+Prior`/`+Home` stay on `SUPER`, not bare `CTRL` — the
+modifier rule above still holds. `SUPER+CTRL` is already used for window
+nudges (`movewin`); PgUp/PgDown/Home are unbound letters-aside, and a
+headless VNC client that only sends modifiers plus Tab/Esc/PgUp/PgDown/Home
+needs to reach these three without a letter key.
 
 ## Screenshots
 

@@ -21,7 +21,7 @@ what order, is read live from NetworkManager's own
 | `monitorrule=...` | output name, resolution, scale — find yours with `mmsg get outputs` |
 | `env=XDG_DATA_DIRS,...` | mango's `env=` does not expand `$HOME`, so the flatpak export path must be absolute. Without it the KDE app database is empty and "Open With" lists nothing |
 | `env=XDG_MENU_PREFIX,plasma-` | matches the menu file present in `/etc/xdg/menus` |
-| `env=MANGO_KEEPASS_DB,/path/db.kdbx` | enables KeePassXC auto-unlock. No default — unset means unlock by hand |
+| `env=MANGO_KEEPASS_DB,/path/db.kdbx` | selects which database KeePassXC opens at login. No default — unset means the login autostart does nothing and you start KeePassXC by hand. You always type the password by hand; this value does not control that |
 | `env=MANGO_SCREENSHOT_DIR,/path` | screenshot target, if not `~/Pictures` |
 
 ## Environment variables
@@ -36,7 +36,6 @@ what order, is read live from NetworkManager's own
 | `MANGO_CALENDAR_CMD` / `_APPID` | `thunderbird -calendar` / `org.mozilla.Thunderbird` | `clock.sh --calendar` |
 | `MANGO_POMODORO` | `25,5,15,4` (work, short, long, cycles, minutes) | bard |
 | `MANGO_POMODORO_MUTE` | `30` (minutes) | bard |
-| `MANGO_ATOP_DIR` | `/var/log/atop` | CPU popup peaks |
 | `MANGO_DMI_CACHE` | `~/.cache/mango-meminfo` | memory popup |
 | `MANGO_BAT_DIR` / `MANGO_AC_DIR` | auto-discovered | bard, power scripts |
 | `MANGO_WEAR_STATE` / `MANGO_WEAR_REPLACE` | state file / `80` | battery wear history |

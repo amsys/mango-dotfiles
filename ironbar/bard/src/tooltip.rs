@@ -15,9 +15,6 @@ use crate::vars::Vars;
 /// U+00A0, not a plain space — Pango's width request can drop trailing
 /// plain spaces, which would silently undo a right-margin fix on whichever
 /// row happens to be last. NBSP survives that and renders identically.
-/// `pub(crate)`: cpu.rs's `coregrid` prints its own row indent to match
-/// [`row`]/[`dim`] instead of going through either helper (its row already
-/// carries its own `<span font_family>` wrapper as a single unit).
 pub(crate) const NBSP: char = '\u{a0}';
 
 /// tooltip.sh:31 — Google Sans Flex's proportional figures drift a column
@@ -282,7 +279,10 @@ pub(crate) const HINTS: &[(&str, &str)] = &[
         "click: toggle power mode · right-click: powertop",
     ),
     ("hotspot_tip", "click: menu · right-click: toggle"),
-    ("remote_tip", "click: toggle VNC + KDE Connect"),
+    (
+        "remote_tip",
+        "click: toggle VNC + KDE Connect · right-click: pull next tag",
+    ),
     ("inhibit_tip", "click: toggle keep-awake"),
     ("docker_tip", "right-click: menu"),
     ("claude_tip", "right-click: settings"),

@@ -28,7 +28,7 @@ CLI).
 | --- | --- | --- |
 | `start` | launcher → tags → focus | `spark` → `ws-1…9` + `ws-ov` → `win` |
 | `center` | time | `clock` → `date` → `pomo` |
-| `end` | tray → resources → tools → audio → connectivity → session | `tray` `traytoggle` `keepass` → `sysload`(`cpu`+`memory` rows) `battery` `devload`(`claude` row, `docker`+`archupdate` row) → tools-drawer(`colorpicker` `darkmode` `snip`) `inhibit` → `music` `volume` `mic` → `net-spinner` `wifi` `eth` `netsec` `hotspot` `remote` `bluetooth` → `power` |
+| `end` | tray → resources → tools → audio → connectivity → session | `tray` `traytoggle` `keepass` → `sysload`(`cpu`+`memory` rows) `battery` `devload`(`claude` row, `docker`+`archupdate` row) → `colorpicker` `darkmode` `snip` `inhibit` → `music` `volume` `mic` → `net-spinner` `wifi` `eth` `netsec` `hotspot` `remote` `bluetooth` → `power` |
 
 The fallback bar (no monitor matched, so no tag block — see §3.1) carries the
 same blocks minus `ws-*`.
@@ -117,6 +117,10 @@ not assumed from a typical dev-box count) and `clock`/`date`/`pomo`
   walk the icon sideways on every digit-count change (T25).
 - Format padding (e.g. `{usage:>3}%`) MAY be used in addition, never instead.
 
+`battery` and `devload` are a known exception: the user chose to shrink both
+reserves below their realistic-max width, so a future pass MUST NOT
+"restore" the old, larger `min-width` values without asking first.
+
 `volume` and `mic` are a different case, not this invariant: T9 reduced both
 to an icon-only, discrete-state display (no digit string at all — the
 percentage moved to the hover popup), so `tnum` is a no-op there. Their own
@@ -168,6 +172,12 @@ know:
 | 1 | `spark` | click → `rofi -show drun` | fixed | Highest-frequency click in the bar; occupies the top-left magic corner (INV-2). |
 | 2 | `ws-1…9`, `ws-ov` | click / scroll / right-click popup | fixed | Second-highest click frequency, shortest travel from the corner, constant X (INV-4). |
 | 3 | `win` | none (scroll: brightness) | variable | Highest-variance width in the bar; last in `start` so it displaces nothing (INV-1). Truncated at 32 chars (`truncate.max_length`), never a click target beyond its own scroll. |
+
+kitty windows arrive with their title already prefixed `"<repo> · <title>"` by
+`kitty/repo-title.py` (a kitty watcher, not a bar module). `window_text()`
+(`mango.rs`) splits on `" · "` for `appid=="kitty"` and shows the repo as the
+dim first line in place of the appid — a Firefox tab title containing the
+same separator is left alone, since the split is gated on the kitty appid.
 
 **Semantic reading order:** left to right, *identity → location → focus*
 ("what can I launch / where am I / what am I doing").
@@ -283,26 +293,14 @@ that it shares a row with nothing else demanding the width.
 
 ### 3.5 `end`, block 3 — tools
 
-Click-only, never-glanced. Per **Hick's Law**, choice/scan time grows with
-the number of visible options — four permanent icons cost attention on every
-scan for something used a handful of times a day.
-
-- **`tools` drawer** — one `custom` module: a permanent trigger button plus
-  `colorpicker`, `darkmode`, `snip`, each gated `show_if: "#tools_open"`.
-  `on_mouse_enter`/`on_mouse_exit` on the trigger set `tools_open` directly
-  (`ironbar var set tools_open true|false`) — bar-local UI state with no
-  daemon collector behind it, so it does not go through `mango-bard`.
-  `transition_type: "slide_start"` (ironbar's schema offers
-  `none`/`crossfade`/`slide_start`/`slide_end` only — no slide-from-top).
-- **`inhibit`** — kept **outside** the drawer, immediately to its right,
-  exercising this section's own exception: keep-awake is a state you need to
-  glance at, not an action you go looking for. It renders at constant width
-  in both states (same-size `nf-md-coffee`/`nf-md-coffee_outline` glyphs).
-
-Ironbar 0.19 has no `group`/`drawer` primitive (waybar's own `group` +
-`"drawer"` has no counterpart) — `show_if` + `transition_type` +
-`on_mouse_enter`/`on_mouse_exit` is the mechanism this ironbar version
-provides for a reveal-on-hover group.
+T31 removed the T23 tools drawer: the permanent "…" trigger cost the same
+scan attention Hick's Law charged the icons for, while adding a hover
+step to reach them — the user prefers the tools always visible.
+`colorpicker`, `darkmode` and `snip` are standalone pills again in the
+T23 reading order (each a `custom` module with a static tooltip and its
+T20/T23 clicks unchanged), and **`inhibit`** follows unchanged: keep-awake
+is a state you glance at. It renders at constant width in both states
+(same-size `nf-md-coffee`/`nf-md-coffee_outline` glyphs).
 
 ### 3.6 `end`, block 4 — audio
 
@@ -420,7 +418,7 @@ fn end_modules(bar_name: &str) -> Vec<Value> {
     }
     end.push(keepass_module(bar_name));     // promoted out of the tray drawer
     end.extend(resource_modules(bar_name)); // sysload, battery, devload
-    end.extend(tools_modules(bar_name));    // tools drawer, inhibit
+    end.extend(tools_modules(bar_name));    // darkmode, inhibit (T31)
     end.extend(audio_modules(bar_name));    // music, volume, mic
     end.extend(net_modules(bar_name));      // net-spinner, wifi, eth, netsec
     end.push(hotspot_module(bar_name));
@@ -440,20 +438,15 @@ fn devload_module(bar_name: &str) -> Value { /* box, orientation: vertical,
     widgets: [row-claude button, row-svc box[cell-docker, cell-au]] */ }
 ```
 
-The tools drawer:
+The tools block (T31 — drawer removed, see §3.5):
 
 ```rust
 fn tools_modules(bar_name: &str) -> Vec<Value> {
     vec![
-        json!({
-            "type": "custom", "name": "tools", "class": "tools",
-            "bar": [ /* trigger button + gated children */ ],
-            "on_mouse_enter": "ironbar var set tools_open true",
-            "on_mouse_exit": "ironbar var set tools_open false"
-        }),
-        // colorpicker_module()/darkmode_module()/snip_module(), each with
-        // "show_if": "#tools_open", "transition_type": "slide_start"
-        inhibit_module(bar_name),  // outside the drawer, INV-glanceable exception
+        colorpicker_module(),
+        darkmode_module(),
+        snip_module(),
+        inhibit_module(bar_name),
     ]
 }
 ```
@@ -534,7 +527,7 @@ whatever else is on screen.
 - [ ] `pomo` idle → running → idle: `center` width unchanged.
 - [ ] All 9 tags visible with every tag empty; `ws-ov` toggled on and off with no shift in `wifi`'s position.
 - [ ] Tag 9 → overview → tag 1 transition: no button width change.
-- [ ] Hover the `tools` trigger → `colorpicker`/`darkmode`/`snip` expand; move the pointer across them, confirm no collapse; unhover → collapses; `end` returns to identical positions.
+- [ ] Click `darkmode` → colour scheme flips; the pill's icon follows (T31: drawer removed, darkmode standalone).
 - [ ] `hotspot` toggled active → inactive: neighbouring `remote`/`bluetooth` do not shift.
 - [ ] A long MPRIS track title playing → `music` truncates at 30 chars, `volume` does not move.
 

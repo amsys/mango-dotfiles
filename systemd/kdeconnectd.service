@@ -5,11 +5,14 @@ Description=kdeconnectd — KDE Connect daemon for the remote-access bar toggle
 #
 # kdeconnectd binds 0.0.0.0 with no bind-address option; ufw
 # (system/remote/install.sh) is the only boundary. kdeconnect ships no unit
-# of its own, only /usr/share/dbus-1/services/org.kde.kdeconnect.service —
-# anything that calls its D-Bus name while this unit is stopped can still
-# D-Bus-activate kdeconnectd outside systemd. It is single-instance, so the
-# bus name simply stays taken; this unit just gives the toggle a definite
-# stop/start handle.
+# of its own, only /usr/share/dbus-1/services/org.kde.kdeconnect.service.
+# A bus call to that name used to D-Bus-activate kdeconnectd outside
+# systemd (Chromium does this at each Chromium start); the user-level
+# override kdeconnect/org.kde.kdeconnect.service now makes that
+# activation fail, so this unit is the only automatic start path.
+# /usr/share/applications/org.kde.kdeconnect.daemon.desktop still runs
+# the binary directly, but it is NoDisplay=true and needs a deliberate
+# manual launch.
 PartOf=graphical-session.target
 After=graphical-session.target
 

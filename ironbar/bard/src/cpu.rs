@@ -1,8 +1,11 @@
 //! CPU bar pill (T6a) plus the detail popup (T7a). Ports
 //! src/waybar/scripts/cpu.sh in full: `snapshot()`/`deltas()` (cpu.sh:39-54)
 //! and the pill's own text/class lines (cpu.sh:359-362) at T6a; `core_labels`,
-//! `coregrid`, `cpu_freq`, `cpu_policy`, the package-temp hwmon scan, `stuck`
-//! and `atop_top` (cpu.sh's tooltip half) at T7a.
+//! `cpu_freq`, `cpu_policy`, the package-temp hwmon scan and `stuck`
+//! (cpu.sh's tooltip half) at T7a. T7a also ported a `coregrid` per-core
+//! text grid, dropped at T32 (its own heatbar sparkline row already shows
+//! the same per-core data in one line, and the popup shares a screen-height
+//! budget with mem_tip).
 //!
 //! T7a design (IRONBAR.md): the popup is lazy (D1/D2) — `refresh_detail` runs
 //! only when the control socket's `cpu-detail` topic fires, which is only
@@ -14,12 +17,11 @@ use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::tooltip::{
     bad, bar, barico_label, dim, esc, grade, hdur, heatbar, level_class, mono, row, sect,
-    set_titled, C_DIM, C_EMPTY,
+    set_titled, C_DIM,
 };
 use crate::vars::Vars;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// chip glyph, cpu.sh:28 (`ic_cpu`).
 /// T8b: U+E322 (Material Symbols "memory") -> U+F2DB (chip, JetBrainsMono
@@ -137,19 +139,6 @@ fn set_vars(vars: &mut Vars, total: i64) {
     vars.set(&class_key("sysload#cpulevel"), level_class("cl", total));
 }
 
-/// Cached `atop -P PRC` history for the "Recent peaks" section, shared with
-/// the background refresh task spawned by `maybe_refresh_atop`. Lives in
-/// memory only — no state file, no lockdir (D3): a long-lived daemon has no
-/// re-exec cost to amortize, unlike cpu.sh's own re-exec-every-poll shape.
-struct AtopState {
-    fetched_at: Option<Instant>,
-    in_flight: bool,
-    /// `(HH:MM, process name, pct)`, oldest first, at most 6 rows.
-    peaks: Vec<(String, String, i64)>,
-}
-
-const ATOP_TTL: Duration = Duration::from_secs(300);
-
 pub struct Cpu {
     prev: Option<Vec<(String, u64, u64)>>,
     /// Per-core percentages from the last refresh, consumed by
@@ -158,7 +147,6 @@ pub struct Cpu {
     /// Aggregate percentage from the last refresh — the same number the
     /// pill shows, needed again for the popup's "Load" row.
     total: i64,
-    atop: Arc<Mutex<AtopState>>,
 }
 
 impl Default for Cpu {
@@ -173,11 +161,6 @@ impl Cpu {
             prev: None,
             percore: Vec::new(),
             total: 0,
-            atop: Arc::new(Mutex::new(AtopState {
-                fetched_at: None,
-                in_flight: false,
-                peaks: Vec::new(),
-            })),
         }
     }
 
@@ -219,13 +202,17 @@ impl Cpu {
     /// T7a: builds `cpu_tip` for the detail popup. Called only from the
     /// control socket's `cpu-detail` topic — never from the wheel/clock path
     /// — so nothing here runs while the popup is closed (IRONBAR.md T7
-    /// acceptance line). `ps`/`atop` are the only forks; the wheel-driven
-    /// pill (`refresh`, above) still forks nothing.
+    /// acceptance line). `ps` is the only fork; the wheel-driven pill
+    /// (`refresh`, above) still forks nothing.
     pub async fn refresh_detail(&mut self, vars: &mut Vars) {
         let cpu_sys = cpu_sys_root();
         let ncore = self.percore.len();
         let freqs = read_core_freqs(ncore, &cpu_sys);
-        let (gap, labels) = core_labels(&freqs);
+        // `labels` (core_labels' second field) fed the popup's per-core
+        // text grid, dropped at T32 — the heatbar sparkline already shows
+        // the same per-core percentages in one line, so `gap` is the only
+        // thing still needed out of `core_labels`.
+        let (gap, _labels) = core_labels(&freqs);
         let percts: Vec<i64> = self.percore.iter().map(|(_, p)| *p).collect();
 
         let loadavg = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
@@ -238,16 +225,10 @@ impl Cpu {
         let top_ps = ps_top_cpu().await;
         let stuck_rows = ps_stuck().await;
 
-        self.maybe_refresh_atop();
-        let log = atop_log_path();
-        let atop_ok = atop_available(&log);
-        let peaks = self.atop.lock().unwrap_or_else(|e| e.into_inner()).peaks.clone();
-
         let tip = build_tip(&DetailInputs {
             total: self.total,
             ncore,
             percts: &percts,
-            labels: &labels,
             gap,
             loadavg: &loadavg,
             freq_line: &freq_line,
@@ -255,56 +236,9 @@ impl Cpu {
             temp_c,
             top_ps: &top_ps,
             stuck_rows: &stuck_rows,
-            atop_ok,
-            peaks: &peaks,
         });
         set_titled(vars, "cpu_tip", "CPU", tip);
     }
-
-    /// Kicks off a background `atop -P PRC` read when the cache is stale and
-    /// nothing is already fetching it — mirrors cpu.sh's `atop_stale()` +
-    /// `atop_refresh()` mkdir-lock pair, minus the lockdir/tmp-file (D3: an
-    /// in-memory flag serves the same "only one refresh at a time" purpose).
-    fn maybe_refresh_atop(&self) {
-        let mut st = self.atop.lock().unwrap_or_else(|e| e.into_inner());
-        let stale = st.fetched_at.is_none_or(|t| t.elapsed() >= ATOP_TTL);
-        if !stale || st.in_flight {
-            return;
-        }
-        st.in_flight = true;
-        drop(st);
-        let atop = Arc::clone(&self.atop);
-        tokio::spawn(async move {
-            refresh_atop_cache(atop).await;
-        });
-    }
-}
-
-async fn refresh_atop_cache(atop: Arc<Mutex<AtopState>>) {
-    let log = atop_log_path();
-    let text = if atop_available(&log) {
-        let begin = begin_hhmm_70min_ago();
-        run("atop", &["-P", "PRC", "-r", &log, "-b", &begin]).await
-    } else {
-        String::new()
-    };
-    let rows = atop_top(&text);
-    // No early return above `in_flight = false` below: a timed-out or
-    // failed fork degrades to an empty `text`/`rows` here exactly like a
-    // spawn error already did, so `maybe_refresh_atop`'s in-flight flag
-    // always clears and the cache retries on the next stale check rather
-    // than deadlatching.
-    let mut st = atop.lock().unwrap_or_else(|e| e.into_inner());
-    // cpu.sh's own comment (atop_refresh): an empty result is left alone
-    // rather than installed, so a transient atop failure never overwrites a
-    // real cache with nothing and never suppresses the "reading…"
-    // placeholder for good — it just retries on the next stale check.
-    if !rows.is_empty() {
-        let start = rows.len().saturating_sub(6);
-        st.peaks = rows[start..].to_vec();
-        st.fetched_at = Some(Instant::now());
-    }
-    st.in_flight = false;
 }
 
 // ---------------------------------------------------------------- T7a icons
@@ -313,7 +247,6 @@ const IC_LOAD: char = '\u{f04c5}'; // md-speedometer, cpu.sh:33
 const IC_CORES: char = '\u{f061a}'; // md-chip, cpu.sh:34
 const IC_TOP: char = '\u{f0279}'; // md-format_list_bulleted, cpu.sh:35
 const IC_STUCK: char = '\u{f002a}'; // md-alert, cpu.sh:36
-const IC_HIST: char = '\u{f0109}'; // md-clock_fast/history, cpu.sh:37
 
 fn cpu_sys_root() -> String {
     std::env::var("MANGO_CPU_SYS").unwrap_or_else(|_| "/sys/devices/system/cpu".to_string())
@@ -359,41 +292,6 @@ pub fn core_labels(freqs: &[i64]) -> (usize, Vec<String>) {
         })
         .collect();
     (gap, labels)
-}
-
-fn cell(pct: i64, label: &str) -> String {
-    let colour = grade(pct, 70, 90);
-    let k = (((pct as f64) / 10.0 + 0.5) as i64).clamp(0, 10) as usize;
-    let filled: String = std::iter::repeat_n('█', k).collect();
-    let empty: String = std::iter::repeat_n('░', 10 - k).collect();
-    format!(
-        "<span foreground=\"{C_DIM}\">{label:>3}</span> <span foreground=\"{colour}\">{filled}</span><span foreground=\"{C_EMPTY}\">{empty}</span> {pct:>3}%"
-    )
-}
-
-/// Port of cpu.sh:135-153's `coregrid()`: column-major two-column layout so
-/// P-cores stay together at the top of the left column. Prints its own
-/// 3-NBSP row indent to match [`row`]/[`dim`].
-pub fn coregrid(pcts: &[i64], labels: &[String]) -> String {
-    let n = pcts.len();
-    let rows = n.div_ceil(2);
-    let ind3: String = std::iter::repeat_n(crate::tooltip::NBSP, 3).collect();
-    let mut out = String::new();
-    for i in 0..rows {
-        let left = cell(pcts[i], &labels[i]);
-        let right = if i + rows < n {
-            format!("   {}", cell(pcts[i + rows], &labels[i + rows]))
-        } else {
-            String::new()
-        };
-        out.push_str(&ind3);
-        out.push_str(&format!(
-            "<span font_family=\"JetBrainsMono Nerd Font\">{left}{right}</span>"
-        ));
-        out.push_str(&ind3);
-        out.push('\n');
-    }
-    out
 }
 
 /// Port of cpu.sh:160-171's `cpu_freq()`: average `/proc/cpuinfo` "cpu MHz"
@@ -589,157 +487,12 @@ async fn ps_stuck() -> Vec<(String, i64, i64, String)> {
     stuck(&out, &std::process::id().to_string())
 }
 
-// --------------------------------------------------------------- atop peaks
-
-/// Port of cpu.sh:71-95's `atop_top()`: one `(HH:MM, name, pct)` row per
-/// distinct sample timestamp — the highest-CPU surviving process in that
-/// sample. Filters out `RESET`..`SEP` (since-boot counters), exited
-/// processes (`E` state — a whole lifetime's CPU landing in one interval)
-/// and threads (`ISPROC != y`, mixed in among the processes). Names are
-/// paren-matched rather than field-split: they can contain spaces
-/// ("Bun Pool 0"), and a second, empty `()` field appears later in the
-/// record.
-pub fn atop_top(text: &str) -> Vec<(String, String, i64)> {
-    let mut skip = false;
-    let mut rows = Vec::new();
-    let mut ptm = String::new();
-    let mut best: i64 = -1;
-    let mut bname = String::new();
-
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        let Some(&f1) = fields.first() else { continue };
-        if f1 == "RESET" {
-            skip = true;
-            continue;
-        }
-        if f1 == "SEP" {
-            skip = false;
-            continue;
-        }
-        if f1 != "PRC" || skip {
-            continue;
-        }
-        let Some(f5) = fields.get(4) else { continue };
-        if !is_hhmmss(f5) {
-            continue;
-        }
-        let tm = &f5[0..5];
-        let Some(iv) = fields.get(5).and_then(|s| s.parse::<i64>().ok()) else {
-            continue;
-        };
-
-        let Some(open) = line.find('(') else { continue };
-        let rest = &line[open + 1..];
-        let Some(j) = rest.find(") ") else { continue };
-        let name = &rest[..j];
-        let f: Vec<&str> = rest[j + 2..].split_whitespace().collect();
-        if f.len() < 12 || f[0] == "E" || f[11] != "y" || iv <= 0 {
-            continue;
-        }
-        let Ok(hz) = f[1].parse::<i64>() else {
-            continue;
-        };
-        if hz <= 0 {
-            continue;
-        }
-        let (Ok(utime), Ok(stime)) = (f[2].parse::<i64>(), f[3].parse::<i64>()) else {
-            continue;
-        };
-        let pct = (((utime + stime) as f64) * 100.0 / (hz as f64 * iv as f64) + 0.5) as i64;
-
-        if tm != ptm {
-            if !ptm.is_empty() {
-                rows.push((ptm.clone(), bname.clone(), best));
-            }
-            ptm = tm.to_string();
-            best = -1;
-        }
-        if pct > best {
-            best = pct;
-            bname = name.to_string();
-        }
-    }
-    if !ptm.is_empty() {
-        rows.push((ptm, bname, best));
-    }
-    rows
-}
-
-fn is_hhmmss(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() == 8
-        && b[0].is_ascii_digit()
-        && b[1].is_ascii_digit()
-        && b[2] == b':'
-        && b[3].is_ascii_digit()
-        && b[4].is_ascii_digit()
-        && b[5] == b':'
-        && b[6].is_ascii_digit()
-        && b[7].is_ascii_digit()
-}
-
-/// Local calendar time via `localtime_r` rather than a `date` fork on every
-/// popup poke — this binary already links libc for sys.rs's timerfd/inotify,
-/// so this adds no new dependency. cpu.sh forks `date` fresh on every
-/// invocation instead, since a short-lived script has no state to avoid it.
-fn local_tm(epoch_offset_secs: i64) -> libc::tm {
-    // SAFETY: `t` is a valid `time_t` just read from `libc::time`, optionally
-    // offset by a plain integer; `out` is a validly-sized, zeroed buffer for
-    // `localtime_r` to fill in place. Neither pointer is retained afterward.
-    unsafe {
-        let t = libc::time(std::ptr::null_mut()) + epoch_offset_secs;
-        let mut out: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut out);
-        out
-    }
-}
-
-fn atop_log_path() -> String {
-    let dir = std::env::var("MANGO_ATOP_DIR").unwrap_or_else(|_| "/var/log/atop".to_string());
-    let tm = local_tm(0);
-    format!(
-        "{dir}/atop_{:04}{:02}{:02}",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday
-    )
-}
-
-/// cpu.sh:211's clamp: before ~01:10 local time, "70 minutes ago" wraps into
-/// yesterday, which today's log does not contain — clamp to the start of
-/// today instead. Lexicographic `HH:MM` comparison matches the shell's own
-/// zero-padded string compare (cpu.sh:212).
-fn begin_hhmm_70min_ago() -> String {
-    let tm = local_tm(-70 * 60);
-    let begin = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
-    let now = local_tm(0);
-    let now_s = format!("{:02}:{:02}", now.tm_hour, now.tm_min);
-    if begin > now_s {
-        "00:00".to_string()
-    } else {
-        begin
-    }
-}
-
-fn atop_on_path() -> bool {
-    let Ok(path_var) = std::env::var("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| dir.join("atop").is_file())
-}
-
-fn atop_available(log_path: &str) -> bool {
-    std::path::Path::new(log_path).is_file() && atop_on_path()
-}
-
 // ------------------------------------------------------------------ build_tip
 
 struct DetailInputs<'a> {
     total: i64,
     ncore: usize,
     percts: &'a [i64],
-    labels: &'a [String],
     gap: usize,
     loadavg: &'a str,
     freq_line: &'a str,
@@ -747,9 +500,21 @@ struct DetailInputs<'a> {
     temp_c: Option<i64>,
     top_ps: &'a [(String, i64, String)],
     stuck_rows: &'a [(String, i64, i64, String)],
-    atop_ok: bool,
-    peaks: &'a [(String, String, i64)],
 }
+
+/// ironbar's popup has no scroll widget, so a tip taller than the output
+/// renders as an empty popup. These two caps keep the CPU tip inside one
+/// screen whatever `ps` returns.
+// T32: cpu_tip shares a popup (and its screen-height budget) with mem_tip
+// under the sysload module — measured live (grim capture against the
+// running bar, `ironbar bar <name> show-popup sysload` with a probe value
+// injected via `ironbar var set`, bypassing mango-bard so the injected
+// content isn't overwritten by a live refresh) that combined content
+// above roughly 43-44 rendered lines makes the WHOLE popup fail to map,
+// not just clip — there is no partial-render state to trust. 3/2 leaves
+// real margin under that ceiling with mem_tip's own caps (memory.rs).
+const MAX_TOP: usize = 3;
+const MAX_STUCK: usize = 2;
 
 /// Port of cpu.sh:371-438's tooltip build. Pure and fixture-testable —
 /// everything forked or read from `/proc`/`sysfs` is gathered by
@@ -784,9 +549,12 @@ fn build_tip(d: &DetailInputs) -> String {
         "{}  {min}–{max}%",
         heatbar(d.percts, 70, 90, d.gap)
     )));
-    tip.push_str("\n\n");
-    tip.push_str(&coregrid(d.percts, d.labels));
     tip.push('\n');
+    // T32: the per-core text grid this popup used to print below the
+    // heatbar is gone — it was a second, taller rendering of the same
+    // per-core percentages the heatbar sparkline above already shows in
+    // one line, and the sysload popup shares its screen-height budget
+    // with mem_tip in the same popup.
     let temp = d.temp_c.map(format_temp).unwrap_or_default();
     let freq_temp = if temp.is_empty() {
         d.freq_line.to_string()
@@ -801,7 +569,7 @@ fn build_tip(d: &DetailInputs) -> String {
     }
 
     tip.push_str(&sect(&IC_TOP.to_string(), "Top now"));
-    for (pcpu, pid, comm) in d.top_ps {
+    for (pcpu, pid, comm) in d.top_ps.iter().take(MAX_TOP) {
         let int_part: i64 = pcpu.split('.').next().unwrap_or("0").parse().unwrap_or(0);
         let meter = mono(&format!(
             "{} {pcpu:>5}%",
@@ -816,7 +584,7 @@ fn build_tip(d: &DetailInputs) -> String {
 
     if !d.stuck_rows.is_empty() {
         tip.push_str(&sect(&IC_STUCK.to_string(), "Stuck"));
-        for (state, etimes, pid, comm) in d.stuck_rows.iter().take(4) {
+        for (state, etimes, pid, comm) in d.stuck_rows.iter().take(MAX_STUCK) {
             let what = if state == "D" {
                 "uninterruptible"
             } else {
@@ -831,28 +599,12 @@ fn build_tip(d: &DetailInputs) -> String {
         }
     }
 
-    tip.push_str(&sect(&IC_HIST.to_string(), "Recent peaks"));
-    if !d.atop_ok {
-        tip.push_str(&dim("atop history unavailable"));
-    } else if d.peaks.is_empty() {
-        tip.push_str(&dim("reading today's atop log…"));
-    } else {
-        for (tm, name, pct) in d.peaks {
-            tip.push_str(&row(&format!(
-                "<span foreground=\"{C_DIM}\">{tm}</span>  {} {pct:>4}%",
-                esc(name)
-            )));
-            tip.push('\n');
-        }
-    }
-
     tip.trim_end_matches('\n').to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tooltip::C_BAD;
 
     // ---- snapshot()/deltas(): fixtures copied verbatim from cpu.sh:241-254.
 
@@ -964,26 +716,6 @@ mod tests {
     }
 
     #[test]
-    fn coregrid_is_column_major_two_rows_for_three_cores() {
-        let labels = vec!["P0".to_string(), "P1".to_string(), "E2".to_string()];
-        let g = coregrid(&[0, 50, 100], &labels);
-        let lines: Vec<&str> = g.trim_end_matches('\n').split('\n').collect();
-        assert_eq!(lines.len(), 2, "expected 2 rows: {g}");
-        assert!(lines[0].contains("P0"));
-        assert!(lines[0].contains("░░░░░░░░░░"));
-        assert!(lines[0].contains("  0%"));
-        assert!(lines[0].contains("E2"));
-        assert!(lines[0].contains("██████████"));
-        assert!(lines[0].contains("100%"));
-        assert!(
-            lines[0].contains(&C_BAD.to_string()),
-            "a pinned core must be red even though the row it shares is idle"
-        );
-        assert!(lines[1].contains("P1"), "coregrid dropped the odd core");
-        assert!(!lines[1].contains("E2"), "coregrid repeated a core");
-    }
-
-    #[test]
     fn cpu_freq_flat_cores_have_no_spread() {
         assert_eq!(
             cpu_freq("cpu MHz\t\t: 3000.000\ncpu MHz\t\t: 3000.000\n"),
@@ -1024,39 +756,6 @@ mod tests {
         assert_eq!(package_temp(&[("nvme".to_string(), 90_000)]), None);
     }
 
-    // atop_top: fixture copied verbatim from cpu.sh's own `test` (the RESET/
-    // SEP block, an exited HeapHelper, a Bun Pool 0 thread, a summary line).
-    const ATOP_FIXTURE: &str = "RESET\n\
-        PRC h 1 2026/08/02 18:17:50 180402 1 (systemd) S 100 999999 999999 0 120 0 0 9 0 1 y 0 () 0 -1 -2 0 0\n\
-        SEP\n\
-        PRC h 1 2026/08/02 18:27:50 600 2200074 (HeapHelper) E 100 78784 15800 0 0 0 0 -1 0 2200074 y 0 () 0 -2 -2 0 0\n\
-        PRC h 1 2026/08/02 18:27:50 600 2820016 (claude) S 100 6000 1800 0 120 0 0 5 0 2820016 y 0 () 0 -2 -2 0 0\n\
-        PRC h 1 2026/08/02 18:27:50 600 2820084 (Bun Pool 0) S 100 50000 0 0 120 0 0 5 0 2820016 n 0 () 0 -2 -2 0 0\n\
-        PRC h 1 2026/08/02 18:27:50 600 236917 (mango) S 100 2400 0 0 120 0 0 5 0 236917 y 0 () 0 -2 -2 0 0\n\
-        SEP\n\
-        PRC h 1 2026/08/02 18:37:50 600 2820016 (Bun Pool 3) S 100 30000 0 0 120 0 0 5 0 2820016 y 0 () 0 -2 -2 0 0\n\
-        PRC | sys    4m36s | user  16m56s | #proc    425 | #tidle   115 | #exit >52851 |\n\
-        SEP\n";
-
-    #[test]
-    fn atop_top_matches_cpu_sh_selftest_fixture() {
-        assert_eq!(
-            atop_top(ATOP_FIXTURE),
-            vec![
-                ("18:27".to_string(), "claude".to_string(), 13),
-                ("18:37".to_string(), "Bun Pool 3".to_string(), 50),
-            ]
-        );
-    }
-
-    #[test]
-    fn atop_top_emits_nothing_when_every_row_is_filtered() {
-        let text = "RESET\nSEP\n\
-            PRC h 1 2026/08/02 18:27:50 600 9 (gone) E 100 100 0 0 0 0 0 -1 0 9 y 0 () 0 -2 -2 0 0\n\
-            SEP\n";
-        assert!(atop_top(text).is_empty());
-    }
-
     // stuck(): fixture copied verbatim from cpu.sh's own `test`.
     #[test]
     fn stuck_matches_cpu_sh_selftest_fixture() {
@@ -1093,12 +792,11 @@ mod tests {
     }
 
     #[test]
-    fn build_tip_reports_atop_unavailable_when_the_log_is_missing() {
+    fn build_tip_opens_on_the_load_section() {
         let tip = build_tip(&DetailInputs {
             total: 12,
             ncore: 2,
             percts: &[10, 20],
-            labels: &["c0".to_string(), "c1".to_string()],
             gap: 0,
             loadavg: "0.10 0.20 0.30 1/200 999",
             freq_line: "3.00 GHz avg",
@@ -1106,33 +804,47 @@ mod tests {
             temp_c: None,
             top_ps: &[],
             stuck_rows: &[],
-            atop_ok: false,
-            peaks: &[],
         });
         // T-popup-vert: "CPU" moved out of the body into its own
         // `cpu_tip_title` ironvar — the body now opens on the Load section.
         assert!(tip.trim_start().starts_with("<span"));
-        assert!(tip.contains("atop history unavailable"));
+        assert!(tip.contains("Load"));
         assert!(!tip.ends_with('\n'), "trailing newlines must be trimmed");
     }
 
+    // ironbar has no scroll widget in a popup, so a tip taller than the
+    // output renders as an empty popup. This guard fails if a later change
+    // lets `ps` output length reach the tip again. The fixed sections cost
+    // about 13 lines regardless of core count (the per-core text grid was
+    // dropped — the heatbar sparkline already shows the same data in one
+    // line), so the fixture keeps the core count small: what is under test
+    // is the two list caps, not the size of the machine.
     #[test]
-    fn build_tip_shows_reading_placeholder_before_the_first_atop_sample() {
+    fn build_tip_caps_the_process_lists() {
+        let top: Vec<(String, i64, String)> = (0..50)
+            .map(|i| ("9.9".to_string(), i, format!("proc{i}")))
+            .collect();
+        let stuck: Vec<(String, i64, i64, String)> = (0..50)
+            .map(|i| ("D".to_string(), 300, i, format!("blocked{i}")))
+            .collect();
         let tip = build_tip(&DetailInputs {
-            total: 5,
-            ncore: 1,
-            percts: &[5],
-            labels: &["c0".to_string()],
+            total: 99,
+            ncore: 2,
+            percts: &[10, 20],
             gap: 0,
-            loadavg: "0.10 0.20 0.30 1/200 999",
-            freq_line: "",
-            policy_line: "",
-            temp_c: None,
-            top_ps: &[],
-            stuck_rows: &[],
-            atop_ok: true,
-            peaks: &[],
+            loadavg: "9.0 8.0 7.0 1/200 999",
+            freq_line: "3.00 GHz avg",
+            policy_line: "performance",
+            temp_c: Some(52_000),
+            top_ps: &top,
+            stuck_rows: &stuck,
         });
-        assert!(tip.contains("reading today's atop log…"));
+        let lines = tip.lines().count();
+        assert!(lines < 20, "cpu tip grew to {lines} lines:\n{tip}");
+        assert!(tip.contains("proc2"), "3 top rows expected");
+        assert!(!tip.contains("proc3"), "4th top row must be dropped");
+        assert!(tip.contains("blocked1"), "2 stuck rows expected");
+        assert!(!tip.contains("blocked2"), "3rd stuck row must be dropped");
     }
 }
+

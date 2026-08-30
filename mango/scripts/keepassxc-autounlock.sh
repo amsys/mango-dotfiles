@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Unlock the vault with the password already typed at the SDDM greeter, stashed
-# on tmpfs by /usr/local/bin/keepassxc-stash-pw. Falls back to prompting.
+# Start KeePassXC at login. It shows its normal unlock prompt and you type the
+# password by hand. This script does not unlock the vault any more: the old
+# SDDM PAM stash (/run/keepassxc-unlock/$USER) is retired.
+# keepassxc.ini does the window part: MinimizeOnStartup=false keeps the prompt
+# visible, MinimizeAfterUnlock=true hides the window after you unlock it.
 set -uo pipefail
 
 parse_db() { sed -n 's/^[[:space:]]*env=MANGO_KEEPASS_DB,//p' | tail -1; }
@@ -24,20 +27,13 @@ fi
 # variable is reliably readable from the file but not from the environment.
 # KeePassXC does not reopen a last-used database when given no path, so there
 # is nothing sensible to default to: with neither set, this exits and you
-# unlock the vault by hand.
+# start KeePassXC by hand.
 DB="${MANGO_KEEPASS_DB:-$(parse_db \
 	<"${XDG_CONFIG_HOME:-$HOME/.config}/mango/local.conf" 2>/dev/null)}"
-STASH="/run/keepassxc-unlock/$(id -un)"
 
 if [ -z "$DB" ]; then
 	echo "keepassxc-autounlock: no database configured — set MANGO_KEEPASS_DB in mango/local.conf" >&2
 	exit 1
 fi
 
-if [ -r "$STASH" ]; then
-	pw=$(cat "$STASH")
-	rm -f "$STASH"
-	printf '%s\n' "$pw" | exec keepassxc --minimized --pw-stdin "$DB"
-fi
-
-exec keepassxc --minimized "$DB"
+exec keepassxc "$DB"

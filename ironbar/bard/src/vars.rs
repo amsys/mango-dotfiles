@@ -6,20 +6,25 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-// ponytail: fixed cooldown, not exponential — a destroyed-output workspace
-// class fails forever until the output returns, so backoff shape doesn't
-// matter here. Revisit if a transient-failure case needs faster recovery.
-const RETRY_COOLDOWN: Duration = Duration::from_secs(5);
+// A key for a destroyed output is now dropped outright by `forget` (see
+// mango.rs's prune loop), not left to retry here — every key still in
+// `dirty` when this fires belongs to a live module, so the failure is
+// transient (usually `ironbar reload` still mid-rebuild). Short cooldown
+// keeps that window brief without spinning: at the ~60us round trip
+// (IRONBAR.md Spike S4) this is still a ~0.02% duty cycle on a wedged peer.
+// ponytail: fixed, not exponential — nothing left here fails forever, so
+// backoff shape doesn't matter. Revisit only if a new permanent-failure
+// case turns up that `forget` doesn't cover.
+const RETRY_COOLDOWN: Duration = Duration::from_millis(250);
 
 pub struct Vars {
     live: HashMap<Box<str>, Box<str>>,
     dirty: BTreeMap<Box<str>, Box<str>>,
     /// Keys that just failed an IPC send, and when they become eligible for
-    /// another attempt. Without this, a permanently-failing key (e.g. a
-    /// workspace class for an output mango has destroyed) retries every
-    /// flush forever and starves every other dirty key behind it in `dirty`
-    /// — a `Module not found` reject on one output can lock the whole bar's
-    /// UI to stale state.
+    /// another attempt. Without this, a key still failing (e.g. mid-
+    /// `ironbar reload` rebuild) retries every flush and starves every
+    /// other dirty key behind it in `dirty` — a `Module not found` reject
+    /// on one key can lock the whole bar's UI to stale state.
     cooldown: HashMap<Box<str>, Instant>,
 }
 
@@ -74,6 +79,18 @@ impl Vars {
             self.cooldown.remove(&k);
             self.live.insert(k, v);
         }
+    }
+
+    /// Drops `key` from every map. Call this when its module has left the
+    /// config for good (an output mango destroyed) — the key can never ACK
+    /// again, so leaving it in `dirty` costs a doomed IPC round trip every
+    /// `RETRY_COOLDOWN` for the life of the daemon (T-freeze-2026-08-29:
+    /// `ws-HEADLESS-*` classes for a torn-down virtual output kept retrying
+    /// for 17+ minutes after the fact).
+    pub fn forget(&mut self, key: &str) {
+        self.live.remove(key);
+        self.dirty.remove(key);
+        self.cooldown.remove(key);
     }
 
     /// Records a send failure for `key` so `peek_dirty` skips it until
@@ -135,9 +152,9 @@ mod tests {
 
     #[test]
     fn back_off_skips_the_failing_key_but_not_its_siblings() {
-        // Regression test for the 2026-08-26 freeze: a permanently-failing
-        // key (workspace class for a destroyed output) must not block every
-        // other dirty key behind it in `dirty` forever.
+        // Regression test for the 2026-08-26 freeze: a repeatedly-failing
+        // key (e.g. one still cooling down from a transient IPC error)
+        // must not block every other dirty key behind it in `dirty`.
         let mut v = Vars::new();
         v.set("a", "1");
         v.set("b", "2");
@@ -156,6 +173,26 @@ mod tests {
             None,
             "the cooling-down key must stay hidden until its cooldown elapses"
         );
+    }
+
+    #[test]
+    fn forget_drops_the_key_from_every_map() {
+        // A destroyed output's key must stop retrying, not just cool down —
+        // otherwise it costs a doomed IPC round trip every `RETRY_COOLDOWN`
+        // for the life of the daemon (T-freeze-2026-08-29).
+        let mut v = Vars::new();
+        v.set("dead", "1");
+        v.ack("dead");
+        v.set("dead", "2");
+        v.back_off("dead");
+
+        v.forget("dead");
+
+        assert_eq!(v.live_value("dead"), None);
+        assert!(!v.has_dirty());
+        // Setting it again after forget must not be swallowed as
+        // "unchanged" against a stale `live` entry that forget missed.
+        assert!(v.set("dead", "1"));
     }
 
     #[test]

@@ -34,7 +34,7 @@ Start (launcher → tags → focus):
 |---|---|---|
 | spark | launcher star | app launcher |
 | *(9 tag pills + overview)* | per-monitor tags — left-click views a tag, scroll moves through tags, hover lists a tag's windows | — |
-| win | focused window title | scroll: brightness |
+| win | focused window title, repo-prefixed for kitty windows (kitty/repo-title.py) | scroll: brightness |
 
 Center (time):
 
@@ -51,16 +51,18 @@ End (tray → resources → tools → audio → connectivity → session):
 | tray | hidden unless the drawer is open | app window or menu (jumps to an open window first) |
 | traytoggle | drawer trigger | open/close the tray drawer |
 | keepass | KeePassXC lock state | show/hide KeePassXC |
-| sysload | two rows stacked: cpu icon + gauge above memory icon + gauge; one popup covers both (exact %, per-core bars, temperature, top processes, recent peaks from atop; RAM/swap meters, page faults, DIMM data) | either row: `btop` |
+| sysload | two rows stacked: cpu icon + gauge above memory icon + gauge; one popup covers both (exact %, per-core bars, temperature, top processes; RAM/swap meters, page faults, DIMM data) | `btop` |
 | battery | icon + gauge + terminal-nub cap; popup: health, cycle count, watts, time estimate, power attribution | left: power mode toggle; right: powertop |
 | devload | two rows stacked: Claude usage above a docker container count + pending-update count (hidden at zero); one popup covers all three | claude row right: usage settings; docker cell right: docker menu; updates cell left: run `arch-update` |
-| tools | hover-expandable drawer: colorpicker, darkmode, snip | hover to reveal |
+| colorpicker | pixel color picker | pick a color (`hyprpicker`) |
+| darkmode | light/dark scheme toggle | toggle scheme |
+| snip | screenshot | left: region; right: window |
 | inhibit | keep-awake state | toggle keep-awake |
 | music | now playing, two-line (dim artist above, title below); hidden with nothing loaded | play/pause |
 | volume, mic | audio | `pavucontrol-qt`; scroll: volume |
 | net-spinner, wifi, eth, netsec | network state and a security grade | menus; see below |
 | hotspot | hidden unless active | left: menu; right: toggle |
-| remote | wayvnc + KDE Connect state | toggle |
+| remote | popup: read-only status — VNC on/off, whether the local screens are blanked, the pulled tag, KDE Connect on/off | left: toggle; right: pull next tag |
 | bluetooth | devices | right: `blueman-manager` |
 | power | — | session menu |
 
@@ -96,7 +98,7 @@ The daemon covers the data collection. Interactive actions stay in
 | `docker-menu.sh` | rofi docker actions |
 | `hotspot.sh` | hotspot menu and toggle |
 | `keepawake.sh` | toggles `mango-keepawake.service` (idle + lid inhibit) |
-| `remote.sh` | toggles `wayvnc.service` + `kdeconnectd.service` |
+| `remote.sh` | toggles `wayvnc.service` + `kdeconnectd.service` + keep-awake + panel blanking, on a virtual (headless) output; `--pull`/`--pull-next`/`--pull-prev`/`--restore` move a physical monitor's tag onto it and back |
 | `darkmode.sh` | light/dark toggle, then re-theme |
 | `clock.sh --calendar` | focus or start the calendar app |
 | `tray-click.sh` | tray `on_click_left` — jumps to an already-open window, else SNI `Activate` |

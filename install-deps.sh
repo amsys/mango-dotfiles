@@ -13,18 +13,20 @@ log() { printf '%s\n' "$*"; }
 # Package names as they appear on Arch. Several are AUR-only — see the split at
 # the bottom, which decides per-package rather than hardcoding a list.
 CORE_PKGS=(mangowm-git ironbar kitty rofi-wayland mako wlogout swaylock hypridle
-	matugen swaybg cliphist wl-clipboard)
+	matugen swaybg cliphist wl-clipboard
+	xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr)
 TOOL_PKGS=(grim slurp swappy hyprpicker tesseract tesseract-data-eng
 	wf-recorder wlopm
 	brightnessctl playerctl wireplumber networkmanager nm-connection-editor
 	iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs
-	atop btop dmidecode imagemagick python-gobject wayvnc kdeconnect)
+	btop dmidecode imagemagick python-gobject wayvnc kdeconnect upower)
 LOOK_PKGS=(fish starship eza ttf-jetbrains-mono-nerd adw-gtk-theme-git
-	breeze-plus kde-cli-tools ttf-ibm-plex ttf-material-symbols-variable-git)
+	breeze-plus kde-cli-tools ttf-ibm-plex ttf-material-symbols-variable-git
+	darkly-bin ttf-rubik-vf)
 # Referenced directly by fish/config.fish and git/config. Not cosmetic: without
 # git-delta every paged git command fails outright, because git/config sets it
 # as core.pager.
-SHELL_PKGS=(fd fzf zoxide bat yazi git-delta)
+SHELL_PKGS=(fd fzf zoxide bat yazi git-delta wget)
 OPTIONAL_PKGS=(keepassxc nextcloud-client dolphin arch-update)
 # Nothing in this repo references these — they are here so the list of what
 # makes this machine pleasant to use lives in one place rather than in memory.

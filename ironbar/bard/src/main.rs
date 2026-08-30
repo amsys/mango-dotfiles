@@ -395,6 +395,19 @@ async fn dispatch_refresh(
     if topic == "colors" {
         crate::tooltip::reload_palette();
     }
+    // remote.sh's --toggle pokes this after `ironbar reload` (a new/dropped
+    // HEADLESS bar needs a fresh config). A plain reload swaps ironbar's
+    // widget tree back to its process-start state — every ironvar it holds
+    // resets — but this daemon's own `Vars::live` cache never learns that,
+    // so the `_` catch-all's unconditional refresh below is a no-op for
+    // anything whose value hasn't actually changed (`Vars::set` diffs
+    // against `live` first). `mark_all_dirty()` clears that cache so the
+    // same catch-all re-sends everything instead of trusting stale ACKs.
+    // "resync" isn't its own match arm for the same reason "colors" isn't —
+    // it needs the full catch-all to run right after.
+    if topic == "resync" {
+        vars.mark_all_dirty();
+    }
     match topic {
         "clock" => clock::refresh(vars),
         "mango" | "workspaces" | "window" => mango.apply(vars),
@@ -719,6 +732,13 @@ async fn run() -> Result<(), String> {
     let mut power_due: Option<Instant> = None;
     // Same shape again, for docker.rs's `refresh()` — a `docker compose up`
     // can start several containers in a burst, each its own event line.
+    // Same shape again, for keepass.rs's `refresh()` — its own monitor is
+    // unscoped to the whole Secret Service (keepass.rs's doc comment), and
+    // refresh() itself makes two Secret Service calls, so an undebounced
+    // refresh here is a feedback loop: each refresh's busctl calls appear
+    // on the monitor it is fed by, forking two more. Measured at ~40
+    // busctl/sec sustained, saturating the session bus (T-keepass-loop).
+    let mut keepass_due: Option<Instant> = None;
     // hotspot.rs/darkmode.rs need no `_due` var: neither has an event stream
     // that can burst (T6b D2/D3) — their refreshes are called directly,
     // inline, from the control socket and (hotspot only) the clock tick.
@@ -1019,15 +1039,14 @@ async fn run() -> Result<(), String> {
             // T28: `busctl --user monitor` line — every event re-resolves
             // and re-reads the collection's `Locked` property directly
             // (keepass.rs's own doc comment explains why this isn't
-            // narrowed further). Cheap and infrequent, so a direct refresh
-            // here needs no `_due` debounce, same as hotspot/remote/
-            // keepawake's own event-poked refreshes below.
+            // narrowed further). refresh() itself makes two Secret Service
+            // calls, which the unscoped monitor also observes, so a direct
+            // refresh here — no `_due` debounce — is a feedback loop: each
+            // refresh forks two more `busctl`, forever. `keepass_due`
+            // collapses a burst to one refresh (T-keepass-loop).
             line = keepass.mon.next_line() => {
                 let _ = line;
-                keepass.refresh(&mut vars).await;
-                if vars.has_dirty() {
-                    dirty_since.get_or_insert_with(Instant::now);
-                }
+                keepass_due = Some(Instant::now());
             }
 
             // T28: `playerctl --follow` line — already the fully-parsed
@@ -1253,6 +1272,19 @@ async fn run() -> Result<(), String> {
                     dirty_since.get_or_insert_with(Instant::now);
                 }
                 docker_due = None;
+            }
+
+            _ = async {
+                match keepass_due {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t + FLUSH_DEBOUNCE)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                keepass.refresh(&mut vars).await;
+                if vars.has_dirty() {
+                    dirty_since.get_or_insert_with(Instant::now);
+                }
+                keepass_due = None;
             }
 
             // Hover-open debounce (T-hover) — same single-slot shape as the

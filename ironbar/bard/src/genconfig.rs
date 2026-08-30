@@ -251,14 +251,12 @@ pub fn build(monitors: &[String]) -> Value {
     defaults.insert("inhibit_text".into(), json!(""));
     defaults.insert("inhibit_tip".into(), json!(""));
     defaults.insert("dark_icon".into(), json!(""));
-    // T23 tools drawer — see `tools_modules()`'s own doc comment. Starts
-    // closed: the drawer's whole point is a collapsed resting state.
-    defaults.insert("tools_open".into(), json!("false"));
     // T6c claudebar vars — see claude.rs.
     defaults.insert("claude_text".into(), json!(""));
     defaults.insert("claude_tip".into(), json!(""));
-    // T28 tray drawer — see `tray_toggle_module()`'s own doc comment. Same
-    // starts-closed reasoning as `tools_open` above.
+    // T28 tray drawer — see `tray_toggle_module()`'s own doc comment.
+    // Starts closed: the drawer's whole point is a collapsed resting
+    // state.
     defaults.insert("tray_open".into(), json!("false"));
     // T28 keepass vars — see keepass.rs.
     defaults.insert("kp_text".into(), json!(""));
@@ -306,30 +304,42 @@ pub fn build(monitors: &[String]) -> Value {
     let mut monitors_map = serde_json::Map::new();
     for (name, slug) in monitors.iter().zip(&slugs) {
         let bar_name = format!("bar-{name}");
-        monitors_map.insert(
-            name.clone(),
-            json!({
-                "name": bar_name,
-                // T8c: = config.jsonc:4's `"height": 40`. Ironbar's own
-                // default is 42 (schema default, `BarConfig.height`), and
-                // GTK treats it as a minimum, not a fixed value — it grows
-                // to fit taller content regardless. Set for parity with
-                // waybar's own height, not as a hard cap.
-                "height": 40,
-                // T8 cutover: ironbar takes the top edge waybar used to own
-                // (bars.sh killed, not restarted). No separate popup-
-                // direction setting exists (`--print-schema` confirmed at
-                // T0/S5) — ironbar derives it from `position` itself.
-                "position": "top",
-                // T9: raised from the schema default (5) — the only distance
-                // lever `PopupConfig`/`BarConfig` expose for "popup sits too
-                // close to the button" (no per-widget offset field exists).
-                "popup_gap": 12,
-                "start": start_modules(&bar_name, Some((name, slug))),
-                "center": time_modules(&bar_name),
-                "end": end_modules(&bar_name),
-            }),
-        );
+        let mut bar = serde_json::Map::new();
+        bar.insert("name".into(), json!(bar_name));
+        // T8c: = config.jsonc:4's `"height": 40`. Ironbar's own
+        // default is 42 (schema default, `BarConfig.height`), and
+        // GTK treats it as a minimum, not a fixed value — it grows
+        // to fit taller content regardless. Set for parity with
+        // waybar's own height, not as a hard cap.
+        bar.insert("height".into(), json!(40));
+        // T8 cutover: ironbar takes the top edge waybar used to own
+        // (bars.sh killed, not restarted). No separate popup-
+        // direction setting exists (`--print-schema` confirmed at
+        // T0/S5) — ironbar derives it from `position` itself.
+        bar.insert("position".into(), json!("top"));
+        // T9: raised from the schema default (5) — the only distance
+        // lever `PopupConfig`/`BarConfig` expose for "popup sits too
+        // close to the button" (no per-widget offset field exists).
+        bar.insert("popup_gap".into(), json!(12));
+        if name.starts_with("HEADLESS") {
+            // T-headless-bar: a HEADLESS-* output is a VNC capture
+            // surface, not a real screen edge — clock/tray/audio/etc.
+            // have no viewer to serve, so the bar carries only the
+            // workspace pills a remote viewer needs to switch tags.
+            // `workspace_pills` is the same builder `start_modules` calls
+            // for every other bar, so the pill JSON can't drift between
+            // the two branches. No `center`/`end`: omitted, not empty
+            // arrays, since nothing populates them here.
+            bar.insert("start".into(), json!(workspace_pills(name, slug)));
+        } else {
+            bar.insert(
+                "start".into(),
+                json!(start_modules(&bar_name, Some((name, slug)))),
+            );
+            bar.insert("center".into(), json!(time_modules(&bar_name)));
+            bar.insert("end".into(), json!(end_modules(&bar_name)));
+        }
+        monitors_map.insert(name.clone(), Value::Object(bar));
     }
 
     json!({
@@ -359,7 +369,8 @@ pub fn build(monitors: &[String]) -> Value {
 }
 
 /// `end` row, grouped by domain per statusbar-layout.md §3.3-3.8: tray
-/// (leads, INV-1 growth end) → resources → tools → audio → connectivity →
+/// (leads, INV-1 growth end) → resources → darkmode/inhibit → audio →
+/// connectivity →
 /// session. Each sub-group is one saccade's worth of ambient information
 /// (proximity/common region — see the spec's own §Rationale), not a flat
 /// list of 18 unrelated pills.
@@ -438,15 +449,19 @@ fn time_modules(bar_name: &str) -> Vec<Value> {
     m
 }
 
-/// Tools drawer (statusbar-layout.md §3.5): one `custom` module whose `bar`
-/// nests a trigger label plus the three click-only, never-glanced buttons
-/// (colorpicker, darkmode, snip) that used to sit as separate always-visible
-/// pills — see this module's own doc comment below for the nesting
-/// mechanism. `inhibit` is deliberately NOT nested here; it stays a sibling
-/// module right after, taking the spec's own stated exception (keep-awake
-/// state needs to be glanceable, unlike the other three).
+/// T31: the T23 tools drawer is gone — the user judged the "…" trigger a
+/// waste of space, and wants the TOOLS THEMSELVES back on the bar, not
+/// hidden: colorpicker, darkmode and snip return as standalone pills in
+/// the T23 reading order, `inhibit` follows unchanged. (The first T31 cut
+/// deleted colorpicker/snip as keybind duplicates — user feedback
+/// reversed that: "remove the drawer" meant the reveal mechanism only.)
 fn tools_modules(bar_name: &str) -> Vec<Value> {
-    vec![tools_module(), inhibit_module(bar_name)]
+    vec![
+        colorpicker_module(),
+        darkmode_module(),
+        snip_module(),
+        inhibit_module(bar_name),
+    ]
 }
 
 /// T8c: `truncate` added (= config.jsonc:22's `max-length: 32`, dropped
@@ -593,10 +608,11 @@ fn tray_module() -> Value {
 
 /// T28: the drawer's own trigger, right after `tray` so opening it grows
 /// away from the pointer and the trigger's own X never moves (INV-1). One
-/// plain Unicode glyph (vertical ellipsis, "more" — distinct from
-/// `tools_module()`'s horizontal ellipsis trigger so the two don't read as
-/// the same button), not a Nerd Font codepoint — same rationale as
-/// `tools_module()`'s own trigger glyph.
+/// plain Unicode glyph (vertical ellipsis, "more"), not a Nerd Font
+/// codepoint: plain punctuation renders correctly through the base
+/// `* { font-family }` stack with zero new verification needed (T31: the
+/// tools drawer whose horizontal-ellipsis trigger this once contrasted
+/// with is gone).
 fn tray_toggle_module() -> Value {
     json!({
         "type": "custom",
@@ -916,65 +932,67 @@ fn net_modules(bar_name: &str) -> Vec<Value> {
 /// A leftover click toggle would fight hover's own open/close. `btop`
 /// (T15: moved from middle- to left-click) launches an external process
 /// rather than sending `toggle-popup`, so it does not fight hover either.
-/// T29: `cpu` and `memory` merged into one two-row stack — replaces the
-/// two side-by-side pills this used to build. **Why a two-row nested
-/// `button` per row, not two nested `custom` modules:** a nested
-/// `WidgetOrModule::Module` is a real option in ironbar's schema, but
-/// `custom/mod.rs::add_to` (vendored source) discards the `ModuleRef` it
-/// gets back, and `style add_class`/`remove_class` resolve a module by
-/// name only through `Bar::modules()` — populated solely from the
-/// top-level `start`/`center`/`end` arrays (`bar.rs::add_modules`). A
-/// nested `cpu` module would answer "Module not found" for every
-/// `@class/cpu` push: every gauge level, every warning colour, dead. Two
-/// plain `button` rows inside one outer `box, orientation: "vertical"`
-/// (the one config-level box type that honours `orientation` — `popup()`'s
-/// own doc comment) sidesteps this entirely: everything, including a
-/// nested widget's own `on_click_left`/`show_if`, is a real top-level
-/// `WidgetConfig` field (T23, confirmed live for the popup's hold/release
-/// handlers) — nesting changes layout only, not what a widget can carry.
+/// T29: `cpu` and `memory` merged into one module — **why not two nested
+/// `custom` modules:** a nested `WidgetOrModule::Module` is a real option
+/// in ironbar's schema, but `custom/mod.rs::add_to` (vendored source)
+/// discards the `ModuleRef` it gets back, and `style add_class`/
+/// `remove_class` resolve a module by name only through `Bar::modules()` —
+/// populated solely from the top-level `start`/`center`/`end` arrays
+/// (`bar.rs::add_modules`). A nested `cpu` module would answer "Module not
+/// found" for every `@class/cpu` push: every gauge level, every warning
+/// colour, dead. Plain widgets inside one module sidestep this: the class
+/// vars land on the module node and CSS descends from there.
 ///
-/// **One popup covers both rows** (`popup_multi`) — a nested widget's own
-/// popup would hit the identical "module not found" problem via
-/// `ipc.rs::show_popup`'s `widget_name` lookup, so per-row popups are not
-/// on the table here either. `on_mouse_enter`/`on_mouse_exit` therefore
-/// live on the OUTER module only, never on a row — a handler on a child
-/// fires on every pointer crossing between children (T23's hover-reveal
-/// drawer finding), which would collapse the popup before the pointer ever
-/// reached the second row.
+/// **One popup covers both resources** (`popup_multi`) — a nested widget's
+/// own popup would hit the identical "module not found" problem via
+/// `ipc.rs::show_popup`'s `widget_name` lookup.
 ///
-/// Each row keeps the old single-pill shape verbatim: `widgets`
-/// (not the `label` shorthand) so the `.gauge` box can sit beside the
-/// text (`ButtonWidget` treats `label`/`widgets` as mutually exclusive —
-/// `widgets` wins), `valign: "center"` on the gauge so `BoxWidget`'s own
-/// `fill` default doesn't stretch it to the row's full height, and the
-/// same left-click into `btop` (T15).
+/// T31: the bar root became ONE `button` wrapping the whole stack. Hover
+/// was dead on the T29 shape: working pills (`battery`, `keepass`) have a
+/// `button` bar root — the module-level `on_mouse_enter` fires from it —
+/// while T29's stack rooted in a windowless `box` whose visible area was
+/// covered by two nested `button` rows, and a nested button's own GDK
+/// event window swallows every crossing before the module handler sees
+/// one: `mango-bard stats` showed `cpu_detail_builds:0` over hours of
+/// uptime while single-button pills incremented. The rows are plain
+/// `box`/`label` widgets now — windowless, so events fall through to the
+/// root button — and the one `btop` click moves onto that button. A
+/// `button` root also makes `ipc.rs`'s `buttons.first()` anchor the
+/// popup on the pill itself.
+///
+/// T31 follow-up: the first cut flattened the stack to one wide row; the
+/// user wants the cpu gauge ON TOP of the memory gauge — the vertical
+/// two-row shape returns, only the widget types changed (buttons ->
+/// windowless boxes) to keep hover alive.
+///
+/// The gauges carry distinct classes (`gauge-cpu`/`gauge-mem`) because
+/// both sit under the one module node, so `.clNN .gauge` would hit both;
+/// the labels likewise (`cpu-ico`/`mem-ico`) so the warning colour rules
+/// have a per-resource target where `.row-cpu`/`.row-mem` used to be.
+/// cpu.rs/memory.rs are untouched: their `@class/sysload#*` pushes always
+/// landed on the module node, and still select through it.
+///
+/// `valign: "center"` on the stack box and on each gauge — `BoxWidget`'s
+/// own schema defaults `valign` to `"fill"`, which packs the rows'
+/// combined natural height at the TOP of the bar's 40px (T29 follow-up)
+/// and stretches a gauge to its row's full height (T28).
 fn sysload_module(bar_name: &str) -> Value {
-    fn row(class: &str, text_var: &str) -> Value {
-        json!({
-            "type": "button",
-            "class": class,
-            "widgets": [
-                { "type": "label", "label": format!("#{text_var}") },
-                { "type": "box", "class": "gauge", "valign": "center" }
-            ],
-            "on_click_left": "kitty --class mango-monitor -e btop"
-        })
+    fn row(ico_class: &str, text_var: &str, gauge_class: &str) -> Value {
+        json!({ "type": "box", "widgets": [
+            { "type": "label", "class": ico_class, "label": format!("#{text_var}") },
+            { "type": "box", "class": gauge_class, "valign": "center" }
+        ] })
     }
     json!({
         "type": "custom",
         "name": "sysload",
         "class": "sysload",
-        // T29 follow-up: `valign: "center"` on the outer box, not just the
-        // inner gauges — `BoxWidget`'s own schema defaults `valign` to
-        // `"fill"` (the same T28 trap `sysload_module()`'s own doc comment
-        // already names for a single gauge), and here it means the two
-        // rows' combined natural height (< 40px, neither button vexpands)
-        // packs at the TOP of the bar's own 40px allocation instead of
-        // centering in it — the visible "touching top, gap at bottom" bug.
-        "bar": [ { "type": "box", "orientation": "vertical", "valign": "center", "widgets": [
-            row("row-cpu", "cpu_text"),
-            row("row-mem", "mem_text")
-        ] } ],
+        "bar": [ { "type": "button", "widgets": [
+            { "type": "box", "orientation": "vertical", "valign": "center", "widgets": [
+                row("cpu-ico", "cpu_text", "gauge-cpu"),
+                row("mem-ico", "mem_text", "gauge-mem")
+            ] }
+        ], "on_click_left": "kitty --class mango-monitor -e btop" } ],
         "popup": popup_multi(&["cpu_tip", "mem_tip"], bar_name),
         "on_mouse_enter": format!("mango-bard hover enter {bar_name} sysload -q"),
         "on_mouse_exit": format!("mango-bard hover exit {bar_name} sysload -q")
@@ -1008,9 +1026,17 @@ fn power_modules(bar_name: &str) -> Vec<Value> {
         "name": "battery",
         "class": "battery",
         // T28: same `widgets`-not-`label` reasoning as sysload_module().
+        // T31: `.gauge` gains a child `.gauge-fill` that carries the
+        // level gradient (`.pNN .gauge-fill`, style.css). One node used
+        // to carry border AND fill, so the charging pulse (an opacity
+        // animation) dimmed the outline too; a separate fill node lets
+        // only the charge level flash. The child sits inside `.gauge`'s
+        // 2px border automatically (GTK borders inset content).
         "bar": [ { "type": "button", "widgets": [
             { "type": "label", "label": "#bat_text" },
-            { "type": "box", "class": "gauge", "valign": "center" },
+            { "type": "box", "class": "gauge", "valign": "center", "widgets": [
+                { "type": "box", "class": "gauge-fill" }
+            ] },
             { "type": "box", "class": "gauge-cap", "valign": "center" }
         ] } ],
         "popup": popup("bat_tip", bar_name),
@@ -1040,39 +1066,61 @@ fn power_modules(bar_name: &str) -> Vec<Value> {
 /// `toggle_popup` under the hood, so a leftover click toggle on a
 /// hover-opened, no-mutating-click popup would just close what hover had
 /// just opened.
+/// T31: the module-level `on_mouse_enter`/`on_mouse_exit` pair is
+/// duplicated onto every nested `button`. The stack keeps its `box` bar
+/// root (three distinct click targets rule out sysload's single-button
+/// merge), and a `box` root is windowless in GTK3 — the nested buttons'
+/// own GDK event windows swallow every crossing, so the module-level
+/// handlers alone never fire (`mango-bard stats`: zero detail builds for
+/// stacked modules, non-zero for every button-root pill). Widget-level
+/// mouse handlers are already proven live on `popup()`'s hold/release
+/// box (T22). Pointer hand-offs between the rows fire exit+enter pairs,
+/// but both route into main.rs's hover state machine, where a re-enter
+/// within `HOVER_HIDE_GRACE` supersedes the pending grace-hide
+/// (`hover_enter`'s own doc comment) — the popup does not flicker.
 fn devload_module(bar_name: &str) -> Value {
+    let enter = format!("mango-bard hover enter {bar_name} devload -q");
+    let exit = format!("mango-bard hover exit {bar_name} devload -q");
     json!({
         "type": "custom",
         "name": "devload",
         "class": "devload",
-        // T29 follow-up: `valign: "center"` — same fix, same reason, as
-        // `sysload_module()`'s own comment.
+        // T29 follow-up: `valign: "center"` — `BoxWidget`'s own schema
+        // defaults `valign` to `"fill"`, which packs the rows' combined
+        // natural height at the TOP of the bar's 40px allocation instead
+        // of centering in it.
         "bar": [ { "type": "box", "orientation": "vertical", "valign": "center", "widgets": [
             {
                 "type": "button",
                 "class": "row-claude",
                 "label": "#claude_text",
-                "on_click_right": "xdg-open https://claude.ai/settings/usage"
+                "on_click_right": "xdg-open https://claude.ai/settings/usage",
+                "on_mouse_enter": enter.clone(),
+                "on_mouse_exit": exit.clone()
             },
             { "type": "box", "class": "row-svc", "widgets": [
                 {
                     "type": "button",
                     "class": "cell-docker",
                     "label": "#docker_text",
-                    "on_click_right": "~/.config/ironbar/scripts/docker-menu.sh"
+                    "on_click_right": "~/.config/ironbar/scripts/docker-menu.sh",
+                    "on_mouse_enter": enter.clone(),
+                    "on_mouse_exit": exit.clone()
                 },
                 {
                     "type": "button",
                     "class": "cell-au",
                     "show_if": "#au_show",
                     "label": "#au_text",
-                    "on_click_left": "kitty --class mango-monitor -e arch-update"
+                    "on_click_left": "kitty --class mango-monitor -e arch-update",
+                    "on_mouse_enter": enter.clone(),
+                    "on_mouse_exit": exit.clone()
                 }
             ] }
         ] } ],
         "popup": popup_multi(&["claude_tip", "docker_tip", "au_tip"], bar_name),
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} devload -q"),
-        "on_mouse_exit": format!("mango-bard hover exit {bar_name} devload -q")
+        "on_mouse_enter": enter,
+        "on_mouse_exit": exit
     })
 }
 
@@ -1106,7 +1154,17 @@ fn hotspot_module(bar_name: &str) -> Value {
 /// Unlike `hotspot_module` above, no `show_if` — a toggle that hides itself
 /// once off has no way to be clicked back on, so this pill stays visible
 /// and carries its on/off/partial state entirely through `@class/remote`
-/// (style.css's `.remote.active`/`.remote.partial`).
+/// (style.css's `.remote.active`/`.remote.partial`). `on_click_right` pulls
+/// the next occupied tag onto wayvnc's virtual output (remote.sh's own
+/// header has the full verb list) — same left-toggle/right-action shape as
+/// `hotspot_module` above.
+///
+/// T-remote-popup: the popup is the plain `popup()` stack again, same as
+/// every other simple pill. A deleted helper used to append a clickable
+/// per-monitor tag grid below the body. The grid was dropped on user report
+/// — a popup that only opens on hover over a 20px pill is not a place a tag
+/// button can be reached in practice, and `--pull-next` on the pill itself
+/// already does the job. The popup is read-only status now.
 fn remote_module(bar_name: &str) -> Value {
     json!({
         "type": "custom",
@@ -1116,7 +1174,8 @@ fn remote_module(bar_name: &str) -> Value {
         "popup": popup("remote_tip", bar_name),
         "on_mouse_enter": format!("mango-bard hover enter {bar_name} remote -q"),
         "on_mouse_exit": format!("mango-bard hover exit {bar_name} remote -q"),
-        "on_click_left": "~/.config/ironbar/scripts/remote.sh --toggle"
+        "on_click_left": "~/.config/ironbar/scripts/remote.sh --toggle",
+        "on_click_right": "~/.config/ironbar/scripts/remote.sh --pull-next"
     })
 }
 
@@ -1244,131 +1303,56 @@ fn power_module() -> Value {
 
 /// Darkmode toggle: T6b (see darkmode.rs).
 ///
-/// T23: was a standalone `custom` module; now a nested widget inside
-/// `tools_module()`'s own drawer — see that function's own doc comment for
-/// why nesting (not a separate sibling module) is what makes the drawer
-/// reachable. `show_if`/`transition_type` gate the reveal; the static
-/// `tooltip` is dropped (redundant once the icon is only ever seen already
-/// hover-revealed — ironbar schema: `tooltip` is `string|null`, only
-/// *dynamic* strings need `{{script}}`, but this one needs neither now).
+/// T23 nested it inside the tools drawer; T31 removed the drawer (see
+/// `tools_modules()`'s own doc comment) and this became a standalone
+/// `custom` module again — `button` bar root like `inhibit_module()`, the
+/// shape whose click and hover are proven to work. The static `tooltip`
+/// returns: the icon is always visible again, so it needs a name on
+/// hover (ironbar schema: `tooltip` is `string|null`, static strings need
+/// no `{{script}}`; no `on_mouse_enter` here, so no conflict with the
+/// static-tooltip-xor-hover-popup rule).
 fn darkmode_module() -> Value {
     json!({
-        "type": "label",
+        "type": "custom",
         "name": "darkmode",
         "class": "darkmode",
-        "label": "#dark_icon",
-        "show_if": "#tools_open",
-        "transition_type": "slide_start",
+        "bar": [ { "type": "button", "label": "#dark_icon" } ],
+        "tooltip": "Toggle light/dark",
         "on_click_left": "~/.config/ironbar/scripts/darkmode.sh --toggle"
     })
 }
 
-/// Color picker button — config.jsonc:216-220, static, no daemon var.
-/// T8b: U+E3B8 (Material Symbols "colorize") -> U+F1FB (eyedropper, Nerd
-/// Font Font Awesome) — see spark_module()'s doc comment for why.
-/// T19: U+F1FB -> U+F020B (md-eyedropper_variant) — one-glyph-family sweep,
-/// see IRONBAR.md's T19 entry: every remaining Font Awesome glyph on the bar
-/// is smaller and sits higher than its Material Design neighbours, since the
-/// two families are patched from different source fonts with different
-/// vertical scaling. Checked with `pango-view --font="JetBrainsMono Nerd
-/// Font Propo"` before wiring in, same method as T18.
-///
-/// T23: nested inside `tools_module()`'s drawer — see `darkmode_module()`'s
-/// own doc comment above for why nesting, not a sibling module.
+/// Color picker: standalone pill again (T31, see `tools_modules()`'s own
+/// doc comment — its whole T23 drawer life is over). Same shape as
+/// `power_module()`: `label` bar root (windowless, so the module-level
+/// click lands — proven by power's own working click), static tooltip.
+/// Glyph history (U+E3B8 -> U+F1FB -> U+F020B md-eyedropper_variant) is
+/// in IRONBAR.md's T8b/T19 entries.
 fn colorpicker_module() -> Value {
     json!({
-        "type": "label",
+        "type": "custom",
         "name": "colorpicker",
         "class": "colorpicker",
-        "label": "\u{f020b}",
-        "show_if": "#tools_open",
-        "transition_type": "slide_start",
+        "bar": [ { "type": "label", "label": "\u{f020b}" } ],
+        "tooltip": "Color picker",
         "on_click_left": "hyprpicker -a"
     })
 }
 
-/// Screenshot-region button — config.jsonc:227-231, static, no daemon var.
-/// T8b: U+F7D2 (Material Symbols "screenshot_region") -> U+F125 (crop, Nerd
-/// Font Font Awesome) — see spark_module()'s doc comment for why.
-/// T19: U+F125 -> U+F0E5A (md-monitor_screenshot) — a monitor outline with a
-/// dashed selection inside it, closer to the original Material Symbols
-/// "screenshot_region" than a bare crop glyph, and part of the same
-/// one-icon-family sweep as colorpicker_module() above.
-///
-/// T20: both clicks routed through screenshot.sh so each mode saves a
-/// file, copies it, and notifies the same way — the old copy-only
-/// `grim | wl-copy` inline pipeline is gone. Shift-modified clicks were
-/// the first choice and are impossible: `ironbar --print-schema` types
-/// every `on_click_*` as a plain `ScriptInput` with no modifier variants;
-/// middle-click is out too (no middle button on this machine's mouse, per
-/// user). Two buttons carry the two pointer-driven modes — region and
-/// window, both of which need the pointer next anyway — and the two
-/// pointer-free modes (active monitor, every output) stay on their
-/// config.conf keys.
-///
-/// T23: nested inside `tools_module()`'s drawer — the discoverability the
-/// old tooltip text carried ("left: region, right: window...") is less
-/// critical now that reaching this icon at all already means the user
-/// hovered the drawer open; the two clicks themselves are unchanged.
+/// Screenshot pill: standalone again (T31, same reversal as
+/// `colorpicker_module()` above). Both clicks route through
+/// screenshot.sh so each mode saves + copies + notifies the same way
+/// (T20); the tooltip carries the discoverability the drawer dropped.
+/// Glyph U+F0E5A (md-monitor_screenshot) — T19's one-family sweep.
 fn snip_module() -> Value {
     json!({
-        "type": "label",
+        "type": "custom",
         "name": "snip",
         "class": "snip",
-        "label": "\u{f0e5a}",
-        "show_if": "#tools_open",
-        "transition_type": "slide_start",
+        "bar": [ { "type": "label", "label": "\u{f0e5a}" } ],
+        "tooltip": "Screenshot — left: region, right: window",
         "on_click_left": "~/.config/mango/scripts/screenshot.sh region",
         "on_click_right": "~/.config/mango/scripts/screenshot.sh window"
-    })
-}
-
-/// The tools drawer itself (statusbar-layout.md §3.5): one `custom` module,
-/// collapsed to a single trigger icon at rest, revealing `colorpicker`/
-/// `darkmode`/`snip` on hover.
-///
-/// **Why nested widgets, not three sibling modules with their own
-/// `show_if`.** `show_if` and `on_mouse_enter`/`on_mouse_exit` are both
-/// module-/widget-level fields (`WidgetConfig`, `--print-schema`) — a
-/// top-level module gets them, but so does a widget nested inside another
-/// module's own `bar` array (already proven live in this file: `popup()`'s
-/// outer `box` carries `on_mouse_enter`/`on_mouse_exit` for `hover hold`/
-/// `release`, T22 item 1/4). If the trigger and its three revealed icons
-/// were separate TOP-LEVEL sibling modules in `end`, moving the pointer
-/// from the trigger onto a freshly-revealed sibling would cross a real GTK
-/// widget boundary — firing the trigger's own `on_mouse_exit`, closing the
-/// drawer out from under the pointer before it ever reaches the icon.
-/// Nesting all four under one module's `bar` means that crossing happens
-/// *inside* this module's own footprint; the module-level
-/// `on_mouse_enter`/`on_mouse_exit` below only fire when the pointer
-/// truly leaves the whole drawer, not on every internal hand-off between
-/// its children — the same guarantee `popup()`'s hold/release already
-/// relies on, applied here to a reveal instead of a popup.
-///
-/// State lives in the `tools_open` ironvar, set directly by `ironbar var
-/// set` from the module's own hover handlers — no daemon round trip: this
-/// is bar-local UI state with no collector behind it, unlike every other
-/// ironvar in this file.
-///
-/// Trigger glyph is a plain Unicode ellipsis (U+2026), not a Nerd Font
-/// icon — deliberately: every Nerd Font codepoint on this bar needed a
-/// live `pango-view` render check before being trusted (T8b/T15/T17/T18's
-/// repeated wrong-glyph bugs), and a plain punctuation mark already
-/// renders correctly through the base `* { font-family }` stack with zero
-/// new verification needed.
-fn tools_module() -> Value {
-    json!({
-        "type": "custom",
-        "name": "tools",
-        "class": "tools",
-        "bar": [ { "type": "box", "orientation": "horizontal", "widgets": [
-            { "type": "label", "class": "tools-trigger", "label": "\u{2026}" },
-            colorpicker_module(),
-            darkmode_module(),
-            snip_module()
-        ] } ],
-        "on_mouse_enter": "ironbar var set tools_open true",
-        "on_mouse_exit": "ironbar var set tools_open false"
     })
 }
 
@@ -1738,6 +1722,66 @@ mod tests {
     }
 
     #[test]
+    fn remote_left_toggles_right_pulls_next() {
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let remote = end.iter().find(|m| m["name"] == "remote").unwrap();
+        assert_eq!(
+            remote["on_click_left"],
+            json!("~/.config/ironbar/scripts/remote.sh --toggle")
+        );
+        assert_eq!(
+            remote["on_click_right"],
+            json!("~/.config/ironbar/scripts/remote.sh --pull-next")
+        );
+    }
+
+    #[test]
+    fn remote_popup_is_the_plain_read_only_stack() {
+        // Replaces `remote_popup_has_one_pull_row_per_physical_monitor…`.
+        // T-remote-popup deleted the clickable tag grid. Equality against
+        // `popup()` is the whole assertion for this bar: the plain stack has
+        // no extra section by construction, so no grid row and no button can
+        // hide in it. The config-wide `--pull ` check then covers the other
+        // bars too — a grid cell cannot exist without its own pull command.
+        let cfg = build(&[
+            "eDP-1".to_string(),
+            "DP-1".to_string(),
+            "HEADLESS-4".to_string(),
+        ]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let remote = end.iter().find(|m| m["name"] == "remote").unwrap();
+        assert_eq!(remote["popup"], popup("remote_tip", "bar-eDP-1"));
+        let whole = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            !whole.contains("remote.sh --pull "),
+            "no per-tag pull command may survive on any bar; --pull-next on the pill stays"
+        );
+
+        // T-headless-bar: HEADLESS-4 gets a pills-only bar (no center/end),
+        // eDP-1 keeps its full start/center/end.
+        let headless = &cfg["monitors"]["HEADLESS-4"];
+        let headless_start = headless["start"].as_array().unwrap();
+        let headless_slug = crate::mango::slug("HEADLESS-4");
+        assert_eq!(
+            headless_start,
+            &workspace_pills("HEADLESS-4", &headless_slug)
+        );
+        assert!(headless.get("center").is_none());
+        assert!(headless.get("end").is_none());
+
+        let edp_start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
+        let edp_names: Vec<&str> = edp_start
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(edp_names.first(), Some(&"spark"));
+        assert_eq!(edp_names.last(), Some(&"win"));
+        assert!(cfg["monitors"]["eDP-1"]["center"].as_array().is_some());
+        assert!(cfg["monitors"]["eDP-1"]["end"].as_array().is_some());
+    }
+
+    #[test]
     fn ironvar_keys_are_pure_ascii_alphanumeric_or_underscore() {
         let cfg = build(&["eDP-1".to_string(), "HDMI-A-1".to_string()]);
         for key in cfg["ironvar_defaults"].as_object().unwrap().keys() {
@@ -1812,7 +1856,7 @@ mod tests {
         collect_module_names(&json!({"start": start, "center": center, "end": end}), &mut names);
         let expected = [
             "spark", "win", "clock", "date", "pomo", "tray", "sysload", "battery", "devload",
-            "tools", "colorpicker", "darkmode", "snip", "inhibit", "music", "volume",
+            "colorpicker", "darkmode", "snip", "inhibit", "music", "volume",
             "mic", "net-spinner", "wifi", "eth", "netsec", "hotspot", "remote", "bluetooth",
             "power",
             // T28: the pill promoted out of the tray drawer it gates
@@ -1829,17 +1873,10 @@ mod tests {
             assert!(names.contains(&ws_module("eDP-1", tag)));
         }
         assert!(names.contains(&ws_module_ov("eDP-1")));
-        // T29: 26 named non-tag modules (30 pre-T29 minus `cpu`/`memory`/
-        // `docker`/`claudebar`/`archupdate`, plus `sysload`/`devload`,
-        // minus `traytoggle` now that the drawer defaults off) + 9 tags +
-        // 1 overview = 36 names, but `tools` itself has no popup/module
-        // content beyond its own name — it is real, so the raw count is
-        // 36, not the historical "36 visible modules" claim in
-        // statusbar-layout.md for a DIFFERENT reason than before (that
-        // claim counted each drawer as one slot, not one per
-        // trigger+child — with the tray drawer off, the two counts now
-        // agree by coincidence, not because the reasoning matches).
-        assert_eq!(names.len(), 36);
+        // T31: 25 named non-tag modules (26 post-T29 minus the `tools`
+        // drawer module itself; its three nested tools survive as
+        // standalone pills) + 9 tags + 1 overview = 35 names.
+        assert_eq!(names.len(), 35);
     }
 
     // T23: `end_no_longer_carries_the_leftcenter_modules` (a T8d regression
@@ -1866,11 +1903,12 @@ mod tests {
     #[test]
     fn devload_hover_targets_its_own_bar_name_and_nested_clicks_survive() {
         // T29: `claudebar`+`docker`(+`archupdate`) merged into `devload`
-        // (see `devload_module()`'s own doc comment) — the hover
-        // enter/exit that used to sit on each pill now sits only on the
-        // outer module (T23: a handler on a nested row would fire on every
-        // crossing between rows), but each row/cell keeps its own click as
-        // a real nested `WidgetConfig` field.
+        // (see `devload_module()`'s own doc comment); each row/cell keeps
+        // its own click as a real nested `WidgetConfig` field. T31: the
+        // hover enter/exit pair sits on the outer module AND on every
+        // nested button — the buttons' own GDK event windows swallow the
+        // crossings the module-level handlers were waiting for (see
+        // `devload_module()`'s own doc comment).
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let devload = end.iter().find(|m| m["name"] == "devload").unwrap();
@@ -1894,6 +1932,13 @@ mod tests {
         );
 
         let svc_cells = rows[1]["widgets"].as_array().unwrap();
+        for button in [claude_row]
+            .into_iter()
+            .chain(svc_cells.iter().filter(|c| c["type"] == "button"))
+        {
+            assert_eq!(button["on_mouse_enter"], devload["on_mouse_enter"]);
+            assert_eq!(button["on_mouse_exit"], devload["on_mouse_exit"]);
+        }
         let docker_cell = svc_cells.iter().find(|c| c["class"] == "cell-docker").unwrap();
         assert_eq!(
             docker_cell["on_click_right"],
@@ -1942,35 +1987,53 @@ mod tests {
     }
 
     #[test]
-    fn tools_drawer_holds_darkmode_and_reveals_it_on_the_tools_open_var() {
-        // T23: darkmode moved into `tools_module()`'s nested drawer — see
-        // that function's own doc comment for the nesting mechanism and why
-        // it replaces darkmode's old life as a standalone sibling module.
-        // Real per-monitor bar and the fallback bar both get one.
+    fn tools_are_standalone_pills_in_reading_order_before_inhibit() {
+        // T31: the tools drawer is gone (see `tools_modules()`'s own doc
+        // comment) — colorpicker/darkmode/snip are standalone modules
+        // again, always visible (no `show_if`), in the T23 reading order,
+        // with `inhibit` right after. Real per-monitor bar and the
+        // fallback bar both get them.
         let cfg = build(&["eDP-1".to_string(), "DP-1".to_string()]);
         for mon in ["eDP-1", "DP-1"] {
             let end = cfg["monitors"][mon]["end"].as_array().unwrap();
-            let tools = end.iter().find(|m| m["name"] == "tools").unwrap();
-            let widgets = tools["bar"][0]["widgets"].as_array().unwrap();
-            let darkmode = widgets.iter().find(|w| w["name"] == "darkmode").unwrap();
-            assert_eq!(darkmode["show_if"], json!("#tools_open"));
+            let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
+            let cp = names.iter().position(|n| *n == "colorpicker").unwrap();
+            let dm = names.iter().position(|n| *n == "darkmode").unwrap();
+            let sn = names.iter().position(|n| *n == "snip").unwrap();
+            let inh = names.iter().position(|n| *n == "inhibit").unwrap();
+            assert!(cp < dm && dm < sn && sn < inh);
+            assert_eq!(sn + 1, inh);
+            for name in ["colorpicker", "darkmode", "snip"] {
+                let m = end.iter().find(|m| m["name"] == name).unwrap();
+                assert!(m.get("show_if").is_none(), "{name} must be always visible");
+                assert!(m["tooltip"].is_string(), "{name} needs its static tooltip");
+                assert!(m["on_click_left"].is_string());
+            }
+            let darkmode = &end[dm];
+            assert_eq!(darkmode["bar"][0]["type"], json!("button"));
+            assert_eq!(
+                darkmode["on_click_left"],
+                json!("~/.config/ironbar/scripts/darkmode.sh --toggle")
+            );
         }
         let fallback = build(&[]);
         let fb_end = fallback["end"].as_array().unwrap();
-        let fb_tools = fb_end.iter().find(|m| m["name"] == "tools").unwrap();
-        let fb_widgets = fb_tools["bar"][0]["widgets"].as_array().unwrap();
-        assert!(fb_widgets.iter().any(|w| w["name"] == "darkmode"));
+        for name in ["colorpicker", "darkmode", "snip"] {
+            assert!(fb_end.iter().any(|m| m["name"] == name));
+        }
     }
 
     // ---- T7a additions
 
     #[test]
     fn sysload_hover_targets_its_own_bar_name_and_rows_keep_their_click() {
-        // T29: `cpu`/`memory` merged into one `sysload` stack (see
-        // `sysload_module()`'s own doc comment) — hover moves to the outer
-        // module (main.rs's hover state machine now runs both
-        // cpu-detail/mem-detail refreshes before opening one popup), but
-        // each row keeps its own `btop` click as a nested `WidgetConfig`.
+        // T29: `cpu`/`memory` merged into one `sysload` module (see
+        // `sysload_module()`'s own doc comment); main.rs's hover state
+        // machine runs both cpu-detail/mem-detail refreshes before
+        // opening one popup. T31: the two-row stack became one single-row
+        // `button` bar root — hover and click live on that button, and
+        // the two gauges/labels carry per-resource classes so the level
+        // and warning CSS can tell them apart under the one root.
         // T15: btop moved from middle- to left-click.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
@@ -1985,15 +2048,30 @@ mod tests {
             .contains("bar-eDP-1"));
         assert!(sysload.get("on_click_left").is_none());
 
-        let rows = sysload["bar"][0]["widgets"].as_array().unwrap();
+        let root = &sysload["bar"][0];
+        assert_eq!(root["type"], json!("button"));
+        assert_eq!(
+            root["on_click_left"],
+            json!("kitty --class mango-monitor -e btop")
+        );
+        assert!(root.get("on_click_middle").is_none());
+        // T31 follow-up: one vertical stack of two windowless rows under
+        // the root button — no nested `button` anywhere (a nested
+        // button's event window would swallow the root's hover again).
+        let stack = &root["widgets"][0];
+        assert_eq!(stack["orientation"], json!("vertical"));
+        let rows = stack["widgets"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
-        for (row, class) in rows.iter().zip(["row-cpu", "row-mem"]) {
-            assert_eq!(row["class"], json!(class));
-            assert_eq!(
-                row["on_click_left"],
-                json!("kitty --class mango-monitor -e btop")
-            );
-            assert!(row.get("on_click_middle").is_none());
+        for (row, (ico, gauge)) in rows
+            .iter()
+            .zip([("cpu-ico", "gauge-cpu"), ("mem-ico", "gauge-mem")])
+        {
+            assert_eq!(row["type"], json!("box"));
+            let w = row["widgets"].as_array().unwrap();
+            assert_eq!(w[0]["type"], json!("label"));
+            assert_eq!(w[0]["class"], json!(ico));
+            assert_eq!(w[1]["type"], json!("box"));
+            assert_eq!(w[1]["class"], json!(gauge));
         }
 
         // T-popup-vert: popup is one outer vertical box (see popup()'s own
@@ -2085,8 +2163,9 @@ mod tests {
 
     #[test]
     fn tray_leads_end_and_the_resource_block_follows() {
-        // T23: `end` is now tray -> resources -> tools -> audio ->
-        // connectivity -> session (statusbar-layout.md §3.3-3.8) — see
+        // T23/T31: `end` is now tray -> resources -> darkmode/inhibit ->
+        // audio -> connectivity -> session (statusbar-layout.md §3.3-3.8,
+        // tools drawer removed in T31) — see
         // `end_modules()`'s own doc comment. Tray leads the WHOLE row now,
         // not just its own sub-group, since `center` carries the time
         // block instead of `end` borrowing it.
@@ -2186,57 +2265,18 @@ mod tests {
     }
 
     #[test]
-    fn tools_drawer_nests_colorpicker_snip_in_reading_order_inhibit_follows_outside() {
-        // T23: colorpicker/darkmode/snip moved from standalone sibling
-        // modules into `tools_module()`'s own nested drawer (statusbar-
-        // layout.md §3.5) — see that function's own doc comment for why
-        // nesting, not separate modules with their own `show_if`, is what
-        // makes the drawer reachable. `inhibit` stays a real sibling module
-        // right after `tools`, taking the spec's own stated exception.
+    fn tools_drawer_and_its_reveal_var_are_gone() {
+        // T31: the tools drawer is removed (see `tools_modules()`'s own
+        // doc comment). The `tools` module must not exist anywhere — top
+        // level or nested — and the `tools_open` ironvar default dies
+        // with it. The three tools themselves survive as standalone
+        // pills (checked by
+        // `tools_are_standalone_pills_in_reading_order_before_inhibit`).
         let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let names: Vec<Option<&str>> = end.iter().map(|m| m["name"].as_str()).collect();
-        let tools = names.iter().position(|n| *n == Some("tools")).unwrap();
-        let inhibit = names.iter().position(|n| *n == Some("inhibit")).unwrap();
-        assert!(tools < inhibit, "inhibit must follow the tools drawer");
-        assert!(
-            !names.contains(&Some("colorpicker")),
-            "colorpicker must not be a top-level sibling module any more"
-        );
-        assert!(
-            !names.contains(&Some("darkmode")),
-            "darkmode must not be a top-level sibling module any more"
-        );
-        assert!(
-            !names.contains(&Some("snip")),
-            "snip must not be a top-level sibling module any more"
-        );
-
-        let tools_module = end.iter().find(|m| m["name"] == "tools").unwrap();
-        let widgets = tools_module["bar"][0]["widgets"].as_array().unwrap();
-        let widget_names: Vec<Option<&str>> = widgets.iter().map(|w| w["name"].as_str()).collect();
-        let colorpicker = widget_names
-            .iter()
-            .position(|n| *n == Some("colorpicker"))
-            .unwrap();
-        let darkmode = widget_names
-            .iter()
-            .position(|n| *n == Some("darkmode"))
-            .unwrap();
-        let snip = widget_names.iter().position(|n| *n == Some("snip")).unwrap();
-        assert!(colorpicker < darkmode && darkmode < snip);
-        for w in &widgets[1..] {
-            assert_eq!(
-                w["show_if"],
-                json!("#tools_open"),
-                "every drawer child but the trigger must gate on tools_open"
-            );
-        }
-
-        let fallback = build(&[]);
-        let fb_end = fallback["end"].as_array().unwrap();
-        assert!(fb_end.iter().any(|m| m["name"] == "tools"));
-        assert!(fb_end.iter().any(|m| m["name"] == "inhibit"));
+        let mut names = HashSet::new();
+        collect_module_names(&cfg, &mut names);
+        assert!(!names.contains("tools"), "the drawer module must be gone");
+        assert!(cfg["ironvar_defaults"].get("tools_open").is_none());
     }
 
     #[test]
@@ -2454,14 +2494,8 @@ mod tests {
                 "{module} missing on_mouse_exit"
             );
         }
-        // T23: the tools drawer itself is hover-eligible too, but not for a
-        // popup — it toggles `tools_open`, revealing/hiding its own nested
-        // children (see `tools_module()`'s own doc comment). Checked here,
-        // not folded into the popup-based loops above, since it has no
-        // `popup` field at all.
-        let tools = end.iter().find(|m| m["name"] == "tools").unwrap();
-        assert_eq!(tools["on_mouse_enter"], json!("ironbar var set tools_open true"));
-        assert_eq!(tools["on_mouse_exit"], json!("ironbar var set tools_open false"));
+        // T31: the tools drawer's own hover-toggle check is gone with the
+        // drawer (see `tools_modules()`'s own doc comment).
     }
 
     #[test]
@@ -2469,18 +2503,10 @@ mod tests {
         // A pill with no `popup` field has nothing to show — hover there
         // must stay a no-op, so these must carry neither attribute.
         //
-        // T23: `colorpicker`/`snip`/`darkmode` dropped from this list — they
-        // are no longer top-level modules at all (nested inside `tools`'s
-        // own drawer, see `tools_module()`'s own doc comment), so a
-        // top-level `find` by name would panic, not fail meaningfully. Their
-        // own `show_if`/gating is checked by
-        // `tools_drawer_nests_colorpicker_snip_in_reading_order_inhibit_
-        // follows_outside` instead. `tools` itself is the one deliberate
-        // EXCEPTION to the invariant this test guards: it has no `popup`
-        // field yet legitimately carries both mouse attributes, because
-        // hover here toggles `tools_open` (a reveal), not a popup — checked
-        // separately in `every_hover_eligible_module_carries_both_mouse_
-        // attributes`, not asserted absent here.
+        // T31: `colorpicker`/`darkmode`/`snip` rejoin this list — they
+        // are standalone modules again (the tools drawer is gone, see
+        // `tools_modules()`'s own doc comment), popup-free with static
+        // tooltips, so hover must stay a no-op on each.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
@@ -2497,7 +2523,15 @@ mod tests {
         // the native `inhibit` module (no popup) to a `custom` one with a
         // hover popup (inhibit_module()'s own doc comment) — checked by
         // inhibit_module_has_a_hover_popup below instead.
-        for name in ["spark", "power", "mic", "net-spinner"] {
+        for name in [
+            "spark",
+            "power",
+            "mic",
+            "net-spinner",
+            "colorpicker",
+            "darkmode",
+            "snip",
+        ] {
             let m = all
                 .iter()
                 .find(|m| m["name"] == name)
@@ -2578,13 +2612,19 @@ mod tests {
                 );
             }
         }
-        // T29: `sysload`'s two rows and `devload`'s claude row/docker cell
-        // carry their own click, nested — same guard, one level down.
-        for (module, class) in [
-            ("sysload", "row-cpu"),
-            ("sysload", "row-mem"),
-            ("devload", "row-claude"),
-        ] {
+        // T29: nested clicks get the same guard, one level down. T31:
+        // `sysload`'s click moved to its single bar-root button; the
+        // module-level loop above does not see widget-level keys, so pin
+        // the root button separately.
+        {
+            let sysload = end.iter().find(|m| m["name"] == "sysload").unwrap();
+            let click = sysload["bar"][0]["on_click_left"].as_str().unwrap();
+            assert!(
+                !click.contains("toggle-popup"),
+                "sysload root button's on_click_left must not send toggle-popup: {click}"
+            );
+        }
+        for (module, class) in [("devload", "row-claude")] {
             let m = end.iter().find(|m| m["name"] == module).unwrap();
             let rows = m["bar"][0]["widgets"].as_array().unwrap();
             let row = rows.iter().find(|r| r["class"] == class).unwrap();

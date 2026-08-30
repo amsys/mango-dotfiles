@@ -1,0 +1,21 @@
+[Unit]
+Description=wayvnc-privacy — blanks the local panels while a VNC client is connected
+# Started/stopped only by ironbar/scripts/remote.sh --toggle, alongside
+# wayvnc.service. No [Install] section — deliberately not enabled at login,
+# same as wayvnc.service. BindsTo+After wayvnc.service: this watcher is
+# useless without a running wayvnc to send it events, and a stopped/crashed
+# wayvnc.service takes this unit down with it.
+#
+# ExecStopPost always runs --privacy-restore, on a clean stop or a crash —
+# it is what stops a wedged or killed watcher from leaving both panels dark
+# with nobody connected. See remote.sh's own header for the verbs.
+PartOf=graphical-session.target
+BindsTo=wayvnc.service
+After=wayvnc.service
+
+[Service]
+Type=simple
+ExecStart=%h/.config/ironbar/scripts/remote.sh --privacy-watch
+ExecStopPost=%h/.config/ironbar/scripts/remote.sh --privacy-restore
+Restart=on-failure
+RestartSec=2

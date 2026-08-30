@@ -224,12 +224,18 @@ window.background,
  * GtkButton's padding, and the outer box (the node `.sysload`/etc actually
  * selects — a `custom` module's container, distinct from its nested
  * button(s)) carries this file's only padding for the pill.
+ *
+ * T31: back to symmetric `0 4px` — the leading-only inset made every gap
+ * in the group asymmetric by construction (a pill's trailing gap depended
+ * on its NEIGHBOUR's leading pad plus whatever its own min-width reserve
+ * left blank). The overflow-buffer role of the trailing slack survives
+ * only where a reserve still exists (`.devload`, `.battery` below).
  */
 .sysload,
 .devload,
 .battery,
 .keepass {
-	padding: 0 0 0 6px;
+	padding: 0 4px;
 }
 
 /* T25 — INV-5 (statusbar-layout.md), *reserved width with trailing slack*
@@ -275,26 +281,28 @@ window.background,
  * T2/T3 entry) rather than a new fault. Verify after a bar restart and
  * correct if any of the three visibly reflows `tray`.
  *
- * `.sysload`: T29's 40px scaled by the label size ratio (13/11 ≈ 1.18):
- * 40 * 1.18 ≈ 47px.
+ * T31: `.sysload`'s reserve is GONE — the merged single-row pill is two
+ * fixed icon glyphs plus two fixed-width gauges, nothing varies, so a
+ * reserve only buys blank width.
  *
- * `.battery`: no digit, no glyph outside eco — reserve now covers the
- * grown gauge+cap plus the eco leaf, whichever is wider. Gauge
- * (`min-width: 28px` + `border-width: 2px` * 2 + `margin: 4px` = 36px) +
- * cap (`min-width: 4px`, flush, no margin = 4px) + eco leaf (~13px,
- * `size="115%"` on the 15px base font) + 9px slack ≈ 62px.
+ * `.battery`: T31's reserve covered gauge+cap plus the eco leaf, arithmetic
+ * to 53px. T32 shrank it further to 44px — a deliberate, user-approved cut
+ * below that arithmetic (see the comment on the rule itself, below).
  *
- * `.devload`: T29's 131px (measured at 11px labels) scaled the same way:
- * 131 * 1.18 ≈ 155px.
+ * `.devload`: T31 cut 155px -> 120px, arithmetic for the widest realistic
+ * claude row ("100% · 23h 59m", 14 tnum chars at 13px). T32 shrank it
+ * further to 100px, again a deliberate, user-approved cut below that
+ * arithmetic (see the comment on the rule itself, below).
  */
-.sysload {
-	min-width: 47px;
-}
+/* User chose to shrink this reserve below docs/statusbar-layout.md's INV-1/INV-5
+   realistic-max width, accepting minor reflow on content-width change. */
 .battery {
-	min-width: 62px;
+	min-width: 44px;
 }
+/* User chose to shrink this reserve below docs/statusbar-layout.md's INV-1/INV-5
+   realistic-max width, accepting minor reflow on content-width change. */
 .devload {
-	min-width: 155px;
+	min-width: 100px;
 }
 /* T28: icon-only, same shape as `.volume`/`.mic` above — see that rule's
  * own comment for why a plain min-width is the right tool for a two-state
@@ -308,16 +316,48 @@ window.background,
  * font-size: 15px }`, top of this file) doesn't fit twice. Matches the
  * label node directly, not just the module container: the T17 GTK4 trap
  * (a direct match always beats an inherited value) means a rule on
- * `.sysload` alone would never reach the row labels' own font size.
+ * `.devload` alone would never reach the row labels' own font size.
  *
- * T30: bumped 11px -> 13px — the two-row stack left a visible gap above
- * and below in the pill's 40px, room the T29 11px number never used. Not
- * pushed to the full 15px base: two 15px rows plus their gauges would
- * leave near-zero slack for a taller glyph to clip into.
+ * T30: bumped 11px -> 13px. T31 briefly dropped `.sysload label` for a
+ * one-row merge; the stacked shape returned by user request, and the
+ * 13px size with it.
  */
 .sysload label,
 .devload label {
 	font-size: 13px;
+}
+/* T31 follow-up: the cpu/mem icon labels get one fixed width and a
+ * larger glyph. Live pixel measurement (grim crop, edge profile at
+ * mid-gauge rows): both gauges are identical 26px boxes, but the memory
+ * gauge sat 1px LEFT of the cpu one — in the Propo font each glyph's
+ * advance equals its own ink width (T18), so IC_CPU and IC_MEM have
+ * different advances and the gauge x inherits the difference. A shared
+ * `min-width` wider than either advance pins both gauges to the same x
+ * (GtkLabel centres its glyph in the reserve, xalign 0.5 default).
+ * `font-size: 16px` grows the icons from the 13px row size (user ask) —
+ * the ink stays ~11px tall, under the 14px gauge box, so row heights do
+ * not move. Scoped `.sysload .cpu-ico` (0,2,0) to outrank the
+ * `.sysload label` (0,1,1) 13px rule above — a bare `.cpu-ico` (0,1,0)
+ * would LOSE to it.
+ */
+.sysload .cpu-ico,
+.sysload .mem-ico {
+	font-size: 16px;
+	min-width: 17px;
+	/* T31 follow-up 2: the 16px font's LINE height (~21px) out-grew the
+	 * 14px gauge boxes and pushed the whole bar taller — the ink itself
+	 * is only ~11px. Negative vertical margins hand the excess back so
+	 * the gauge is each row's tallest element again; GTK does not clip
+	 * label ink to its allocation, so the glyph still renders whole. */
+	margin: -4px 0;
+}
+/* T31 follow-up 3: mem's glyph alone sat 1px high against its gauge
+ * (user's eye, then pixel-confirmed) — shift the allocation down 1px by
+ * splitting the same -8px total asymmetrically. The sum is unchanged, so
+ * row heights and the bar's 40px stay put. Same-specificity override:
+ * this rule must FOLLOW the shared one above. */
+.sysload .mem-ico {
+	margin: -3px 0 -5px 0;
 }
 /* T29: `devload`'s second row holds two buttons side by side (`.cell-docker`,
  * `.cell-au`) in a plain horizontal `box` (genconfig.rs's `row-svc`) — the
@@ -351,11 +391,14 @@ window.background,
  * bare `pNN` values on the one node would let one row's transition delete
  * the other row's still-current class). `battery` is still its own
  * module — no collision possible, so it keeps the original bare `pNN`.
- * Each set is scoped to its own row (`.clNN .row-cpu .gauge`, not
+ * Each set is scoped to its own gauge (`.clNN .gauge-cpu`, not a shared
  * `.clNN .gauge`) so `sysload` carrying both a cpu and a memory level
- * class at once fills only the matching row.
+ * class at once fills only the matching gauge (T31: rows are gone, the
+ * per-resource gauge class carries the scoping instead).
  */
-.gauge {
+.gauge,
+.gauge-cpu,
+.gauge-mem {
 	min-width: 24px;
 	min-height: 10px;
 	margin: 0 0 0 4px;
@@ -366,7 +409,7 @@ window.background,
 /* T29 follow-up: battery gets a taller gauge than cpu/memory's rows — it
  * has the bar's full 40px to itself, a ThinkPad-style fuel gauge reads
  * better chunkier. Scoped past the base `.gauge` rule by ancestor class,
- * same specificity trick `.row-cpu .gauge`/`.row-mem .gauge` already use
+ * same ancestor-scoping trick the old row gauges used
  * below, so source order doesn't matter.
  *
  * T30: grown again and given its own border-width/radius — the bar glyph
@@ -374,10 +417,20 @@ window.background,
  * the pill and needs to read as one on its own, not as a small addition
  * next to a glyph. */
 .battery .gauge {
+	/* T31 follow-up 5: same 32x21 outer box as before, restyled — the
+	 * shell dims via border alpha while `opacity: 1` overrides the base
+	 * rule's 0.85 so the LEVEL COLOR renders full strength (it was the
+	 * muddiest thing on the pill). The 1px fill inset lives on
+	 * `.gauge-fill`'s MARGIN, not padding here: `padding` on this node
+	 * raised the module's natural height by 1px and grew the whole bar
+	 * to 41px (survived restarts — a real natural-size overflow). The
+	 * charging pulse still animates `.gauge-fill`'s own opacity. */
 	min-width: 28px;
 	min-height: 17px;
 	border-width: 2px;
-	border-radius: 3px;
+	border-radius: 5px;
+	border-color: alpha(currentColor, 0.55);
+	opacity: 1;
 }
 /* T30: the cap is now a SOLID, FLUSH nub — was a hollow outline held 2px
  * off the body (T29 follow-up below, superseded). With the bar glyph gone
@@ -391,49 +444,75 @@ window.background,
  */
 .gauge-cap {
 	min-width: 4px;
-	min-height: 8px;
+	min-height: 9px;
 	margin: 0;
-	background: currentColor;
+	/* T31 follow-up 5: alpha-matched to the shell border above so body
+	 * and terminal read as one dimmed casing around the bright fill. */
+	background: alpha(currentColor, 0.55);
 	border: none;
-	border-radius: 0 2px 2px 0;
-	opacity: 0.85;
+	border-radius: 0 3px 3px 0;
+	opacity: 1;
 }
-/* T30: charging is now signalled by animating the gauge instead of a bar
+/* T30: charging is signalled by animating the gauge instead of a bar
  * glyph (power.rs no longer sets one) — same idiom as `net-spinner-spin`/
- * `netsec-pulse` above, a plain alternating `opacity` keyframe. `.charging`
- * is pushed by `class_for` (power.rs) unchanged; two classes deep so it
- * outranks the base `.gauge`/`.gauge-cap` `opacity: 0.85` regardless of
- * source order, the same trick `.row-cpu .gauge` below relies on.
+ * `netsec-pulse` above, a plain alternating `opacity` keyframe.
+ * `.charging` is pushed by `class_for` (power.rs) unchanged.
  *
- * ponytail: opacity pulse on the whole gauge, not a fill-level sweep — a
- * sweep would mean animating the `.pNN` `linear-gradient` stop, which
- * collides with the 21 fixed per-level fill rules below. Upgrade to a
- * sweep only if the pulse reads wrong live.
+ * T31: the pulse moved onto `.gauge-fill` — a child box inside `.gauge`
+ * (genconfig.rs) that now carries the `.pNN` level gradient, so only the
+ * charge level flashes; the border and the cap stay solid. Also slowed
+ * 1.2s -> 2.5s: the old rate read as an alert, charging is routine.
  */
 @keyframes bat-charge {
 	to {
-		opacity: 0.3;
+		opacity: 0.25;
 	}
 }
-.battery.charging .gauge,
-.battery.charging .gauge-cap {
-	animation: bat-charge 1.2s ease-in-out infinite alternate;
+.battery.charging .gauge-fill {
+	animation: bat-charge 2.5s ease-in-out infinite alternate;
 }
-/* T29: sysload's two rows sit in a 40px bar with less headroom each than
- * a single-row pill got — shrink the gauge floor to match, but not as far
- * as the original 6px: still touching the top of a taller row read as
- * cramped once the two rows were centred. Placed after the base `.gauge`
- * rule and scoped two classes deep so it wins on specificity regardless
- * of source order; `.battery .gauge` above is untouched, it is still one
- * row in the full 40px.
- *
- * T30: grown 9px -> 12px alongside the row label bump (11px -> 13px,
- * `.sysload label, .devload label` above) — the two-row stack had slack
- * left in the pill's 40px at the old size.
+/* T31: the fill layer itself — sized to `.battery .gauge`'s content box
+ * (28x17, borders sit outside GTK's min sizes) so the `.pNN` gradient
+ * stops span the same width they did when painted on `.gauge` directly.
+ * Radius one step under the gauge's 3px so the fill's corners stay inside
+ * the border.
  */
-.row-cpu .gauge,
-.row-mem .gauge {
+.gauge-fill {
+	min-width: 26px;
+	min-height: 15px;
+	margin: 1px;
+	border-radius: 3px;
+}
+/* T31: cpu/mem gauges in the merged single-row pill — a touch taller
+ * than the 10px base but deliberately slimmer than battery's 17px: these
+ * two read as load meters, battery stays the one chunky fuel gauge. Same
+ * selectors as the base rule above, so source order (this rule later)
+ * decides — kept adjacent to make that dependency visible.
+ */
+.gauge-cpu,
+.gauge-mem {
 	min-height: 12px;
+}
+/* T31 follow-up 2: with the icon labels' negative margins (below) the two
+ * rows sit flush — gauge borders touching read as one block. 1px of
+ * daylight between them (user's pick); the leading 4px comes from the
+ * base rule above and must survive the override. */
+.sysload .gauge-mem {
+	margin: 2px 0 0 4px;
+}
+/* T31 follow-up 4: bias the whole stack 1px upward — it centres in the
+ * 36px pill row (stack natural 30px -> top offset 3), and the user reads
+ * the result as bottom-heavy. Margins must sum to ZERO: a lone positive
+ * bottom margin counts toward the module's natural height and pushed the
+ * bar to 41px (survived a restart — a real natural-size overflow, not
+ * the grown-window artifact). -1/+1 keeps natural at 30 while GTK places
+ * the widget at centre_offset + margin_top = 3 - 1 = 2. `button > box`
+ * is the one config-level node with no class of its own (the vertical
+ * stack box); the child combinator keeps rows and gauges out of the
+ * match. */
+.sysload button > box {
+	margin-top: -1px;
+	margin-bottom: 1px;
 }
 /* T29 follow-up: battery's fill is now a fixed dark-green -> amber -> red
  * ramp by charge level (ThinkPad-style), not `currentColor` — a fuel
@@ -445,86 +524,90 @@ window.background,
  * The gauge's own BORDER keeps `currentColor` (unchanged, above) — only
  * the fill carries the level color, the outline still follows the pill's
  * ordinary state (dim at rest, `@urgent` red border at `.critical`).
+ * T31: the fill paints on the nested `.gauge-fill` child, not `.gauge`
+ * itself — see the charging comment above. Follow-up 5 brightened the
+ * whole ramp (ends were near-invisible dark tones on the dark bar):
+ * linear red #ef5350 -> amber #f9a825 -> green #66bb6a.
  */
-.p0 .gauge { background: linear-gradient(to right, #c62828 0%, transparent 0%); }
-.p5 .gauge { background: linear-gradient(to right, #cb3528 5%, transparent 5%); }
-.p10 .gauge { background: linear-gradient(to right, #d04227 10%, transparent 10%); }
-.p15 .gauge { background: linear-gradient(to right, #d54e27 15%, transparent 15%); }
-.p20 .gauge { background: linear-gradient(to right, #da5b27 20%, transparent 20%); }
-.p25 .gauge { background: linear-gradient(to right, #e06826 25%, transparent 25%); }
-.p30 .gauge { background: linear-gradient(to right, #e57526 30%, transparent 30%); }
-.p35 .gauge { background: linear-gradient(to right, #ea8226 35%, transparent 35%); }
-.p40 .gauge { background: linear-gradient(to right, #ef8e26 40%, transparent 40%); }
-.p45 .gauge { background: linear-gradient(to right, #f49b25 45%, transparent 45%); }
-.p50 .gauge { background: linear-gradient(to right, #f9a825 50%, transparent 50%); }
-.p55 .gauge { background: linear-gradient(to right, #e5a426 55%, transparent 55%); }
-.p60 .gauge { background: linear-gradient(to right, #d09f28 60%, transparent 60%); }
-.p65 .gauge { background: linear-gradient(to right, #bc9b29 65%, transparent 65%); }
-.p70 .gauge { background: linear-gradient(to right, #a8972a 70%, transparent 70%); }
-.p75 .gauge { background: linear-gradient(to right, #94922c 75%, transparent 75%); }
-.p80 .gauge { background: linear-gradient(to right, #7f8e2d 80%, transparent 80%); }
-.p85 .gauge { background: linear-gradient(to right, #6b8a2e 85%, transparent 85%); }
-.p90 .gauge { background: linear-gradient(to right, #57862f 90%, transparent 90%); }
-.p95 .gauge { background: linear-gradient(to right, #428131 95%, transparent 95%); }
-.p100 .gauge { background: linear-gradient(to right, #2e7d32 100%, transparent 100%); }
-/* T29: cpu's own level fill, scoped to its row so memory's independent
- * `mlNN` class (also live on the shared `sysload` node) can never paint
- * this row's gauge. */
-.cl0 .row-cpu .gauge { background: linear-gradient(to right, currentColor 0%, transparent 0%); }
-.cl5 .row-cpu .gauge { background: linear-gradient(to right, currentColor 5%, transparent 5%); }
-.cl10 .row-cpu .gauge { background: linear-gradient(to right, currentColor 10%, transparent 10%); }
-.cl15 .row-cpu .gauge { background: linear-gradient(to right, currentColor 15%, transparent 15%); }
-.cl20 .row-cpu .gauge { background: linear-gradient(to right, currentColor 20%, transparent 20%); }
-.cl25 .row-cpu .gauge { background: linear-gradient(to right, currentColor 25%, transparent 25%); }
-.cl30 .row-cpu .gauge { background: linear-gradient(to right, currentColor 30%, transparent 30%); }
-.cl35 .row-cpu .gauge { background: linear-gradient(to right, currentColor 35%, transparent 35%); }
-.cl40 .row-cpu .gauge { background: linear-gradient(to right, currentColor 40%, transparent 40%); }
-.cl45 .row-cpu .gauge { background: linear-gradient(to right, currentColor 45%, transparent 45%); }
-.cl50 .row-cpu .gauge { background: linear-gradient(to right, currentColor 50%, transparent 50%); }
-.cl55 .row-cpu .gauge { background: linear-gradient(to right, currentColor 55%, transparent 55%); }
-.cl60 .row-cpu .gauge { background: linear-gradient(to right, currentColor 60%, transparent 60%); }
-.cl65 .row-cpu .gauge { background: linear-gradient(to right, currentColor 65%, transparent 65%); }
-.cl70 .row-cpu .gauge { background: linear-gradient(to right, currentColor 70%, transparent 70%); }
-.cl75 .row-cpu .gauge { background: linear-gradient(to right, currentColor 75%, transparent 75%); }
-.cl80 .row-cpu .gauge { background: linear-gradient(to right, currentColor 80%, transparent 80%); }
-.cl85 .row-cpu .gauge { background: linear-gradient(to right, currentColor 85%, transparent 85%); }
-.cl90 .row-cpu .gauge { background: linear-gradient(to right, currentColor 90%, transparent 90%); }
-.cl95 .row-cpu .gauge { background: linear-gradient(to right, currentColor 95%, transparent 95%); }
-.cl100 .row-cpu .gauge { background: linear-gradient(to right, currentColor 100%, transparent 100%); }
+.p0 .gauge-fill { background: linear-gradient(to right, #ef5350 0%, transparent 0%); }
+.p5 .gauge-fill { background: linear-gradient(to right, #f05c4c 5%, transparent 5%); }
+.p10 .gauge-fill { background: linear-gradient(to right, #f16447 10%, transparent 10%); }
+.p15 .gauge-fill { background: linear-gradient(to right, #f26c43 15%, transparent 15%); }
+.p20 .gauge-fill { background: linear-gradient(to right, #f3753f 20%, transparent 20%); }
+.p25 .gauge-fill { background: linear-gradient(to right, #f47e3a 25%, transparent 25%); }
+.p30 .gauge-fill { background: linear-gradient(to right, #f58636 30%, transparent 30%); }
+.p35 .gauge-fill { background: linear-gradient(to right, #f68e32 35%, transparent 35%); }
+.p40 .gauge-fill { background: linear-gradient(to right, #f7972e 40%, transparent 40%); }
+.p45 .gauge-fill { background: linear-gradient(to right, #f8a029 45%, transparent 45%); }
+.p50 .gauge-fill { background: linear-gradient(to right, #f9a825 50%, transparent 50%); }
+.p55 .gauge-fill { background: linear-gradient(to right, #eaaa2c 55%, transparent 55%); }
+.p60 .gauge-fill { background: linear-gradient(to right, #dcac33 60%, transparent 60%); }
+.p65 .gauge-fill { background: linear-gradient(to right, #cdae3a 65%, transparent 65%); }
+.p70 .gauge-fill { background: linear-gradient(to right, #beb041 70%, transparent 70%); }
+.p75 .gauge-fill { background: linear-gradient(to right, #b0b248 75%, transparent 75%); }
+.p80 .gauge-fill { background: linear-gradient(to right, #a1b34e 80%, transparent 80%); }
+.p85 .gauge-fill { background: linear-gradient(to right, #92b555 85%, transparent 85%); }
+.p90 .gauge-fill { background: linear-gradient(to right, #83b75c 90%, transparent 90%); }
+.p95 .gauge-fill { background: linear-gradient(to right, #75b963 95%, transparent 95%); }
+.p100 .gauge-fill { background: linear-gradient(to right, #66bb6a 100%, transparent 100%); }
+/* T29: cpu's own level fill, scoped to its own gauge so memory's
+ * independent `mlNN` class (also live on the shared `sysload` node) can
+ * never paint it. */
+.cl0 .gauge-cpu { background: linear-gradient(to right, currentColor 0%, transparent 0%); }
+.cl5 .gauge-cpu { background: linear-gradient(to right, currentColor 5%, transparent 5%); }
+.cl10 .gauge-cpu { background: linear-gradient(to right, currentColor 10%, transparent 10%); }
+.cl15 .gauge-cpu { background: linear-gradient(to right, currentColor 15%, transparent 15%); }
+.cl20 .gauge-cpu { background: linear-gradient(to right, currentColor 20%, transparent 20%); }
+.cl25 .gauge-cpu { background: linear-gradient(to right, currentColor 25%, transparent 25%); }
+.cl30 .gauge-cpu { background: linear-gradient(to right, currentColor 30%, transparent 30%); }
+.cl35 .gauge-cpu { background: linear-gradient(to right, currentColor 35%, transparent 35%); }
+.cl40 .gauge-cpu { background: linear-gradient(to right, currentColor 40%, transparent 40%); }
+.cl45 .gauge-cpu { background: linear-gradient(to right, currentColor 45%, transparent 45%); }
+.cl50 .gauge-cpu { background: linear-gradient(to right, currentColor 50%, transparent 50%); }
+.cl55 .gauge-cpu { background: linear-gradient(to right, currentColor 55%, transparent 55%); }
+.cl60 .gauge-cpu { background: linear-gradient(to right, currentColor 60%, transparent 60%); }
+.cl65 .gauge-cpu { background: linear-gradient(to right, currentColor 65%, transparent 65%); }
+.cl70 .gauge-cpu { background: linear-gradient(to right, currentColor 70%, transparent 70%); }
+.cl75 .gauge-cpu { background: linear-gradient(to right, currentColor 75%, transparent 75%); }
+.cl80 .gauge-cpu { background: linear-gradient(to right, currentColor 80%, transparent 80%); }
+.cl85 .gauge-cpu { background: linear-gradient(to right, currentColor 85%, transparent 85%); }
+.cl90 .gauge-cpu { background: linear-gradient(to right, currentColor 90%, transparent 90%); }
+.cl95 .gauge-cpu { background: linear-gradient(to right, currentColor 95%, transparent 95%); }
+.cl100 .gauge-cpu { background: linear-gradient(to right, currentColor 100%, transparent 100%); }
 /* T29: memory's own level fill — same reasoning as cpu's set above. */
-.ml0 .row-mem .gauge { background: linear-gradient(to right, currentColor 0%, transparent 0%); }
-.ml5 .row-mem .gauge { background: linear-gradient(to right, currentColor 5%, transparent 5%); }
-.ml10 .row-mem .gauge { background: linear-gradient(to right, currentColor 10%, transparent 10%); }
-.ml15 .row-mem .gauge { background: linear-gradient(to right, currentColor 15%, transparent 15%); }
-.ml20 .row-mem .gauge { background: linear-gradient(to right, currentColor 20%, transparent 20%); }
-.ml25 .row-mem .gauge { background: linear-gradient(to right, currentColor 25%, transparent 25%); }
-.ml30 .row-mem .gauge { background: linear-gradient(to right, currentColor 30%, transparent 30%); }
-.ml35 .row-mem .gauge { background: linear-gradient(to right, currentColor 35%, transparent 35%); }
-.ml40 .row-mem .gauge { background: linear-gradient(to right, currentColor 40%, transparent 40%); }
-.ml45 .row-mem .gauge { background: linear-gradient(to right, currentColor 45%, transparent 45%); }
-.ml50 .row-mem .gauge { background: linear-gradient(to right, currentColor 50%, transparent 50%); }
-.ml55 .row-mem .gauge { background: linear-gradient(to right, currentColor 55%, transparent 55%); }
-.ml60 .row-mem .gauge { background: linear-gradient(to right, currentColor 60%, transparent 60%); }
-.ml65 .row-mem .gauge { background: linear-gradient(to right, currentColor 65%, transparent 65%); }
-.ml70 .row-mem .gauge { background: linear-gradient(to right, currentColor 70%, transparent 70%); }
-.ml75 .row-mem .gauge { background: linear-gradient(to right, currentColor 75%, transparent 75%); }
-.ml80 .row-mem .gauge { background: linear-gradient(to right, currentColor 80%, transparent 80%); }
-.ml85 .row-mem .gauge { background: linear-gradient(to right, currentColor 85%, transparent 85%); }
-.ml90 .row-mem .gauge { background: linear-gradient(to right, currentColor 90%, transparent 90%); }
-.ml95 .row-mem .gauge { background: linear-gradient(to right, currentColor 95%, transparent 95%); }
-.ml100 .row-mem .gauge { background: linear-gradient(to right, currentColor 100%, transparent 100%); }
+.ml0 .gauge-mem { background: linear-gradient(to right, currentColor 0%, transparent 0%); }
+.ml5 .gauge-mem { background: linear-gradient(to right, currentColor 5%, transparent 5%); }
+.ml10 .gauge-mem { background: linear-gradient(to right, currentColor 10%, transparent 10%); }
+.ml15 .gauge-mem { background: linear-gradient(to right, currentColor 15%, transparent 15%); }
+.ml20 .gauge-mem { background: linear-gradient(to right, currentColor 20%, transparent 20%); }
+.ml25 .gauge-mem { background: linear-gradient(to right, currentColor 25%, transparent 25%); }
+.ml30 .gauge-mem { background: linear-gradient(to right, currentColor 30%, transparent 30%); }
+.ml35 .gauge-mem { background: linear-gradient(to right, currentColor 35%, transparent 35%); }
+.ml40 .gauge-mem { background: linear-gradient(to right, currentColor 40%, transparent 40%); }
+.ml45 .gauge-mem { background: linear-gradient(to right, currentColor 45%, transparent 45%); }
+.ml50 .gauge-mem { background: linear-gradient(to right, currentColor 50%, transparent 50%); }
+.ml55 .gauge-mem { background: linear-gradient(to right, currentColor 55%, transparent 55%); }
+.ml60 .gauge-mem { background: linear-gradient(to right, currentColor 60%, transparent 60%); }
+.ml65 .gauge-mem { background: linear-gradient(to right, currentColor 65%, transparent 65%); }
+.ml70 .gauge-mem { background: linear-gradient(to right, currentColor 70%, transparent 70%); }
+.ml75 .gauge-mem { background: linear-gradient(to right, currentColor 75%, transparent 75%); }
+.ml80 .gauge-mem { background: linear-gradient(to right, currentColor 80%, transparent 80%); }
+.ml85 .gauge-mem { background: linear-gradient(to right, currentColor 85%, transparent 85%); }
+.ml90 .gauge-mem { background: linear-gradient(to right, currentColor 90%, transparent 90%); }
+.ml95 .gauge-mem { background: linear-gradient(to right, currentColor 95%, transparent 95%); }
+.ml100 .gauge-mem { background: linear-gradient(to right, currentColor 100%, transparent 100%); }
 
-/* T9: symmetric ~10px edge gap for the two outermost icons (launcher,
- * power) — replaces whatever unstated default gap previously put them at
- * ~30px/~13px from their respective edges (measured live, not derived from
- * any CSS rule that existed before this one).
+/* T9: symmetric ~10px edge gap for the launcher icon — replaces whatever
+ * unstated default gap previously put it at ~30px from the screen edge
+ * (measured live, not derived from any CSS rule that existed before this
+ * one).
  *
  * T23: `#start`/`#end` no longer carry any padding of their own (INV-2
- * above) — `.spark`/`.power` now supply the full ~10px edge gap themselves,
- * as padding (inside the clickable node) rather than margin (dead space
- * outside it). Their own `margin: 0` overrides the shared `#bar #start/
- * #end > *` 2px margin rule — a bare class beating an ID-chain rule on the
- * same property, the same T21-verified engine behaviour the resource-pill
+ * above) — `.spark` supplies the full ~10px edge gap itself, as padding
+ * (inside the clickable node) rather than margin (dead space outside it).
+ * Its own `margin: 0` overrides the shared `#bar #start/#end > *` 2px
+ * margin rule — a bare class beating an ID-chain rule on the same
+ * property, the same T21-verified engine behaviour the resource-pill
  * comment above relies on.
  */
 .spark {
@@ -532,8 +615,13 @@ window.background,
 	padding: 0 10px;
 	margin: 0;
 }
+/* T-unify: inward padding cut from 10px to 4px, matching the icon-pill
+ * group's shared padding (below). INV-2 forbids MARGIN on the outward
+ * (right) corner edge, not padding — but this rule keeps that side at 0
+ * anyway, for the tightest possible fit against the screen edge.
+ */
 .power {
-	padding: 0 10px;
+	padding: 0 0 0 4px;
 	margin: 0;
 }
 
@@ -825,17 +913,25 @@ window.background,
  * now (`sysload`/`devload`), not on a node of their own — `sysload_module()`'s
  * own doc comment explains why. Each rule is scoped to its own row/cell so
  * the sibling row's independent state class (also live on the same
- * ancestor) can't paint it too; `color` still inherits from the row down
- * to its label and `.gauge` (currentColor) exactly as it did when the
- * class sat directly on the pill.
+ * ancestor) can't paint it too; `color` still inherits down to the label
+ * and gauge border (currentColor) exactly as it did when the class sat
+ * directly on the pill.
+ *
+ * T31: sysload's rows are gone (single-row merge) — cpu/mem scope to
+ * their own icon label + gauge instead (`.cpu-ico`/`.gauge-cpu`,
+ * `.mem-ico`/`.gauge-mem`), which covers the same nodes the row selector
+ * used to reach.
  */
 .battery.critical,
-.cpu-warning .row-cpu,
-.mem-warning .row-mem,
+.cpu-warning .cpu-ico,
+.cpu-warning .gauge-cpu,
+.mem-warning .mem-ico,
+.mem-warning .gauge-mem,
 .dok-warning .cell-docker {
 	color: @urgent;
 }
-.mem-swapping .row-mem {
+.mem-swapping .mem-ico,
+.mem-swapping .gauge-mem {
 	color: @warn;
 }
 
@@ -933,11 +1029,13 @@ window.background,
  * T29: `.mic` dropped from this rule — it was reserving a full icon's
  * width for `mic_text` even in the common unmuted case (audio.rs sets it
  * to "" whenever the mic isn't muted), which is exactly what put a ~20px
- * gap between `volume` and `wifi` permanently: `.mic`'s own `margin: 0`
- * below closed the margin side of that gap, but nothing closed the
- * min-width side. `mic` now has no reserve of its own — muting it shifts
- * `wifi` by one icon width, a discrete, user-caused event, the same trade
- * T26/T28 already accepted for `music`'s own width jump.
+ * gap between `volume` and `wifi` permanently. `mic` now has no reserve of
+ * its own — muting it shifts `wifi` by one icon width, a discrete,
+ * user-caused event, the same trade T26/T28 already accepted for `music`'s
+ * own width jump. (T-unify: `.mic`'s padding, the other half of that old
+ * gap-closing, now comes from the shared icon-pill rule below, not a
+ * standalone `margin: 0` — this comment used to point at a rule that no
+ * longer exists.)
  */
 .volume {
 	min-width: 20px;
@@ -976,7 +1074,6 @@ window.background,
 .inhibit,
 .bluetooth {
 	border-radius: 9999px;
-	padding: 0 6px;
 }
 .spark:hover,
 .colorpicker:hover,
@@ -986,22 +1083,9 @@ window.background,
 .bluetooth:hover {
 	background-color: alpha(@bar_fg, 0.08);
 }
-/* T23: tools-drawer trigger (genconfig.rs::tools_module()) — same circular
- * hover target as the icon-button group above, styled separately since it's
- * a nested widget, not a sibling module, inside `.tools`. No `on_click_left`
- * of its own (hover alone drives the reveal); the revealed children below
- * keep their own existing `.colorpicker`/`.darkmode`/`.snip` hover rules
- * (icon-button group above) unchanged. */
-.tools-trigger {
-	border-radius: 9999px;
-	padding: 0 6px;
-}
-.tools-trigger:hover {
-	background-color: alpha(@bar_fg, 0.08);
-}
 
 /* T28: tray-drawer trigger (genconfig.rs::tray_toggle_module()) — same
- * circular hover target as `.tools-trigger` above, its sibling module
+ * circular hover target as the icon-button group above, a sibling module
  * rather than a nested widget (the tray drawer has no nested-widgets
  * mechanism to reuse — `tray_module()`'s own doc comment explains why). */
 .traytoggle {
@@ -1026,10 +1110,10 @@ window.background,
  * the neutral tint every other icon button uses. Ported from
  * waybar/style.css:139-148.
  *
- * T23: `padding` dropped from this rule — `.power`'s own corner-bleed rule
- * (above, near `#bar #start`/`#bar #end`) already sets it to 10px; a second
- * declaration here at equal specificity would win by source order and
- * flatten it back to 6px.
+ * T23/T-unify: `padding` is deliberately NOT declared on this rule — `.power`'s
+ * own corner-bleed rule (above, near `#bar #start`/`#bar #end`) already sets
+ * it (now `0 0 0 4px`, inward-only); a second `padding` declaration here at
+ * equal specificity would win by source order and flatten it back.
  */
 .power {
 	border-radius: 9999px;
@@ -1039,85 +1123,24 @@ window.background,
 	color: @urgent;
 }
 
-/* T21: user-reported the net cluster (wifi/eth/netsec) too tight and
- * bluetooth/power too far apart. Live ink measurement confirmed both:
- * wifi-eth-netsec at 5px (no padding rule, bare 4px row margin only),
- * netsec-bluetooth and bluetooth-power at 15-17px (`.power`'s own 6px
- * padding above, stacked on the same 4px margin).
+/* T-unify: one shared padding for every icon-only `end`-pill. Before this
+ * rule the group carried five different values by accident of history —
+ * 6px (colorpicker/darkmode/snip/inhibit/bluetooth, above), 4px
+ * (wifi/eth/netsec), 3px (a later `bluetooth`/`power` rule that overrode
+ * the 6px), or none at all (music/volume/mic/net-spinner/hotspot/remote).
+ * T21 and T29 then patched the resulting gaps with a negative `margin-left`
+ * on `.wifi` and a positive one on `.bluetooth` — compensation for the
+ * mismatch, not a rule of their own. A single 4px padding on the whole
+ * group removes the mismatch, so both patches go with it.
  *
- * An `#bar #end > *`-scoped rule (2 ID selectors) was tried first to carry
- * both fixes from one declaration, on the assumption an ID selector
- * outranks a bare class the way it does in W3C CSS. Live-verified false in
- * this engine with a `load-css` probe: a bare `.power { background: red }`
- * painted over an `#bar #end > * { background: lime }` loaded after it —
- * the bare class won regardless of order, and padding measured live
- * afterward had gone UP (stacked with `.power`'s existing 6px, not
- * overridden by it) instead of down. Bare class beats `#bar #id > *` here,
- * opposite of the W3C model — a new entry in this file's own run of
- * specificity surprises (T14, T18). Fixed with bare classes only, which
- * `.power`'s own working rule already proved reaches the real node.
+ * `.power` stays out of this list: it is the bar's outward corner (INV-2,
+ * docs/statusbar-layout.md) and keeps its own inward-only padding, set on
+ * its corner-bleed rule near `#bar #start`/`#bar #end` above.
  */
-.wifi, .eth, .netsec {
+.colorpicker, .darkmode, .snip, .inhibit, .music, .volume, .mic,
+.net-spinner, .wifi, .eth, .netsec, .hotspot, .remote, .bluetooth {
 	padding: 0 4px;
 }
-/* T29 follow-up: closes the gap between `volume` and `wifi` to match
- * `inhibit`-to-`volume` (user-reported: the former looked visibly wider).
- * Measured live with a throwaway `background-color` probe on `.inhibit`/
- * `.volume`/`.wifi` (box edges, not glyph ink, which varies too much per
- * icon shape to compare directly): the real, margin-only gap here was
- * 12px against 8px on the reference pair.
- *
- * Root cause, confirmed against the vendored source: EVERY module,
- * `show_if` or not, is wrapped in its own anonymous `GtkRevealer` before
- * being appended to `#end` (`modules/mod.rs::add_events`, called from
- * `ModuleFactory::create` for every module unconditionally) — and that
- * `Revealer::builder()` call sets no name and no CSS class at all. So
- * `#bar #end > *` always targets the REVEALER, never the module's own
- * classed widget one level down, and a class-based margin rule (bare or
- * `#bar #end`-qualified, both tried and both measured to do nothing) can
- * never override the revealer's `margin: 0 2px` — it lives on a different
- * node and ADDS to it instead of competing for the same property slot.
- * Confirmed live by watching a NEGATIVE bare-class margin actually move
- * the box (proving addition, not a cascade fight) where `margin-left: 0`
- * (already the widget's own default) measured no change at all — T21's
- * own "bare class beats `#bar #end > *`" finding was about PADDING, which
- * lives on the widget itself; margin's story here is the opposite AND
- * different again, not simply T14's inverse.
- *
- * `volume`→`wifi` has TWO such revealers in between (`mic`, `net-spinner`
- * — every module gets one, `show_if` or not) against inhibit→volume's
- * ONE (`music`), so it pays the fixed 4px-per-revealer tax twice: exactly
- * the measured 4px difference. The only lever left on a classed widget is
- * a negative margin, subtracting from the tax it stacks with rather than
- * replacing it.
- */
-.wifi {
-	margin-left: -4px;
-}
-.bluetooth, .power {
-	padding: 0 3px;
-}
-/* T29 follow-up: +1px between `remote` and `bluetooth` specifically —
- * `margin-left`, not the shared `padding: 0 3px` above, so `bluetooth`'s
- * own right side (its gap to `power`) is untouched. A bare class DOES
- * reach this margin (`.wifi`'s own comment, above, has the full story of
- * why: every module sits inside its own unclassed `GtkRevealer`, and a
- * classed margin rule lives on the widget one level in, ADDING to the
- * revealer's fixed `margin: 0 2px` rather than overriding it) — so the
- * value here is the DELTA to add on top of that existing 2px, not the
- * final total: `1px`, not `3px`, gives +1px over the default. */
-.bluetooth {
-	margin-left: 1px;
-}
-/* `mic` (genconfig.rs) renders an empty label whenever the source isn't
- * muted (audio.rs::refresh sets `mic_text` to ""). T29 dropped its
- * `min-width: 20px` reserve (see `.volume`'s own comment, above) — that
- * was the real fix for the volume-wifi gap this pill used to sit inside.
- * `mic`'s own default margin was already 0, so no margin rule is declared
- * for it here — `.wifi`'s own comment (above) is where the GtkRevealer
- * wrapping / margin-tax story actually lives, for the module that did
- * need one.
- */
 
 /* T8d: compressed. The real width cost was never the 2px margin below —
  * it was GTK4's default `button` padding/min-width/min-height baked onto
@@ -1176,8 +1199,8 @@ window.background,
  * selector) still supplied a background, border and box-shadow the
  * icon-button rule below never set — that was the "unnecessary
  * background". Added the bare class here to reach the button node
- * directly. `padding` is deliberately NOT reset here: the icon-button rule
- * below already gives `.bluetooth` `padding: 0 6px` at equal (class)
+ * directly. `padding` is deliberately NOT reset here: the shared icon-pill
+ * rule below already gives `.bluetooth` `padding: 0 4px` at equal (class)
  * specificity, and this rule sits later in the file — a shared `padding: 0`
  * here would win the source-order tiebreak and flatten that padding back
  * to nothing, so it stays on its own line scoped to `.custom button` only.

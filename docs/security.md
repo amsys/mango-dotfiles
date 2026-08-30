@@ -42,6 +42,33 @@ The pattern exists because the common alternative — a `NOPASSWD` rule that
 points at a script inside `$HOME` — is `NOPASSWD: ALL` in practice: the
 user (or anything running as the user) can rewrite the script.
 
+## Fingerprint prompt notification
+
+`system/fprint-notify/` shows a mako notification with a fingerprint glyph
+and the name of whatever asked, so a reader that lights up on its own is
+always explained.
+
+`pam_exec.so` is the only mechanism that carries the asker's identity. It
+exports `PAM_SERVICE` to the program it runs; a D-Bus watch on fprintd
+cannot do this, because an unprivileged user cannot become a bus monitor,
+and fprintd's API has no concept of "sudo" against "swaylock" anyway.
+
+The helper runs as root inside the auth stack of sudo, so it never uses
+`set -e`, always exits 0, and hands the notification to a detached
+`runuser` child. A wedged notification daemon must not delay a sudo
+password prompt.
+
+`/etc/pam.d/swaylock` is deliberately excluded. swaylock covers the whole
+screen, so a notification behind it is invisible.
+
+`install.sh` does not edit `/etc/pam.d/sudo`. Add this line by hand, above
+the existing `auth sufficient pam_fprintd.so` line, with a root shell open
+in a second terminal:
+
+```
+auth optional pam_exec.so quiet /usr/local/bin/mango-fprint-notify
+```
+
 ## Known trade-offs
 
 - `system/rapl/` opens the RAPL energy counters to the `wheel` group. RAPL

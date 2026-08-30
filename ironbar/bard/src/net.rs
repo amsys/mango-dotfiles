@@ -775,7 +775,6 @@ impl Net {
             .find(|l| l.starts_with("yes:"))
             .unwrap_or("")
             .to_string();
-        let wifi_ssid = wifi_ssid(&wifi_row);
 
         let link_show = run("ip", &["-d", "-j", "link", "show"]).await;
         let link_json: Value = serde_json::from_str(&link_show).unwrap_or(Value::Null);
@@ -826,73 +825,29 @@ impl Net {
             _ => self.wifi_dev.clone(),
         };
 
-        let title_text = verdict_headline(verdict);
-        let mut tip = String::new();
-        tip.push_str(&sect("\u{f033e}", "Link"));
-        match sec {
+        // The last three forks the body needs. Each keeps the guard that
+        // used to sit around it inside the old inline builder, so a wired
+        // link still never runs `iw` and a v6 default route still never
+        // counts addresses.
+        let mfp = match sec {
             "open" | "wep" | "wpa" => {
-                tip.push_str(&row(&format!("{} · {}", esc(wifi_ssid), self.wifi_dev)));
-                tip.push('\n');
-                match sec {
-                    "open" => {
-                        tip.push_str(&row(&bad(
-                            "Open — no encryption, anyone nearby can read this",
-                        )));
-                    }
-                    "wep" => tip.push_str(&row(&bad("WEP — broken, treat it as open"))),
-                    _ => tip.push_str(&dim(wifi_seclabel(&wifi_row))),
-                }
-                tip.push('\n');
                 let dump = run("iw", &["dev", &self.wifi_dev, "station", "dump"]).await;
-                let mfp = dump_field(&dump, "MFP:", 2).unwrap_or("unknown");
-                tip.push_str(&dim(&format!(
-                    "Management-frame protection (802.11w): {mfp}"
-                )));
-                tip.push('\n');
+                dump_field(&dump, "MFP:", 2).unwrap_or("unknown").to_string()
             }
-            "wired" => {
-                tip.push_str(&row(&format!("Ethernet · {}", self.eth_dev)));
-                tip.push('\n');
-                tip.push_str(&dim("Wired — the link itself is not encrypted"));
-                tip.push('\n');
-            }
-            _ => {
-                tip.push_str(&dim("no uplink"));
-                tip.push('\n');
-            }
-        }
-
-        tip.push_str(&sect("\u{f059f}", "Routes"));
-        if !v4.is_empty() {
-            let gw = gw_for(&v4, "-4").await;
-            let gws = gw.map(|g| format!(" → {g}")).unwrap_or_default();
-            if tuns.iter().any(|t| t == &v4) {
-                tip.push_str(&row(&format!("IPv4  {}  via {v4}{gws}", good("✓"))));
-            } else {
-                tip.push_str(&row(&format!(
-                    "IPv4  {}  via {v4}{gws} — not tunnelled",
-                    bad("✗")
-                )));
-            }
-            tip.push('\n');
+            _ => String::new(),
+        };
+        let gw4 = if v4.is_empty() {
+            None
         } else {
-            tip.push_str(&dim("IPv4  no default route"));
-            tip.push('\n');
-        }
-        if !v6.is_empty() {
-            let gw6 = gw_for(&v6, "-6").await;
-            let gws = gw6.map(|g| format!(" → {g}")).unwrap_or_default();
-            if tuns.iter().any(|t| t == &v6) {
-                tip.push_str(&row(&format!("IPv6  {}  via {v6}{gws}", good("✓"))));
-            } else {
-                tip.push_str(&row(&format!(
-                    "IPv6  {}  via {v6}{gws} — leaking outside the tunnel",
-                    bad("✗")
-                )));
-            }
-            tip.push('\n');
+            gw_for(&v4, "-4").await
+        };
+        let gw6 = if v6.is_empty() {
+            None
         } else {
-            let n6 = parse_addr_count6(
+            gw_for(&v6, "-6").await
+        };
+        let v6_addrs = if v6.is_empty() {
+            parse_addr_count6(
                 &run(
                     "ip",
                     &[
@@ -900,151 +855,35 @@ impl Net {
                     ],
                 )
                 .await,
-            );
-            if n6 > 0 {
-                tip.push_str(&dim(&format!(
-                    "IPv6  address on {uplink} but no default route — unused, not leaking"
-                )));
-            } else {
-                tip.push_str(&dim("IPv6  none"));
-            }
-            tip.push('\n');
-        }
-
-        if !conflicts.is_empty() {
-            tip.push_str(&sect("\u{f062c}", "Route conflicts"));
-            for c in &conflicts {
-                match c.kind {
-                    crate::routes::ConflictKind::Tie => {
-                        tip.push_str(&row(&format!(
-                            "{}  two default routes both at metric {}",
-                            mono(&bad("✗")),
-                            c.metric_a
-                        )));
-                        tip.push('\n');
-                        tip.push_str(&dim(&format!(
-                            "{} and {} — which one wins is arbitrary, set distinct metrics",
-                            c.dev_a, c.dev_b
-                        )));
-                        tip.push('\n');
-                    }
-                    crate::routes::ConflictKind::Identical => {
-                        tip.push_str(&row(&format!(
-                            "{}  {} is announced by both {} and {}",
-                            mono(&bad("✗")),
-                            c.dst_a,
-                            c.dev_a,
-                            c.dev_b
-                        )));
-                        tip.push('\n');
-                        tip.push_str(&dim(&format!(
-                            "metric {} beats {}, so {} never sees this traffic",
-                            c.metric_a, c.metric_b, c.dev_b
-                        )));
-                        tip.push('\n');
-                    }
-                    crate::routes::ConflictKind::Shadow => {
-                        tip.push_str(&row(&format!(
-                            "{}  {} via {} sits inside {} via {}",
-                            mono(&warn("!")),
-                            c.dst_a,
-                            c.dev_a,
-                            c.dst_b,
-                            c.dev_b
-                        )));
-                        tip.push('\n');
-                        tip.push_str(&dim(&format!(
-                            "the more specific route wins, so that range leaves via {}, not {}",
-                            c.dev_a, c.dev_b
-                        )));
-                        tip.push('\n');
-                    }
-                }
-            }
-        }
-
-        tip.push_str(&sect("\u{f099d}", "Tunnels"));
-        let trows = tunnel_rows(&link_json).await;
-        if trows.is_empty() {
-            tip.push_str(&dim("none active"));
-            tip.push('\n');
+            )
         } else {
-            for (dev, kind, nm) in &trows {
-                let ty = match kind.as_str() {
-                    "wireguard" => "WireGuard",
-                    "tun" => "OpenVPN",
-                    other => other,
-                };
-                let carries = if dev == &v4 && tuns.iter().any(|t| t == &v4) {
-                    format!(" {}", good("— carries the default route"))
-                } else {
-                    String::new()
-                };
-                let label = if nm.is_empty() { "unmanaged" } else { nm };
-                tip.push_str(&row(&format!("{} · {dev} · {ty}{carries}", esc(label))));
-                tip.push('\n');
-            }
-            let carry = [&v4, &v6]
-                .into_iter()
-                .any(|d| !d.is_empty() && tuns.iter().any(|t| t == d));
-            if !carry {
-                tip.push_str(&row(&warn("split tunnel — carries no default route")));
-                tip.push('\n');
-            }
-        }
+            0
+        };
 
-        tip.push_str(&sect("\u{f01d6}", "Resolvers"));
-        if nameservers.is_empty() {
-            tip.push_str(&dim("none configured"));
-            tip.push('\n');
-        } else {
-            for ns in &nameservers {
-                let d = resolver_dev(ns).await;
-                let nsp = mono(&format!("{ns:<20}"));
-                if d == "local" {
-                    tip.push_str(&row(&format!("{}  {nsp} local stub", warn("~"))));
-                } else if tuns.iter().any(|t| t == &d) {
-                    tip.push_str(&row(&format!("{}  {nsp} {d}", good("✓"))));
-                } else {
-                    tip.push_str(&row(&format!(
-                        "{}  {nsp} {d} — plaintext to the local network",
-                        bad("✗")
-                    )));
-                }
-                tip.push('\n');
-            }
-            let sd = parse_searchdomains(&resolv);
-            if !sd.is_empty() {
-                tip.push_str(&dim(&format!("search {}", esc(&sd))));
-                tip.push('\n');
-            }
-        }
-
-        if verdict == Verdict::Portal {
-            tip.push_str(&sect("\u{f02fc}", "Portal"));
-            tip.push_str(&dim(&format!(
-                "connectivity: {conn} — click to open the login page"
-            )));
-            tip.push('\n');
-        }
-
-        if verdict == Verdict::Blocked {
-            tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
-            tip.push_str(&dim("outgoing traffic denied by default — dialling the tunnel"));
-            tip.push('\n');
-        }
-
-        if let Some(name) = guard_state.trim().strip_prefix("vpn:") {
-            tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
-            tip.push_str(&dim(&format!("protected · {}", esc(name))));
-            tip.push('\n');
-        } else if guard_state.trim() == "unsecured" {
-            tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
-            tip.push_str(&dim("guard off — traffic is leaving in the clear"));
-            tip.push('\n');
-        }
-
-        set_titled(vars, "sec_tip", title_text, tip.trim_end_matches('\n').to_string());
+        let facts = SecFacts {
+            verdict,
+            sec,
+            wifi_row,
+            wifi_dev: self.wifi_dev.clone(),
+            eth_dev: self.eth_dev.clone(),
+            mfp,
+            v4,
+            gw4,
+            v6,
+            gw6,
+            v6_addrs,
+            uplink,
+            tuns,
+            conflicts,
+            trows: tunnel_rows(&link_json).await,
+            nameservers,
+            dns_devs,
+            search: parse_searchdomains(&resolv),
+            conn,
+            guard_state,
+        };
+        let title_text = verdict_headline(facts.verdict);
+        set_titled(vars, "sec_tip", title_text, sec_tip_body(&facts));
     }
 
     /// Detail popup for the `wifi` pill — full port of net.sh's
@@ -1408,6 +1247,312 @@ fn verdict_headline(v: Verdict) -> &'static str {
         Verdict::Secure => "Encrypted end to end",
         Verdict::Blocked => "Nothing can leave — connecting a tunnel",
     }
+}
+
+/// Every fact the `netsec` popup body shows. `refresh_sec_tip` gathers it
+/// in one pass, then [`sec_tip_body`] renders it. The split exists so the
+/// popup format has a test: the render is pure string work, the gathering
+/// forks `ip`, `nmcli` and `iw` and cannot run in a test.
+struct SecFacts {
+    verdict: Verdict,
+    /// [`link_sec_pure`]'s verdict: `open`/`wep`/`wpa`/`wired`/`none`.
+    sec: &'static str,
+    /// Raw `ACTIVE:SECURITY:SSID` row — [`wifi_ssid`] and [`wifi_seclabel`]
+    /// both read it, so the row travels instead of two copies of itself.
+    wifi_row: String,
+    wifi_dev: String,
+    eth_dev: String,
+    /// `MFP:` from `iw station dump`, empty on a non-wifi link.
+    mfp: String,
+    v4: String,
+    gw4: Option<String>,
+    v6: String,
+    gw6: Option<String>,
+    /// Global v6 addresses on [`Self::uplink`], counted only when there is
+    /// no v6 default route.
+    v6_addrs: usize,
+    uplink: String,
+    /// Tunnel devices, for the "does this route ride a tunnel" test.
+    tuns: Vec<String>,
+    conflicts: Vec<crate::routes::Conflict>,
+    /// `(dev, kind, nm-name)` per tunnel, from [`tunnel_rows`].
+    trows: Vec<(String, String, String)>,
+    nameservers: Vec<String>,
+    /// The device each entry of [`Self::nameservers`] is reached through,
+    /// same order.
+    dns_devs: Vec<String>,
+    search: String,
+    conn: String,
+    guard_state: String,
+}
+
+/// Body of the `netsec` detail popup.
+///
+/// T33 layout: the verdict leads, then every section states its status in
+/// one leading marker column — `✓` safe, `✗` in the clear, `~` unverified,
+/// `·` absent — and states its explanation ONCE, as a trailing dim line.
+/// Before T33 each row carried its own trailing prose clause ("— not
+/// tunnelled", "— plaintext to the local network") repeated per row, which
+/// read as a wall of sentences at popup font size. The markers hold the
+/// same facts in a column the eye can scan. Route conflicts keep their
+/// two-line marker + dim shape: that section is rare and each entry really
+/// is a different explanation, not a repeat.
+///
+/// Line budget: this popup may not outgrow the screen. The worst realistic
+/// link (wifi, one tunnel, three resolvers, no conflicts) renders 19 lines
+/// — `sec_tip_body_stays_in_the_popup_line_budget` holds that.
+fn sec_tip_body(f: &SecFacts) -> String {
+    let mut tip = String::new();
+    // `{marker}  {label}` in the mono face. The proportional face gives
+    // ✓/✗/~/· different widths and the column drifts by a row.
+    let col = |marker: &str, label: &str| mono(&format!("{marker}  {label}"));
+    let (ok, no, unk, off) = (good("✓"), bad("✗"), warn("~"), "·".to_string());
+
+    // The title widget says this too, but it sits above the popup
+    // separator; the eye starts on the body, so the verdict leads there.
+    let head = verdict_headline(f.verdict);
+    let banner = format!("{}  {head}", f.verdict.icon());
+    tip.push_str(&row(&match f.verdict {
+        Verdict::Secure => good(&banner),
+        Verdict::Portal | Verdict::Conflict | Verdict::Blocked => warn(&banner),
+        _ => bad(&banner),
+    }));
+    tip.push('\n');
+
+    tip.push_str(&sect("\u{f033e}", "Link"));
+    match f.sec {
+        "open" | "wep" | "wpa" => {
+            tip.push_str(&row(&format!(
+                "{} · {}",
+                esc(wifi_ssid(&f.wifi_row)),
+                f.wifi_dev
+            )));
+            tip.push('\n');
+            match f.sec {
+                "open" => {
+                    tip.push_str(&row(&format!(
+                        "{}  {}",
+                        mono(&no),
+                        bad("Open — no encryption, anyone nearby can read this")
+                    )));
+                    tip.push('\n');
+                    tip.push_str(&dim(&format!("frame protection (802.11w) {}", f.mfp)));
+                }
+                "wep" => {
+                    tip.push_str(&row(&format!(
+                        "{}  {}",
+                        mono(&no),
+                        bad("WEP — broken, treat it as open")
+                    )));
+                    tip.push('\n');
+                    tip.push_str(&dim(&format!("frame protection (802.11w) {}", f.mfp)));
+                }
+                // One line, not two: the encryption label and the 802.11w
+                // state are both properties of the same healthy link.
+                _ => tip.push_str(&dim(&format!(
+                    "{} · frame protection (802.11w) {}",
+                    wifi_seclabel(&f.wifi_row),
+                    f.mfp
+                ))),
+            }
+            tip.push('\n');
+        }
+        "wired" => {
+            tip.push_str(&row(&format!("Ethernet · {}", f.eth_dev)));
+            tip.push('\n');
+            tip.push_str(&dim("Wired — the link itself is not encrypted"));
+            tip.push('\n');
+        }
+        _ => {
+            tip.push_str(&dim("no uplink"));
+            tip.push('\n');
+        }
+    }
+
+    tip.push_str(&sect("\u{f059f}", "Routes"));
+    // No dim footnote here: when a family is in the clear the marker says
+    // so AND the banner above already names the same state.
+    if f.v4.is_empty() {
+        tip.push_str(&row(&format!("{}  no default route", col(&off, "IPv4"))));
+    } else {
+        let m = if f.tuns.contains(&f.v4) { &ok } else { &no };
+        let gws = f.gw4.as_ref().map(|g| format!(" → {g}")).unwrap_or_default();
+        tip.push_str(&row(&format!("{}  {}{gws}", col(m, "IPv4"), f.v4)));
+    }
+    tip.push('\n');
+    if !f.v6.is_empty() {
+        let m = if f.tuns.contains(&f.v6) { &ok } else { &no };
+        let gws = f.gw6.as_ref().map(|g| format!(" → {g}")).unwrap_or_default();
+        tip.push_str(&row(&format!("{}  {}{gws}", col(m, "IPv6"), f.v6)));
+    } else if f.v6_addrs > 0 {
+        // ✓, not ·: an address with no default route cannot leak. That is
+        // what the old "— unused, not leaking" clause said.
+        tip.push_str(&row(&format!(
+            "{}  address on {}, no default route",
+            col(&ok, "IPv6"),
+            f.uplink
+        )));
+    } else {
+        tip.push_str(&row(&format!("{}  none", col(&off, "IPv6"))));
+    }
+    tip.push('\n');
+
+    if !f.conflicts.is_empty() {
+        tip.push_str(&sect("\u{f062c}", "Route conflicts"));
+        for c in &f.conflicts {
+            match c.kind {
+                crate::routes::ConflictKind::Tie => {
+                    tip.push_str(&row(&format!(
+                        "{}  two default routes both at metric {}",
+                        mono(&no),
+                        c.metric_a
+                    )));
+                    tip.push('\n');
+                    tip.push_str(&dim(&format!(
+                        "{} and {} — which one wins is arbitrary, set distinct metrics",
+                        c.dev_a, c.dev_b
+                    )));
+                    tip.push('\n');
+                }
+                crate::routes::ConflictKind::Identical => {
+                    tip.push_str(&row(&format!(
+                        "{}  {} is announced by both {} and {}",
+                        mono(&no),
+                        c.dst_a,
+                        c.dev_a,
+                        c.dev_b
+                    )));
+                    tip.push('\n');
+                    tip.push_str(&dim(&format!(
+                        "metric {} beats {}, so {} never sees this traffic",
+                        c.metric_a, c.metric_b, c.dev_b
+                    )));
+                    tip.push('\n');
+                }
+                crate::routes::ConflictKind::Shadow => {
+                    tip.push_str(&row(&format!(
+                        "{}  {} via {} sits inside {} via {}",
+                        mono(&warn("!")),
+                        c.dst_a,
+                        c.dev_a,
+                        c.dst_b,
+                        c.dev_b
+                    )));
+                    tip.push('\n');
+                    tip.push_str(&dim(&format!(
+                        "the more specific route wins, so that range leaves via {}, not {}",
+                        c.dev_a, c.dev_b
+                    )));
+                    tip.push('\n');
+                }
+            }
+        }
+    }
+
+    tip.push_str(&sect("\u{f099d}", "Tunnels"));
+    if f.trows.is_empty() {
+        tip.push_str(&dim("none active"));
+        tip.push('\n');
+    } else {
+        for (dev, kind, nm) in &f.trows {
+            let ty = match kind.as_str() {
+                "wireguard" => "WireGuard",
+                "tun" => "OpenVPN",
+                other => other,
+            };
+            // ✓ marks the tunnel the default route rides — the old
+            // "— carries the default route" clause, now a column.
+            let m = if dev == &f.v4 && f.tuns.contains(&f.v4) {
+                &ok
+            } else {
+                &off
+            };
+            let label = if nm.is_empty() { "unmanaged" } else { nm };
+            tip.push_str(&row(&format!(
+                "{}  {} · {dev} · {ty}",
+                mono(m),
+                esc(label)
+            )));
+            tip.push('\n');
+        }
+        let carry = [&f.v4, &f.v6]
+            .into_iter()
+            .any(|d| !d.is_empty() && f.tuns.contains(d));
+        if !carry {
+            tip.push_str(&dim("split tunnel — no default route rides it"));
+            tip.push('\n');
+        }
+    }
+
+    tip.push_str(&sect("\u{f01d6}", "Resolvers"));
+    if f.nameservers.is_empty() {
+        tip.push_str(&dim("none configured"));
+        tip.push('\n');
+    } else {
+        let mut plain = 0usize;
+        for (ns, d) in f.nameservers.iter().zip(&f.dns_devs) {
+            let m = if d == "local" {
+                &unk
+            } else if f.tuns.contains(d) {
+                &ok
+            } else {
+                plain += 1;
+                &no
+            };
+            let tail = if d == "local" { "local stub" } else { d };
+            tip.push_str(&row(&format!(
+                "{}  {tail}",
+                col(m, &format!("{ns:<20}"))
+            )));
+            tip.push('\n');
+        }
+        // Stated once for the section, not appended to every ✗ row.
+        if plain > 0 {
+            let s = if plain == 1 { "" } else { "s" };
+            tip.push_str(&dim(&format!(
+                "{plain} resolver{s} plaintext to the local network"
+            )));
+            tip.push('\n');
+        }
+        if !f.search.is_empty() {
+            tip.push_str(&dim(&format!("search {}", esc(&f.search))));
+            tip.push('\n');
+        }
+    }
+
+    if f.verdict == Verdict::Portal {
+        tip.push_str(&sect("\u{f02fc}", "Portal"));
+        tip.push_str(&row(&format!(
+            "{}  connectivity {} — click to open the login page",
+            mono(&unk),
+            f.conn
+        )));
+        tip.push('\n');
+    }
+
+    if f.verdict == Verdict::Blocked {
+        tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
+        tip.push_str(&row(&format!(
+            "{}  outgoing traffic denied by default — dialling the tunnel",
+            mono(&unk)
+        )));
+        tip.push('\n');
+    }
+
+    if let Some(name) = f.guard_state.trim().strip_prefix("vpn:") {
+        tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
+        tip.push_str(&row(&format!("{}  protected · {}", mono(&ok), esc(name))));
+        tip.push('\n');
+    } else if f.guard_state.trim() == "unsecured" {
+        tip.push_str(&sect(&IC_LOCK.to_string(), "vpnguard"));
+        tip.push_str(&row(&format!(
+            "{}  guard off — traffic is leaving in the clear",
+            mono(&no)
+        )));
+        tip.push('\n');
+    }
+
+    tip.trim_end_matches('\n').to_string()
 }
 
 /// The 3rd colon-separated field of an `ACTIVE:SECURITY:SSID` row from
@@ -2321,5 +2466,113 @@ mod tests {
         let json = r#"[{"addr_info":[{"local":"fd00::1"},{"local":"fd00::2"}]}]"#;
         assert_eq!(parse_addr_count6(json), 2);
         assert_eq!(parse_addr_count6("[]"), 0);
+    }
+
+    // ---- sec_tip_body(): T33 popup redesign
+    //
+    // The daemon cannot run in a test (every fact comes from a fork), so
+    // the fixture below is the input `refresh_sec_tip` would have built.
+
+    /// A wifi box on a WireGuard tunnel, three resolvers, one of them
+    /// plaintext — the busiest link that is still an everyday one, and the
+    /// case the popup height budget is set by.
+    fn busy_facts() -> SecFacts {
+        SecFacts {
+            verdict: Verdict::DnsLeak,
+            sec: "wpa",
+            wifi_row: "yes:WPA2:Fon WLAN".to_string(),
+            wifi_dev: "wlo1".to_string(),
+            eth_dev: "enp3s0".to_string(),
+            mfp: "unknown".to_string(),
+            v4: "wg_hetzner".to_string(),
+            gw4: Some("10.0.254.1".to_string()),
+            v6: String::new(),
+            gw6: None,
+            v6_addrs: 2,
+            uplink: "wlo1".to_string(),
+            tuns: vec!["wg_hetzner".to_string()],
+            conflicts: Vec::new(),
+            trows: vec![(
+                "wg_hetzner".to_string(),
+                "wireguard".to_string(),
+                "hetzner".to_string(),
+            )],
+            nameservers: vec![
+                "10.0.254.1".to_string(),
+                "127.0.0.53".to_string(),
+                "192.168.5.1".to_string(),
+            ],
+            dns_devs: vec![
+                "wg_hetzner".to_string(),
+                "local".to_string(),
+                "wlo1".to_string(),
+            ],
+            search: "lan".to_string(),
+            conn: "full".to_string(),
+            // vpnguard active is an everyday state on this machine (the bar
+            // carries a permanent kill-switch pill) — an empty guard_state
+            // here would leave the budget test blind to the section it
+            // adds. See sec_tip_body_stays_in_the_popup_line_budget.
+            guard_state: "vpn:office".to_string(),
+        }
+    }
+
+    /// The popup may not outgrow the screen, and this one sits nearest the
+    /// limit of any pill's. `busy_facts` carries an active vpnguard state
+    /// (an everyday case here, not an edge case — the bar always shows a
+    /// kill-switch pill) so this covers the realistic tallest render, not
+    /// just the shortest one that happens to omit a whole section. 24
+    /// lines is the ceiling for that render.
+    #[test]
+    fn sec_tip_body_stays_in_the_popup_line_budget() {
+        let tip = sec_tip_body(&busy_facts());
+        assert!(
+            tip.lines().count() <= 24,
+            "sec_tip is {} lines:\n{tip}",
+            tip.lines().count()
+        );
+    }
+
+    /// T33's rule: a section explains itself once, in one dim line, instead
+    /// of repeating a prose clause on every row it applies to.
+    #[test]
+    fn sec_tip_body_explains_a_section_once_not_per_row() {
+        let mut f = busy_facts();
+        f.nameservers.push("192.168.5.2".to_string());
+        f.dns_devs.push("wlo1".to_string());
+        let tip = sec_tip_body(&f);
+        assert_eq!(tip.matches("plaintext").count(), 1, "{tip}");
+        assert!(tip.contains("2 resolvers plaintext"), "{tip}");
+        // Both offending rows still carry their own marker.
+        assert_eq!(tip.matches("192.168.5.").count(), 2, "{tip}");
+    }
+
+    /// The conditional sections — route conflicts, portal, vpnguard — are
+    /// otherwise unreachable in a test. One pass renders all three.
+    #[test]
+    fn sec_tip_body_renders_every_conditional_section() {
+        use crate::routes::{Conflict, ConflictKind};
+        let conflict = |kind, dst_a: &str, dev_a: &str, dev_b: &str| Conflict {
+            dst_a: dst_a.to_string(),
+            dev_a: dev_a.to_string(),
+            metric_a: 50,
+            dst_b: "10.0.0.0/8".to_string(),
+            dev_b: dev_b.to_string(),
+            metric_b: 100,
+            kind,
+        };
+        let mut f = busy_facts();
+        f.verdict = Verdict::Portal;
+        f.conflicts = vec![
+            conflict(ConflictKind::Tie, "default", "wlo1", "enp3s0"),
+            conflict(ConflictKind::Identical, "10.0.0.0/8", "wg_hetzner", "wlo1"),
+            conflict(ConflictKind::Shadow, "10.8.0.0/24", "tun0", "wg_hetzner"),
+        ];
+        f.conn = "portal".to_string();
+        f.guard_state = "vpn:hetzner".to_string();
+        let tip = sec_tip_body(&f);
+        for section in ["Route conflicts", "Portal", "vpnguard"] {
+            assert!(tip.contains(section), "no {section} section in:\n{tip}");
+        }
     }
 }

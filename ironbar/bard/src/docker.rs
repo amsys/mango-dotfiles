@@ -154,20 +154,40 @@ fn class_for(rows: &[Row]) -> &'static str {
 
 // ------------------------------------------------------------------ popup
 
+/// Writes the pending "N stopped" line for the project that just ended and
+/// resets the counter. Writes nothing when the project had no stopped rows.
+fn flush_stopped(tip: &mut String, count: &mut usize) {
+    if *count == 0 {
+        return;
+    }
+    tip.push_str(&dim(&format!("{count} stopped")));
+    tip.push('\n');
+    *count = 0;
+}
+
 /// docker.sh:133-153's `TIP=$(...)` build. `PREV` starts as `""` in the
 /// shell (not "no group yet") — replicated verbatim here via
 /// `prev: String`, including the edge case that follows from it: if every
 /// row is unlabeled (`project == ""` for the whole machine), the very first
 /// group's header is suppressed too, since `"" != ""` is false. That is the
 /// original script's own behaviour, not a port bug.
+///
+/// ironbar's popup has no scroll widget, so a tip taller than the output
+/// renders as an empty popup. A machine with many old compose stacks has
+/// far more stopped containers than running ones, and a stopped container
+/// says nothing a count does not. So each project collapses its stopped
+/// rows into one line. A *restarting* row is not collapsed: it is what
+/// turns the pill orange (`class_for`), so the popup must name it.
 fn build_tip(rows: &[Row], stopped: usize, projects: usize) -> String {
     let mut tip = String::new();
     let mut prev = String::new();
+    let mut group_stopped = 0usize;
     for r in grouped(rows.to_vec()) {
         if r.name.is_empty() {
             continue;
         }
         if r.project != prev {
+            flush_stopped(&mut tip, &mut group_stopped);
             let label = if r.project.is_empty() {
                 "standalone"
             } else {
@@ -175,6 +195,10 @@ fn build_tip(rows: &[Row], stopped: usize, projects: usize) -> String {
             };
             tip.push_str(&projhdr(&esc(label)));
             prev = r.project.clone();
+        }
+        if r.state != "running" && r.state != "restarting" {
+            group_stopped += 1;
+            continue;
         }
         let label = if r.service.is_empty() {
             &r.name
@@ -193,6 +217,7 @@ fn build_tip(rows: &[Row], stopped: usize, projects: usize) -> String {
             esc(&r.image),
         ));
     }
+    flush_stopped(&mut tip, &mut group_stopped);
 
     tip.push('\n');
     let plural = if projects == 1 { "" } else { "s" };
@@ -406,6 +431,39 @@ loose-1|restarting|Restarting (1) 5 seconds ago|busybox||";
         assert!(tip.contains("2 stopped"));
         assert!(tip.contains("2 projects"));
         assert!(!tip.ends_with('\n'), "trailing newlines must be trimmed");
+        // old-postgres-1 is exited, so it collapses into a count. loose-1 is
+        // restarting, so it keeps its own row.
+        assert!(!tip.contains("old-postgres-1"));
+        assert!(tip.contains("loose-1"));
+    }
+
+    // ironbar has no scroll widget in a popup, so a tip taller than the
+    // output renders as an empty popup. Stopped containers are what grow
+    // without bound on a machine with old compose stacks, so this guard
+    // fails if they ever get a line each again.
+    #[test]
+    fn build_tip_collapses_stopped_containers_per_project() {
+        let mut raw = String::new();
+        for p in 0..4 {
+            raw.push_str(&format!("p{p}-web-1|running|Up 3 minutes|nginx|p{p}|web\n"));
+            for c in 0..8 {
+                raw.push_str(&format!(
+                    "p{p}-old-{c}|exited|Exited (0) 2 days ago|busybox|p{p}|old{c}\n"
+                ));
+            }
+        }
+        let rows = parse_rows(&raw);
+        assert_eq!(rows.len(), 36);
+        let tip = build_tip(&rows, 32, 4);
+        let lines = tip.lines().count();
+        assert!(lines < 25, "docker tip grew to {lines} lines:\n{tip}");
+        assert_eq!(
+            tip.matches("8 stopped").count(),
+            4,
+            "each project needs its own collapsed count"
+        );
+        assert!(tip.contains("p0-web-1") || tip.contains("web"));
+        assert!(!tip.contains("p0-old-3"), "stopped rows must be collapsed");
     }
 
     #[test]

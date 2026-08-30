@@ -345,6 +345,14 @@ struct DetailInputs<'a> {
     dimm_rows: &'a [(String, String, String, String)],
 }
 
+/// ironbar's popup has no scroll widget, so a tip taller than the output
+/// renders as an empty popup. This cap keeps the RSS list bounded whatever
+/// `ps` returns. T32: mem_tip shares its popup (and screen-height budget)
+/// with cpu_tip under the sysload module — see cpu.rs's `MAX_TOP` comment
+/// for the live-measured ~43-44 combined-line ceiling this and cpu.rs's
+/// own caps stay under.
+const MAX_TOP_RSS: usize = 3;
+
 /// Port of memory.sh:153-203's tooltip build. Pure and fixture-testable —
 /// everything forked or read from `/proc`/the DMI cache is gathered by
 /// `refresh_detail` first.
@@ -423,7 +431,7 @@ fn build_tip(d: &DetailInputs) -> String {
         .max()
         .unwrap_or(1)
         .max(1);
-    for (rss, pid, comm) in d.top_rss {
+    for (rss, pid, comm) in d.top_rss.iter().take(MAX_TOP_RSS) {
         let rpct = pct_used(*rss, top_rss_max);
         let share = pct_used(*rss, d.total);
         let meter = mono(&format!(
@@ -440,10 +448,17 @@ fn build_tip(d: &DetailInputs) -> String {
 
     if !d.dimm_rows.is_empty() {
         tip.push_str(&sect(&IC_HW.to_string(), "Hardware"));
+        // One line per DIMM, not two — the part number moves onto the
+        // same row as a dim trailing clause (T32: the sysload popup
+        // shares its screen-height budget with cpu_tip in the same
+        // popup, so every section here is under the same pressure the
+        // per-core grid was cut for in cpu.rs).
         for (size, kind, speed, part) in d.dimm_rows {
-            tip.push_str(&row(&esc(&format!("{size} {kind}  ·  {speed}"))));
-            tip.push('\n');
-            tip.push_str(&dim(&esc(part)));
+            tip.push_str(&row(&format!(
+                "{}  <span foreground=\"{C_DIM}\">{}</span>",
+                esc(&format!("{size} {kind}  ·  {speed}")),
+                esc(part)
+            )));
             tip.push('\n');
         }
     }
@@ -635,4 +650,57 @@ mod tests {
         assert!(tip.contains("kitty"));
         assert!(tip.contains("4242"));
     }
+
+    // ironbar has no scroll widget in a popup, so a tip taller than the
+    // output renders as an empty popup. This guard fails if a later change
+    // lets `ps` output length reach the tip again. `dimm_rows` carries this
+    // machine's real 2-slot count, not `&[]` — an earlier version of this
+    // test left it empty "because it's machine data", which meant the
+    // guard never saw the Hardware section's real cost and could pass
+    // while the actual worst case (with DIMMs populated) grew past it.
+    #[test]
+    fn build_tip_caps_the_rss_list() {
+        let top: Vec<(i64, i64, String)> = (0..50)
+            .map(|i| (1_048_576 - i, i, format!("proc{i}")))
+            .collect();
+        let dimms: Vec<(String, String, String, String)> = (0..2)
+            .map(|_| {
+                (
+                    "16 GiB".to_string(),
+                    "DDR5".to_string(),
+                    "5600 MT/s".to_string(),
+                    "CT16G56C46S5".to_string(),
+                )
+            })
+            .collect();
+        let tip = build_tip(&DetailInputs {
+            pct: 39,
+            total: 48_932_736,
+            avail: 30_000_000,
+            cached: 20_000_000,
+            buffers: 500_000,
+            shmem: 1_000_000,
+            dirty: 4096,
+            writeback: 0,
+            swap_total: 4_194_300,
+            swap_free: 4_194_300,
+            swap_desc: "swapfile · file".to_string(),
+            min_rate: 300,
+            maj_rate: 5,
+            pgfault: 1000,
+            pgmajfault: 40,
+            top_rss: &top,
+            dimm_rows: &dimms,
+        });
+        let lines = tip.lines().count();
+        // T32: mem_tip shares its popup (and screen-height budget) with
+        // cpu_tip under the sysload module — see cpu.rs's `MAX_TOP` comment
+        // for the live-measured ~43-44 combined-line ceiling. cpu_tip's own
+        // worst case is 18 lines, so mem_tip must stay clear of ~25-26.
+        assert!(lines < 26, "memory tip grew to {lines} lines:\n{tip}");
+        assert!(tip.contains("proc2"), "3 RSS rows expected");
+        assert!(!tip.contains("proc3"), "4th RSS row must be dropped");
+        assert!(tip.contains("Hardware"), "DIMM section must render");
+    }
 }
+

@@ -16,7 +16,7 @@
 
 use crate::cmd::is_active;
 use crate::mango::CLASS_PREFIX;
-use crate::tooltip::{barico, kv, sect, set_titled};
+use crate::tooltip::{barico, dim, dot, good, kv, set_titled};
 use crate::vars::Vars;
 
 const IC_REMOTE: char = '\u{f0379}';
@@ -26,6 +26,43 @@ const KDECONNECT_UNIT: &str = "kdeconnectd.service";
 
 fn class_key(module: &str) -> String {
     format!("{CLASS_PREFIX}{module}")
+}
+
+fn runtime_dir() -> std::path::PathBuf {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(runtime).join("mango-remote")
+}
+
+/// Path `remote.sh --privacy-watch` drops while it has blanked every output
+/// for a connected VNC client (see that script's own header). Existence
+/// alone is the signal — no need to parse its contents here.
+fn privacy_state_path() -> std::path::PathBuf {
+    runtime_dir().join("wlopm-state")
+}
+
+/// `<monitor> tag <n>`, read from `remote.sh`'s own `pulled-origin` file (its
+/// header names the format: `"<monitor>\t<tag>\n"`), or `None` if nothing is
+/// pulled. wayvnc is pinned to the virtual output now (`--vnc-exec`), so the
+/// old `Screen` row this replaced — which output wayvnc *captures* — always
+/// read `HEADLESS-<n>` and told the user nothing; which physical tag is
+/// pulled onto it is the fact worth showing.
+fn pulled_line() -> Option<String> {
+    let raw = std::fs::read_to_string(runtime_dir().join("pulled-origin")).ok()?;
+    let (mon, tag) = raw.trim().split_once('\t')?;
+    Some(format!("{mon} tag {tag}"))
+}
+
+/// On/off cell for a service row: a coloured dot plus the word, the same
+/// dot-then-text shape docker.rs uses for container state. A dot alone is
+/// ambiguous at a glance; the word alone carries no colour. "off" stays
+/// uncoloured on purpose — remote access down is the safe resting state,
+/// not a fault, so `bad()` red would read as an alarm for normal use.
+fn state(up: bool) -> String {
+    if up {
+        format!("{} {}", dot("good"), good("on"))
+    } else {
+        format!("{} off", dot("dim"))
+    }
 }
 
 pub struct Remote {
@@ -48,12 +85,27 @@ impl Remote {
         vars.set("remote_text", barico(IC_REMOTE));
 
         let mut tip = String::new();
-        tip.push_str(&sect("", "VPN tunnel + hotspot only"));
-        tip.push_str(&kv("VNC", if self.vnc_up { "on" } else { "off" }));
-        tip.push_str(&kv(
-            "KDE Connect",
-            if self.kdeconnect_up { "on" } else { "off" },
-        ));
+        tip.push_str(&kv("VNC", &state(self.vnc_up)));
+        if self.vnc_up {
+            // Own row, not a "(dark)" suffix on Pulled: blanked outputs are
+            // a separate fact from which tag is pulled, and the reader needs
+            // to see at a glance that the local screens are off.
+            tip.push_str(&kv(
+                "Screens",
+                &if privacy_state_path().exists() {
+                    format!("{} blanked", dot("warn"))
+                } else {
+                    format!("{} live", dot("good"))
+                },
+            ));
+            tip.push_str(&kv(
+                "Pulled",
+                &pulled_line().unwrap_or_else(|| "nothing".to_string()),
+            ));
+        }
+        tip.push_str(&kv("KDE Conn", &state(self.kdeconnect_up)));
+        tip.push('\n');
+        tip.push_str(&dim("VPN tunnel + hotspot only"));
         set_titled(
             vars,
             "remote_tip",
@@ -85,5 +137,20 @@ mod tests {
         let r = Remote::new();
         assert!(!r.vnc_up);
         assert!(!r.kdeconnect_up);
+    }
+
+    #[test]
+    fn state_colours_on_but_leaves_off_neutral() {
+        use crate::tooltip::{C_DIM, C_GOOD};
+        let on = state(true);
+        assert!(on.contains("on"));
+        assert!(on.contains(&C_GOOD.to_string()), "on is green: {on}");
+        let off = state(false);
+        assert!(off.contains("off"));
+        assert!(off.contains(&C_DIM.to_string()), "off dot is dim: {off}");
+        assert!(
+            !off.contains(&crate::tooltip::C_BAD.to_string()),
+            "off is the safe resting state, never red: {off}"
+        );
     }
 }

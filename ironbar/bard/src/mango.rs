@@ -171,10 +171,20 @@ pub fn window_text(client: Option<&Value>) -> String {
         .and_then(|c| c.get("title"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    // kitty/repo-title.py prefixes every kitty window title with its repo
+    // label ("<repo> · <title>") — split it back out so the dim first line
+    // reads the repo instead of the redundant "kitty" appid. Gated on
+    // appid=="kitty": other apps' real titles can contain " · " too
+    // (Firefox tabs do) and must not be split.
+    let (line1, title) = if appid == "kitty" {
+        title.split_once(" · ").unwrap_or((appid, title))
+    } else {
+        (appid, title)
+    };
     let shown = truncate_ellipsis(title, 45);
     let mut out = format!(
         "<span size=\"small\" alpha=\"70%\">{}</span>",
-        crate::tooltip::esc(appid)
+        crate::tooltip::esc(line1)
     );
     if !shown.is_empty() {
         out.push('\n');
@@ -456,6 +466,12 @@ pub struct Mango {
     last_clients_raw: Option<String>,
     monitors_doc: Value,
     clients_doc: Value,
+    /// `(name, slug)` pairs `apply()` emitted keys for last time it ran —
+    /// compared against the live monitor list on every call so a monitor
+    /// mango has torn down (a destroyed virtual output) gets its keys
+    /// dropped via `Vars::forget` instead of retried forever. See that
+    /// prune loop at the top of `apply()`.
+    last_mons: Vec<(String, String)>,
 }
 
 impl Mango {
@@ -467,6 +483,7 @@ impl Mango {
             last_clients_raw: None,
             monitors_doc: Value::Null,
             clients_doc: Value::Null,
+            last_mons: Vec::new(),
         }
     }
 
@@ -515,7 +532,7 @@ impl Mango {
     /// documents. Idempotent by construction — `Vars::set` only dirties a
     /// key whose value actually changed (see `apply_is_idempotent` below),
     /// which is layer two of the eco-invariant dedup.
-    pub fn apply(&self, vars: &mut Vars) {
+    pub fn apply(&mut self, vars: &mut Vars) {
         let Some(mons) = self.monitors_doc.get("monitors").and_then(Value::as_array) else {
             return;
         };
@@ -533,6 +550,27 @@ impl Mango {
             .map(String::from)
             .collect();
         let slugs = slugs_for(&names);
+
+        // A monitor from last run that isn't in the live list any more (a
+        // virtual output mango has destroyed, or — in principle — a
+        // physical one unplugged) has its keys dropped outright, not left
+        // to retry: they can never ACK again. Keyed off the live monitor
+        // list, not off which keys got set this pass — a monitor in
+        // overview mode `continue`s before its tag keys are touched, and
+        // must not be mistaken for a vanished one.
+        for (name, slug) in &self.last_mons {
+            if names.contains(name) {
+                continue;
+            }
+            vars.forget(&var_tags(slug));
+            vars.forget(&var_ov(slug));
+            for tag in 1..=TAG_COUNT {
+                vars.forget(&class_key(name, tag));
+                vars.forget(&var_lbl(slug, tag));
+                vars.forget(&var_tip(slug, tag));
+            }
+        }
+        self.last_mons = names.iter().cloned().zip(slugs.iter().cloned()).collect();
 
         for (mo, slug) in mons.iter().zip(&slugs) {
             let Some(name) = mo.get("name").and_then(Value::as_str) else {
@@ -779,6 +817,44 @@ mod tests {
     }
 
     #[test]
+    fn apply_forgets_keys_for_a_monitor_that_disappears() {
+        // Regression test for T-freeze-2026-08-29: a virtual output's
+        // `ws-HEADLESS-*` keys kept retrying every 5s for 17+ minutes after
+        // `remote.sh --toggle` tore it down. `apply()` must drop them, not
+        // leave them for `Vars`' cooldown to keep replaying forever.
+        const ONE_MON: &str = r#"{"monitors":[{"name":"eDP-1","active_tags":[2],"tags":[
+			{"index":1,"is_active":false,"is_urgent":false,"client_count":2},
+			{"index":2,"is_active":true,"is_urgent":false,"client_count":0}]}]}"#;
+
+        let mut m = Mango::new();
+        let mut vars = Vars::new();
+        m.ingest_monitors(TAGS); // eDP-1 + DP-1
+        m.ingest_clients(CLIENTS);
+        m.apply(&mut vars);
+        while let Some((k, _)) = vars
+            .peek_dirty()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        {
+            vars.ack(&k);
+        }
+        assert!(vars.live_value(&class_key("DP-1", 1)).is_some());
+
+        m.ingest_monitors(ONE_MON); // DP-1 is gone
+        m.apply(&mut vars);
+
+        assert_eq!(
+            vars.live_value(&class_key("DP-1", 1)),
+            None,
+            "DP-1's class key must be dropped, not just cooling down"
+        );
+        assert!(
+            !vars.has_dirty(),
+            "a forgotten monitor's keys must not sit in `dirty` either, and \
+             eDP-1's own unchanged values must not have been re-dirtied"
+        );
+    }
+
+    #[test]
     fn window_text_formats_appid_and_title() {
         let none = window_text(None);
         assert!(none.contains("Desktop"));
@@ -799,6 +875,25 @@ mod tests {
         let text = window_text(Some(&c));
         assert!(text.contains("a&amp;b"));
         assert!(text.contains("x&lt;y"));
+
+        // kitty/repo-title.py prefixes kitty windows with "<repo> · title" —
+        // split back into two dim/title lines instead of showing raw appid.
+        let c: Value = serde_json::from_str(
+            r#"{"appid":"kitty","title":"mango-dotfiles/ironbar · task"}"#,
+        )
+        .unwrap();
+        let text = window_text(Some(&c));
+        assert!(text.starts_with(
+            "<span size=\"small\" alpha=\"70%\">mango-dotfiles/ironbar</span>"
+        ));
+        assert!(text.ends_with("task"));
+
+        // Non-kitty apps keep their raw appid even if the title happens to
+        // contain " · " — Firefox tab titles do, and must not be split.
+        let c: Value = serde_json::from_str(r#"{"appid":"firefox","title":"a · b"}"#).unwrap();
+        let text = window_text(Some(&c));
+        assert!(text.contains("firefox"));
+        assert!(text.contains("a · b"));
     }
 
     #[test]

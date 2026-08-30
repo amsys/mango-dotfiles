@@ -2,13 +2,17 @@
 //! "packages are waiting" is glance-worthy, unlike the tray icon it replaces
 //! on the bar (Nextcloud/ZapZap/NordVPN stay tray-only).
 //!
-//! No fork, ever. `arch-update --tray` (already exec-once'd, config.conf)
-//! writes its whole state to plain files under
-//! `$XDG_STATE_HOME/arch-update/` on every check — `tray_icon` in place
-//! (`echo ... > tray_icon`, lib/common.sh:209/215, so `IN_CLOSE_WRITE` on
-//! that one inode is the correct watch, same reasoning as powermode.rs's
-//! own doc comment) — so watching that one file and re-reading its two
-//! count files alongside it is the whole collector.
+//! No fork, ever. `arch-update.timer`'s own `arch-update --check` (the
+//! package's own systemd user unit — T32 dropped the redundant tray applet
+//! from config.conf's exec-once list, this bar pill replaces it) writes its
+//! whole state to plain files under `$XDG_STATE_HOME/arch-update/` on every
+//! check — `tray_icon` in place (`echo ... > tray_icon`, lib/common.sh:
+//! 209/215, so `IN_CLOSE_WRITE` on that one inode is the correct watch,
+//! same reasoning as powermode.rs's own doc comment) — so watching that one
+//! file and re-reading its two count files alongside it is the whole
+//! collector. `lib/tray.sh` (the tray's own bootstrap) only `touch`es these
+//! files if missing; it never writes real content, so it was never this
+//! collector's actual data source even when the tray was still running.
 
 use crate::mango::CLASS_PREFIX;
 use crate::sys::FileWatch;

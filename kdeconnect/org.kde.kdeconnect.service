@@ -1,0 +1,18 @@
+# Disables D-Bus activation of kdeconnectd. A user-level service file in
+# $XDG_DATA_HOME/dbus-1/services/ overrides the system file
+# /usr/share/dbus-1/services/org.kde.kdeconnect.service per the D-Bus
+# spec. Exec=/usr/bin/false makes each activation attempt fail, so a bus
+# call to org.kde.kdeconnect no longer starts the daemon. The caller gets
+# an activation error and continues.
+#
+# Why: Chromium (KDE browser integration) calls this bus name at each
+# Chromium start (live-confirmed 2026-08-30). Without this override that
+# call starts kdeconnectd outside systemd/kdeconnectd.service, which
+# defeats the "off means nothing listening" design
+# (system/remote/README.md) and holds the single-instance bus name, so
+# the remote-access bar toggle cannot start its own instance. This is
+# the D-Bus twin of org.kde.kdeconnect.daemon.desktop's autostart
+# override in this directory.
+[D-BUS Service]
+Name=org.kde.kdeconnect
+Exec=/usr/bin/false

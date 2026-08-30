@@ -13,6 +13,9 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/wayvnc [::]:5900
+# --vnc-exec reads the virtual output name recorded by remote.sh --toggle
+# and execs wayvnc with -o <that output>. The remote user works on the
+# virtual output; the physical panels stay blanked by wayvnc-privacy.
+ExecStart=%h/.config/ironbar/scripts/remote.sh --vnc-exec
 Restart=on-failure
 RestartSec=2
