@@ -1,0 +1,16 @@
+# Placed at /usr/lib/systemd/system/mango-totp.service inside the initramfs
+# only, by the mango-totp mkinitcpio hook — never on the host.
+[Unit]
+Description=Show the TPM TOTP on the plymouth LUKS prompt
+DefaultDependencies=no
+ConditionPathExists=/run/plymouth/pid
+After=plymouth-start.service systemd-udev-trigger.service
+Before=initrd-switch-root.target
+Conflicts=initrd-switch-root.target shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mango-totp
+
+[Install]
+WantedBy=sysinit.target

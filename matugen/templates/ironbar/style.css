@@ -739,6 +739,35 @@ window.background,
 	border-radius: 9999px;
 }
 
+/* T-headless-strip: the HEADLESS bar's remote-control strip
+ * (genconfig.rs::build()'s HEADLESS branch). `.ws-home` carries `.ws` too
+ * (same pill shape, box model, hover/transition rules above) — this rule
+ * only adds the accent tint that marks it as the one fixed, non-numbered
+ * pill leading the strip. Only `color`, no `font-size`, so unlike `.ws-mon`
+ * below it needs no separate `label` selector — there's no universal `*`
+ * rule fighting inheritance on `color` (T17's trap, above, is specific to
+ * `font-family`/`font-size`), and `.ws.active`/`.ws.urgent` already prove a
+ * bare class colours a nested pill label fine.
+ *
+ * `.ws-mon` is the plain screen-name label ahead of each physical
+ * monitor's nine pills. No margin rule of its own — the generic
+ * `#bar #start > *` rule above already gives every direct child (this one
+ * included) the same `0 2px` gap the pills get. It does set `font-size`,
+ * so it needs the `label` twin per T17: `genconfig.rs::mon_label()` is the
+ * same bare-label-in-a-custom-module shape as `.spark` above, and that
+ * shape needs both the module class AND its label child listed, or the
+ * label node's own direct match against the universal `* { font-size:
+ * 15px }` rule (line 62) wins over the smaller size meant for it. */
+.ws-home {
+	color: @accent;
+}
+.ws-mon,
+.ws-mon label {
+	padding: 0 6px;
+	color: alpha(@bar_fg_dim, 0.60);
+	font-size: 13px;
+}
+
 /* Window title / brightness scroll target. */
 .win {
 	color: @bar_fg;

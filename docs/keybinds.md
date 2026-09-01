@@ -44,6 +44,10 @@ nudges (`movewin`); PgUp/PgDown/Home are unbound letters-aside, and a
 headless VNC client that only sends modifiers plus Tab/Esc/PgUp/PgDown/Home
 needs to reach these three without a letter key.
 
+These three keybinds are the no-mouse path. With a mouse, the headless
+bar's own remote-control strip does the same pulls/restore by click — see
+[bar.md](bar.md)'s note on the `HEADLESS-*` bar.
+
 ## Screenshots
 
 All go through `mango/scripts/screenshot.sh`, so the save directory lives in

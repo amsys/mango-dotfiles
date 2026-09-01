@@ -1,24 +1,34 @@
 #!/bin/sh
 # Remote-access toggle for ironbar's remote module: wayvnc (screen) +
 # kdeconnectd (input/clipboard/files) + mango-keepawake (idle/lid block) +
-# wayvnc-privacy (panel blanking), started/stopped together. Reachable only
+# wayvnc-privacy (panel blanking). The left click starts and stops the VNC
+# set; the right click starts and stops kdeconnectd alone. Reachable only
 # on wg_hetzner and the mango hotspot — see system/remote/install.sh for the
 # ufw rules and system/remote/README.md for why. None of these units is
 # enabled at login; this is the only way they run.
 #
-#   --toggle          on-click-left  — start/stop the whole group. Also
-#                      creates a virtual (headless) output for wayvnc to
-#                      capture, and destroys it again on stop. The remote
-#                      user works on that output; the physical panels stay
-#                      blanked by --privacy-watch. See --pull. Also
-#                      regenerates and reloads the bar config, so the
-#                      virtual output gets a bar of its own on start and
-#                      loses it again on stop.
+#   --toggle-vnc      on-click-left — start/stop wayvnc + wayvnc-privacy +
+#                      mango-keepawake. Also creates a virtual (headless)
+#                      output for wayvnc to capture, and destroys it again
+#                      on stop. The remote user works on that output; the
+#                      physical panels stay blanked by --privacy-watch. See
+#                      --pull. Start also starts kdeconnectd if it is off.
+#                      Stop leaves kdeconnectd running — turn it off with
+#                      --toggle-kdeconnect. Before it destroys the virtual
+#                      output, stop moves every window still on that output
+#                      to the first physical monitor; mango does not move
+#                      them itself, so they become unreachable. Stop then
+#                      turns the physical panels back on. Both directions
+#                      regenerate and reload the bar config, so the virtual
+#                      output gets a bar of its own on start and loses it
+#                      again on stop.
+#   --toggle-kdeconnect  on-click-right — start/stop kdeconnectd only. No
+#                      output changes, so the bar config stays valid.
 #   --pull M T         move tag T of physical monitor M onto the virtual
 #                      output, so the remote user can see and use it. A tag
 #                      pulled earlier goes back to its own monitor first —
 #                      the virtual output holds one pulled tag at a time.
-#   --pull-next        on-click-right / SUPER+CTRL+Next — pull the tag after
+#   --pull-next        SUPER+CTRL+Next — pull the tag after
 #                      the one currently pulled, cycling across both
 #                      physical monitors' occupied tags. Reachable from a
 #                      client that can only send modifiers + Tab/Esc/
@@ -30,7 +40,7 @@
 #                      Shared by --pull-next/--pull-prev and by hand-testing.
 #   --restore          send every pulled client back to its own monitor
 #                      and tag. Safe to run twice. Runs on VNC client
-#                      disconnect (--privacy-watch) and on toggle-off.
+#                      disconnect (--privacy-watch) and on VNC toggle-off.
 #   --vnc-exec         wayvnc.service ExecStart — exec wayvnc, capturing
 #                      the virtual output when one is recorded
 #   --privacy-watch    wayvnc-privacy.service ExecStart — blanks every
@@ -59,7 +69,9 @@ PULLED="$RUNTIME_DIR/pulled-clients"
 # this is the one place that origin survives, for both to merge back in.
 PULLED_ORIGIN="$RUNTIME_DIR/pulled-origin"
 
-UNITS="wayvnc.service kdeconnectd.service wayvnc-privacy.service"
+# The VNC set only. kdeconnectd runs on its own switch — see
+# --toggle-kdeconnect.
+VNC_UNITS="wayvnc.service wayvnc-privacy.service"
 
 # Candidate (monitor, tag) pairs for --pull-next/--pull-prev/--pull-list:
 # every tag occupied on a physical monitor, from `all-clients` — never
@@ -81,16 +93,47 @@ candidates() {
 }
 
 case "${1:-}" in
---toggle)
+--toggle-vnc)
 	if systemctl --user is-active --quiet wayvnc.service; then
 		if [ -e "$KEEPAWAKE_MARK" ]; then
 			systemctl --user stop mango-keepawake.service
 			rm -f "$KEEPAWAKE_MARK"
 		fi
 		"$0" --restore
-		systemctl --user stop $UNITS || notify-send -a mango-bard "Remote access" "Failed to stop"
+		# --restore returns only the clients it pulled. A window opened on
+		# the virtual output, or moved there by hand, stays there. mango
+		# does not move clients when an output goes away, so such a window
+		# is lost after the destroy below. Move every one of them to the
+		# first physical monitor first.
+		VOUT=$(cat "$VOUT_FILE" 2>/dev/null || true)
+		# The cache file can be gone after a crashed earlier run while the
+		# output still exists. Discover the name again, or the destroy
+		# below orphans the windows on it.
+		[ -n "$VOUT" ] || VOUT=$(mmsg get all-monitors 2>/dev/null |
+			jq -r '.monitors[].name | select(startswith("HEADLESS"))' | head -n1)
+		TARGET=$(mmsg get all-monitors 2>/dev/null |
+			jq -r '.monitors[].name | select(startswith("HEADLESS") | not)' | head -n1)
+		if [ -n "$VOUT" ] && [ -n "$TARGET" ]; then
+			mmsg get all-clients 2>/dev/null |
+				jq -r --arg v "$VOUT" '.clients[] | select(.monitor == $v) | .id | tostring' |
+				while IFS= read -r id; do
+					# tagmon, and the trailing 1 to keep the client's own
+					# tags — same reason as --pull.
+					mmsg dispatch "tagmon,$TARGET,1" client,"$id" >/dev/null 2>&1
+				done
+		fi
+		systemctl --user stop $VNC_UNITS || notify-send -a mango-bard "Remote access" "Failed to stop"
 		mmsg dispatch destroy_all_virtual_output >/dev/null 2>&1
 		rm -f "$VOUT_FILE"
+		# Turn the panels on when the saved blank state is still there —
+		# that means the privacy unit's ExecStopPost did not restore them.
+		# It stays as healing for a crashed watcher. No state file means
+		# nothing here blanked the panels: leave them alone, so an
+		# eco-driven off does not light them with nobody at the machine.
+		if [ -e "$WLOPM_STATE" ]; then
+			wlopm --on '*' >/dev/null 2>&1
+			rm -f "$WLOPM_STATE"
+		fi
 	else
 		mkdir -p "$RUNTIME_DIR" && chmod 0700 "$RUNTIME_DIR"
 		# A crashed earlier toggle can leave a virtual output behind. Clear
@@ -114,7 +157,12 @@ case "${1:-}" in
 			touch "$KEEPAWAKE_MARK"
 			systemctl --user start mango-keepawake.service
 		fi
-		OUT=$(systemctl --user start $UNITS 2>&1) || notify-send -a mango-bard "Remote access" "Failed to start: $OUT"
+		OUT=$(systemctl --user start $VNC_UNITS 2>&1) || notify-send -a mango-bard "Remote access" "Failed to start: $OUT"
+		# A remote user needs the phone side too, so start kdeconnectd if
+		# its own switch is off. VNC off does not stop it again.
+		if ! systemctl --user is-active --quiet kdeconnectd.service; then
+			OUT=$(systemctl --user start kdeconnectd.service 2>&1) || notify-send -a mango-bard "Remote access" "Failed to start KDE Connect: $OUT"
+		fi
 	fi
 	# Best-effort: the virtual output just appeared or disappeared, so the
 	# generated bar config is stale either way. `ironbar reload` re-parses
@@ -137,6 +185,16 @@ case "${1:-}" in
 	# to miss the rebuild in practice.
 	mango-bard gen-config 2>/dev/null && ironbar reload >/dev/null 2>&1 &&
 		sleep 0.5 && mango-bard refresh resync -q 2>/dev/null
+	mango-bard refresh remote 2>/dev/null
+	;;
+--toggle-kdeconnect)
+	# kdeconnectd owns no output, so the bar config stays valid. Only the
+	# pill state changes.
+	if systemctl --user is-active --quiet kdeconnectd.service; then
+		systemctl --user stop kdeconnectd.service || notify-send -a mango-bard "KDE Connect" "Failed to stop"
+	else
+		OUT=$(systemctl --user start kdeconnectd.service 2>&1) || notify-send -a mango-bard "KDE Connect" "Failed to start: $OUT"
+	fi
 	mango-bard refresh remote 2>/dev/null
 	;;
 --vnc-exec)
@@ -259,7 +317,7 @@ case "${1:-}" in
 	[ -e "$WLOPM_STATE" ] || wlopm --on '*'
 	;;
 *)
-	echo "usage: remote.sh --toggle|--pull <mon> <tag>|--pull-next|--pull-prev|--pull-list|--restore|--vnc-exec|--privacy-watch|--privacy-restore|--idle-wake" >&2
+	echo "usage: remote.sh --toggle-vnc|--toggle-kdeconnect|--pull <mon> <tag>|--pull-next|--pull-prev|--pull-list|--restore|--vnc-exec|--privacy-watch|--privacy-restore|--idle-wake" >&2
 	exit 1
 	;;
 esac

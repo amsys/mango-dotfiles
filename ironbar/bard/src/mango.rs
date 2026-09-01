@@ -536,6 +536,23 @@ impl Mango {
         let Some(mons) = self.monitors_doc.get("monitors").and_then(Value::as_array) else {
             return;
         };
+        // A disabled output (width 0 — DPMS/only_sleep, or never enabled)
+        // gets no ironbar bar, so any class/var send naming its modules
+        // comes back "Module not found". Drop it here, before `names` is
+        // built, so the prune loop below sees it as gone (same path as a
+        // destroyed virtual output) instead of retrying forever — width 0
+        // never disappears from `all-monitors` on its own, unlike a real
+        // unplug, so without this filter it never reaches `names.contains`
+        // returning false and is never forgotten.
+        //
+        // `!= Some(0)`, not `unwrap_or(0) > 0`: a real `mmsg get
+        // all-monitors` always carries `width`, but the hand-written test
+        // fixtures below don't bother with it — an absent field must read
+        // as "unknown, assume enabled", not "explicitly zero".
+        let mons: Vec<&Value> = mons
+            .iter()
+            .filter(|m| m.get("width").and_then(Value::as_u64) != Some(0))
+            .collect();
 
         let active_client = mons
             .iter()

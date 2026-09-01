@@ -3,12 +3,29 @@
 # mako notification summarised with the repo the session is in, instead of
 # the generic "Claude Code" summary with no project name.
 #
+# Two modes, selected by argument:
+#   (none)  — run as the hook; read JSON from stdin, show the notification.
+#   click   — run by mako's on-button-left (matugen/templates/mako/config);
+#             focus the window that sent the notification $2, then dismiss.
+#
 # Repo label rule kept in sync with kitty/repo-title.py — see that file if
 # you change this.
 #
 # Wired from ~/.claude/settings.json's Notification hook, not from here:
 # settings.json lives outside this repo by design (RULES.md).
 set -uo pipefail
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/claude-notify"
+
+# --- click mode (run by mako's on-button-left) ---------------------------
+if [ "${1:-}" = click ]; then
+	cid="$(cat "$STATE_DIR/n${2:-}" 2> /dev/null)" || exit 0
+	[ -n "$cid" ] || exit 0
+	# focusid views the client's tag, restores it and focuses it — same
+	# single dispatch as rofi/window.sh and system/fprint-notify.
+	timeout 2 mmsg dispatch focusid client,"$cid" > /dev/null 2>&1
+	exec timeout 2 makoctl dismiss -n "${2:-}" > /dev/null 2>&1
+fi
 
 input="$(cat)"
 
@@ -43,7 +60,6 @@ esac
 
 # Replace this session's own last notification instead of stacking a new
 # one, same -p/-r id-file pattern as system/fprint-notify/fprint-notify.sh.
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/claude-notify"
 mkdir -p "$STATE_DIR" 2> /dev/null
 STATE="$STATE_DIR/$session"
 replace_id="$(cat "$STATE" 2> /dev/null || true)"
@@ -53,5 +69,26 @@ args=(-a claude -p -r "${replace_id:-0}")
 
 nid="$(timeout 3 notify-send "${args[@]}" "$summary" "$message" 2> /dev/null)" || exit 0
 [ -n "$nid" ] && printf '%s\n' "$nid" > "$STATE" 2> /dev/null
+
+# The window to jump to on click: climb the process tree (hook -> claude ->
+# shell -> kitty) until a pid owns a mango client.
+# ponytail: breaks if claude runs under tmux/zellij — the tree then leads to
+# the multiplexer server, not the terminal. Match on the repo-title prefix
+# if that ever becomes a real setup.
+if [ -n "$nid" ]; then
+	cid=""
+	clients="$(timeout 2 mmsg get all-clients 2> /dev/null)"
+	pid=$PPID
+	for _ in {1..15}; do
+		[ "${pid:-0}" -gt 1 ] || break
+		cid="$(jq -r --argjson p "$pid" \
+			'first(.clients[] | select(.pid == $p)) | .id // empty' \
+			<<< "$clients" 2> /dev/null)"
+		[ -n "$cid" ] && break
+		# ppid is the 2nd field after the ')' that ends comm.
+		pid="$(sed 's/^.*) //' "/proc/$pid/stat" 2> /dev/null | cut -d' ' -f2)"
+	done
+	[ -n "$cid" ] && printf '%s\n' "$cid" > "$STATE_DIR/n$nid" 2> /dev/null
+fi
 
 exit 0

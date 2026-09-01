@@ -1,12 +1,15 @@
 //! Remote-access pill: wayvnc (screen) + kdeconnectd (input/clipboard/
-//! files), one button, one on/off state. Mirrors hotspot.rs's shape but
+//! files), one pill, two switches — left click toggles VNC (and starts
+//! kdeconnectd with it), right click toggles kdeconnectd alone. Mirrors
+//! hotspot.rs's shape but
 //! stays visible while down — see genconfig.rs's `remote_module` doc
 //! comment for why `show_if` isn't reused here (a toggle that hides itself
 //! when off has no way back on).
 //!
 //! No event stream to watch (same reasoning as hotspot.rs/darkmode.rs):
-//! `remote.sh --toggle` pokes `mango-bard refresh remote` on the actual
-//! state-change edge, and main.rs gives this an explicit startup refresh.
+//! `remote.sh --toggle-vnc`/`--toggle-kdeconnect` pokes `mango-bard refresh
+//! remote` on the actual state-change edge, and main.rs gives this an
+//! explicit startup refresh.
 //!
 //! Candidate glyph, not live-verified: 0xF0379 (nf-md-monitor). This
 //! codebase has repeatedly found Material-Symbols-family codepoints render

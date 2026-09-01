@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# Render the PNG assets of the plymouth LUKS prompt from matugen's colours
+# and the current wallpaper, install them as the early initrd
+# /boot/mango-plymouth.img, and copy the same blurred wallpaper to
+# /boot/grub/mango-bg.png so system/grub/install.sh --gfx can show it too.
+# Called from matugen's post_hook on every wallpaper switch, via one fixed
+# sudoers rule.
+#
+# Why this is not just a `cp`: the files being installed are decoded by
+# plymouthd and GRUB as root, before anyone has authenticated. So the sudo
+# target is this script — root-owned, not user-writable, argument-free — and
+# it renders everything itself from inputs it has validated: nine "<role>
+# <rrggbb>" lines and one wallpaper path. Nothing user-written reaches /boot
+# as-is. Fails closed.
+#
+# The theme script never contains a colour or renders text; every glyph is a
+# PNG from here, so the initramfs needs no fonts and no rebuild.
+#
+# Usage: sudo plymouth-theme-sync            (no arguments; sudoers forbids them)
+#        plymouth-theme-sync test [<dir>]    (self-check + a render into <dir>,
+#                                             no root needed, writes nothing else)
+#        plymouth-theme-sync seed            (root, direct: neutral grey assets
+#                                             for the first boot after install)
+
+set -u
+
+BOOT_IMAGE=/boot/mango-plymouth.img
+GRUB_BG=/boot/grub/mango-bg.png
+DYN_DIR=usr/share/plymouth/themes/mango/dyn
+FONT='JetBrainsMono Nerd Font'
+SCREEN_W=1920   # eDP-1 native mode; the script scales for other displays
+SCREEN_H=1080
+BLUR_SIGMA=20   # ~ MultiEffect blur 1.0 / blurMax 48 in Main.qml
+DIM=35          # Main.qml theme.conf Dim="0.35"
+MAX_CONF_BYTES=1024
+MAX_IMAGE_BYTES=$((32 * 1024 * 1024))
+MAX_CPIO_BYTES=$((6 * 1024 * 1024))
+ROLES='background scrim surface_container surface_container_high outline_variant primary on_surface on_surface_variant error'
+LIMITS=(-limit memory 256MiB -limit map 512MiB -limit time 30)
+
+declare -A C
+
+die() {
+	printf 'plymouth-theme-sync: %s\n' "$1" >&2
+	exit 1
+}
+
+# ------------------------------------------------------------ validation
+
+# check_colors <candidate> <owner-uid>: exactly the nine roles, each once,
+# each "<role> <rrggbb>" (an optional leading '#' on the colour is allowed).
+check_colors() {
+	local candidate=$1 owner=$2 lines count role
+
+	[ ! -L "$candidate" ] || die "refusing a symlink: $candidate"
+	[ -f "$candidate" ] || die "not found: $candidate"
+	[ "$(stat -c %u "$candidate")" = "$owner" ] ||
+		die "not owned by uid $owner: $candidate"
+	[ "$(stat -c %s "$candidate")" -le "$MAX_CONF_BYTES" ] ||
+		die "over $MAX_CONF_BYTES bytes: $candidate"
+
+	lines=$(grep -vE '^\s*(#|$)' "$candidate")
+	count=$(printf '%s\n' "$lines" | grep -c .)
+	[ "$count" -eq 9 ] || die "expected 9 colour lines, found $count: $candidate"
+	printf '%s\n' "$lines" | grep -qvE '^[a-z_]+ #?[0-9a-fA-F]{6}$' &&
+		die "a line does not match '<role> <rrggbb>': $candidate"
+	for role in $ROLES; do
+		[ "$(printf '%s\n' "$lines" | grep -c "^$role ")" -eq 1 ] ||
+			die "role '$role' missing or duplicated: $candidate"
+	done
+}
+
+# read_colors <validated-file>: fill C[role]=rrggbb.
+read_colors() {
+	local role hex
+	while read -r role hex; do
+		case "$role" in ''|'#'*) continue ;; esac
+		C[$role]=${hex#'#'}
+	done <"$1"
+}
+
+# check_wallpaper <path-list-file> <owner-uid>: prints the wallpaper path,
+# or nothing when none is recorded. Same rules as sddm-theme-sync.
+check_wallpaper() {
+	local list=$1 owner=$2 image
+
+	[ -e "$list" ] || return 0
+	[ ! -L "$list" ] || die "refusing a symlink: $list"
+	[ "$(stat -c %u "$list")" = "$owner" ] || die "not owned by uid $owner: $list"
+	image=$(head -n 1 "$list")
+	[ -n "$image" ] || return 0
+	case $image in
+		/*) ;;
+		*) die "wallpaper path is not absolute: $image" ;;
+	esac
+	[ ! -L "$image" ] || die "refusing a symlinked wallpaper: $image"
+	[ -f "$image" ] || die "wallpaper not found: $image"
+	[ "$(stat -c %s "$image")" -le "$MAX_IMAGE_BYTES" ] ||
+		die "wallpaper over $MAX_IMAGE_BYTES bytes: $image"
+	case $(file --brief --mime-type -- "$image") in
+		image/png|image/jpeg|image/webp) ;;
+		*) die "unsupported wallpaper type: $image" ;;
+	esac
+	printf '%s\n' "$image"
+}
+
+# ------------------------------------------------------------- rendering
+
+font_file() {
+	fc-match -f '%{file}' "$FONT:style=$1"
+}
+
+# text <out.png> <pointsize> <font-file> <rrggbb> <text> [<cell WxH>]
+# The text goes through a file: shell-quoting a Nerd Font glyph or a leading
+# '@' straight into an ImageMagick argument is how labels go wrong.
+text() {
+	local out=$1 size=$2 font=$3 color=$4 str=$5 cell=${6:-}
+	printf '%s' "$str" >"$work/label.txt"
+	if [ -n "$cell" ]; then
+		magick "${LIMITS[@]}" -background none -fill "#$color" -font "$font" \
+			-pointsize "$size" -size "$cell" -gravity center "label:@$work/label.txt" \
+			"png32:$out"
+	else
+		magick "${LIMITS[@]}" -background none -fill "#$color" -font "$font" \
+			-pointsize "$size" "label:@$work/label.txt" "png32:$out"
+	fi
+}
+
+# rounded <out.png> <W> <H> <radius> <fill rrggbb> <stroke rrggbb>
+rounded() {
+	local out=$1
+	magick "${LIMITS[@]}" -size "$2x$3" xc:none -fill "#$5" -stroke "#$6" -strokewidth 1 \
+		-draw "roundrectangle 0.5,0.5 $(($2 - 1)).5,$(($3 - 1)).5 $4,$4" "png32:$out"
+}
+
+# render <outdir> <wallpaper-or-empty>: writes every dyn/*.png from C[].
+render() {
+	local out=$1 wallpaper=$2 regular light host png d
+	regular=$(font_file Regular)
+	light=$(font_file Light)
+	[ -f "$regular" ] || die "font not found: $FONT"
+	[ -f "$light" ] || light=$regular
+	host=$(head -n1 /etc/hostname 2>/dev/null)
+	[ -n "$host" ] || host=mango
+	mkdir -p "$out"
+
+	# wallpaper: cover-crop, blur, scrim — Main.qml's Image + MultiEffect + dim
+	if [ -n "$wallpaper" ]; then
+		magick "${LIMITS[@]}" "$wallpaper" -auto-orient \
+			-resize "${SCREEN_W}x${SCREEN_H}^" -gravity center \
+			-extent "${SCREEN_W}x${SCREEN_H}" -blur "0x$BLUR_SIGMA" \
+			-fill "#${C[scrim]}" -colorize "$DIM" "png24:$out/background.png" ||
+			die "could not render background.png"
+	else
+		magick "${LIMITS[@]}" -size "${SCREEN_W}x${SCREEN_H}" "xc:#${C[background]}" \
+			"png24:$out/background.png" || die "could not render background.png"
+	fi
+
+	# card: 380 wide, radius 20; 115 high plain, 146 with the message row
+	rounded "$out/card.png" 380 115 20 "${C[surface_container]}" "${C[outline_variant]}" ||
+		die "could not render card.png"
+	rounded "$out/card-msg.png" 380 146 20 "${C[surface_container]}" "${C[outline_variant]}" ||
+		die "could not render card-msg.png"
+	# entry: TextField 40 high, radius 10, focused border = primary
+	rounded "$out/entry.png" 292 40 10 "${C[surface_container_high]}" "${C[primary]}" ||
+		die "could not render entry.png"
+
+	text "$out/label.png" 16 "$regular" "${C[on_surface]}" "$host" ||
+		die "could not render label.png"
+	text "$out/arrow.png" 16 "$regular" "${C[on_surface_variant]}" "$(printf '\xef\x81\xa1')" 40x40 ||
+		die "could not render arrow.png"
+	text "$out/bullet.png" 14 "$regular" "${C[on_surface]}" "$(printf '\xe2\x97\x8f')" 9x21 ||
+		die "could not render bullet.png"
+	text "$out/wrong.png" 13 "$regular" "${C[error]}" "Wrong passphrase" ||
+		die "could not render wrong.png"
+	text "$out/tpm-fail.png" 15 "$regular" "${C[error]}" "TPM mismatch: do not unlock" ||
+		die "could not render tpm-fail.png"
+	text "$out/totp-icon.png" 15 "$regular" "${C[on_surface_variant]}" "$(printf '\xef\x84\xb2')" ||
+		die "could not render totp-icon.png"
+	for d in 0 1 2 3 4 5 6 7 8 9; do
+		text "$out/code-$d.png" 15 "$regular" "${C[on_surface_variant]}" "$d" 9x22 ||
+			die "could not render code-$d.png"
+		text "$out/clock-$d.png" 76 "$light" "${C[on_surface]}" "$d" 46x102 ||
+			die "could not render clock-$d.png"
+	done
+	text "$out/clock-colon.png" 76 "$light" "${C[on_surface]}" ":" 46x102 ||
+		die "could not render clock-colon.png"
+
+	# every output is a PNG of the geometry the script expects
+	for png in "$out"/*.png; do
+		[ "$(file --brief --mime-type -- "$png")" = image/png ] || die "not a PNG: $png"
+	done
+	expect() {
+		local want
+		[ "$(magick identify -format '%wx%h' "$out/$1")" = "$2" ] || die "$1 is not $2"
+	}
+	expect background.png "${SCREEN_W}x${SCREEN_H}"
+	expect card.png 380x115
+	expect card-msg.png 380x146
+	expect entry.png 292x40
+	expect arrow.png 40x40
+	expect bullet.png 9x21
+	expect code-0.png 9x22
+	expect clock-0.png 46x102
+}
+
+# build_image <rendered-dir> <out.cpio>: the early initrd. Every parent
+# directory is an entry of its own: the kernel unpacks early cpios into an
+# empty rootfs and creates no parents, so an archive of bare files is
+# silently dropped (verified in a VM).
+build_image() {
+	local stage=$work/stage
+	rm -rf "$stage"
+	mkdir -p "$stage/$DYN_DIR"
+	cp -- "$1"/*.png "$stage/$DYN_DIR/" || die "could not stage the assets"
+	(cd "$stage" && find usr | sort | cpio --quiet -o -H newc -R 0:0) >"$2" ||
+		die "could not build the cpio image"
+	[ "$(stat -c %s "$2")" -le "$MAX_CPIO_BYTES" ] || die "image over $MAX_CPIO_BYTES bytes"
+	cpio --quiet -t <"$2" | grep -qx "$DYN_DIR" || die "image lacks the $DYN_DIR directory entry"
+}
+
+# install_image <rendered-dir>: build, then install atomically if changed.
+# Also copies the same blurred wallpaper to GRUB, so the wallpaper is on
+# screen from the boot menu onward, not just from plymouth onward.
+install_image() {
+	build_image "$1" "$work/image.cpio"
+	if [ -f "$BOOT_IMAGE" ] && cmp -s "$work/image.cpio" "$BOOT_IMAGE"; then
+		:
+	else
+		install -m 644 -- "$work/image.cpio" "$BOOT_IMAGE.new" ||
+			die "could not stage $BOOT_IMAGE"
+		mv -f "$BOOT_IMAGE.new" "$BOOT_IMAGE"
+	fi
+	if [ -f "$GRUB_BG" ] && cmp -s "$1/background.png" "$GRUB_BG"; then
+		return 0
+	fi
+	# ponytail: full 1920x1080 PNG (~800 KB) so GRUB's frame is byte-identical
+	# to plymouth's; if the PNG decode adds visible delay at the menu, render
+	# a 960x540 copy instead — GRUB stretches it and the source is blurred, so
+	# a smaller image loses nothing visible.
+	install -D -m 644 -- "$1/background.png" "$GRUB_BG.new" ||
+		die "could not stage $GRUB_BG"
+	mv -f "$GRUB_BG.new" "$GRUB_BG"
+}
+
+neutral_colors() {
+	for role in $ROLES; do C[$role]=808080; done
+	C[background]=101010
+	C[scrim]=000000
+	C[surface_container]=1c1c1c
+	C[surface_container_high]=262626
+	C[outline_variant]=444444
+	C[on_surface]=e6e6e6
+	C[on_surface_variant]=b0b0b0
+	C[error]=ff7583
+}
+
+work=$(mktemp -d) || die "could not create a temp dir"
+trap 'rm -rf "$work"' EXIT
+
+# ------------------------------------------------------------ self-check
+
+if [ "${1:-}" = "test" ]; then
+	uid=$(id -u)
+	failures=0
+	clean="$work/clean.conf"
+	{
+		echo "# a comment, and a blank line follow"
+		echo
+		i=0
+		for role in $ROLES; do
+			printf '%s %06x\n' "$role" $((i * 1000003 % 16777216))
+			i=$((i + 1))
+		done
+	} >"$clean"
+
+	expect_check() {
+		want=$1 name=$2 file=$3
+		if (check_colors "$file" "$uid") >/dev/null 2>&1; then got=accept; else got=refuse; fi
+		if [ "$got" = "$want" ]; then
+			printf 'ok    %s (%s)\n' "$name" "$got"
+		else
+			printf 'FAIL  %s: wanted %s, got %s\n' "$name" "$want" "$got"
+			failures=$((failures + 1))
+		fi
+	}
+
+	expect_check accept "a clean render" "$clean"
+	head -n -1 "$clean" >"$work/short.conf"
+	expect_check refuse "only 8 roles" "$work/short.conf"
+	sed 's/^scrim /surface_container /' "$clean" >"$work/dup.conf"
+	expect_check refuse "duplicate role" "$work/dup.conf"
+	sed 's/^error /errror /' "$clean" >"$work/unknown.conf"
+	expect_check refuse "unknown role" "$work/unknown.conf"
+	sed 's/^primary [0-9a-f]*/primary gggggg/' "$clean" >"$work/badhex.conf"
+	expect_check refuse "invalid hex digit" "$work/badhex.conf"
+	{ cat "$clean"; echo "tertiary 000000"; } >"$work/extra.conf"
+	expect_check refuse "an extra 10th line" "$work/extra.conf"
+	ln -s "$clean" "$work/link.conf"
+	expect_check refuse "symlinked source" "$work/link.conf"
+	sed 's/^primary [0-9a-f]*/primary #123456/' "$clean" >"$work/recoloured.conf"
+	expect_check accept "different colours, '#' prefix" "$work/recoloured.conf"
+
+	# a full render: real state files when present, neutral greys otherwise
+	state=$HOME/.local/state/mango/generated
+	if [ -f "$state/plymouth-colors.conf" ]; then
+		check_colors "$state/plymouth-colors.conf" "$uid"
+		read_colors "$state/plymouth-colors.conf"
+		wallpaper=$(check_wallpaper "$state/wallpaper/path.txt" "$uid")
+	else
+		neutral_colors
+		wallpaper=
+	fi
+	outdir=${2:-$work/render}
+	render "$outdir" "$wallpaper"
+	printf 'ok    rendered %s assets into %s\n' "$(ls "$outdir"/*.png | wc -l)" "$outdir"
+	build_image "$outdir" "$outdir.cpio"
+	printf 'ok    early initrd %s (%s bytes, %s entries)\n' "$outdir.cpio" \
+		"$(stat -c %s "$outdir.cpio")" "$(cpio --quiet -t <"$outdir.cpio" | wc -l)"
+
+	[ "$failures" -eq 0 ] || exit 1
+	echo "ok"
+	exit 0
+fi
+
+# ----------------------------------------------------------------- seed
+
+if [ "${1:-}" = "seed" ]; then
+	[ $# -eq 1 ] || die "seed takes no further arguments"
+	[ "$(id -u)" -eq 0 ] || die "seed must run as root"
+	neutral_colors
+	render "$work/render" ""
+	install_image "$work/render"
+	exit 0
+fi
+
+# ----------------------------------------------------------------- apply
+
+[ $# -eq 0 ] || die "takes no arguments"
+[ "$(id -u)" -eq 0 ] || die "must run as root, through sudo"
+
+uid=${SUDO_UID:-}
+[ -n "$uid" ] || die "SUDO_UID is unset — run me through sudo, not as root directly"
+[ "$uid" -gt 0 ] 2>/dev/null || die "refusing to run for uid ${uid}"
+
+home=$(getent passwd "$uid" | cut -d: -f6)
+[ -n "$home" ] && [ -d "$home" ] || die "no home directory for uid $uid"
+
+state=$home/.local/state/mango/generated
+check_colors "$state/plymouth-colors.conf" "$uid"
+read_colors "$state/plymouth-colors.conf"
+wallpaper=$(check_wallpaper "$state/wallpaper/path.txt" "$uid")
+render "$work/render" "$wallpaper"
+install_image "$work/render"

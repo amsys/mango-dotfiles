@@ -1,7 +1,8 @@
 [Unit]
 Description=wayvnc — VNC server for the remote-access bar toggle
-# Started/stopped only by ironbar/scripts/remote.sh --toggle. No [Install]
-# section — deliberately not enabled at login, unlike mango-bard.service.
+# Started/stopped only by ironbar/scripts/remote.sh --toggle-vnc. No
+# [Install] section — deliberately not enabled at login, unlike
+# mango-bard.service.
 # No auth, no encryption (no ~/.config/wayvnc/config). Binds [::]:5900 —
 # a dual-stack v6 socket also serves v4 (net.ipv6.bindv6only=0, the Arch
 # default); a second explicit 0.0.0.0:5900 bind fails EADDRINUSE against
@@ -13,7 +14,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-# --vnc-exec reads the virtual output name recorded by remote.sh --toggle
+# --vnc-exec reads the virtual output name recorded by remote.sh --toggle-vnc
 # and execs wayvnc with -o <that output>. The remote user works on the
 # virtual output; the physical panels stay blanked by wayvnc-privacy.
 ExecStart=%h/.config/ironbar/scripts/remote.sh --vnc-exec

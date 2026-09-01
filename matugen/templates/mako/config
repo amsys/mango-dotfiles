@@ -24,8 +24,9 @@ layer=overlay
 default-timeout=5000
 ignore-timeout=1
 
-# Left click = focus the kitty window that sent it (mako's own default,
-# stated explicitly so a future edit doesn't silently reintroduce dismiss).
+# Left click default = mako's own invoke-default-action. Only kitty's own
+# D-Bus notifications carry a default action; [app-name=claude] below sets
+# its own exec binding since claude-notify.sh sends with none.
 on-button-left=invoke-default-action
 on-button-right=dismiss
 on-button-middle=none
@@ -55,11 +56,14 @@ on-button-left=exec /usr/local/bin/mango-fprint-notify click
 # Claude Code notifications (mango/scripts/claude-notify.sh, summary is the
 # repo label). group-by is overridden here so notifications from different
 # repos don't collapse into one group under the global app-name grouping.
+# Left click jumps to the window that sent it and dismisses; the hook sends
+# no D-Bus action, so this replaces the (inert here) invoke-default-action.
 [app-name=claude]
 default-timeout=3000
 group-by=app-name,summary
 border-color={{colors.term2.default.hex}}
 text-color={{colors.term2.default.hex}}
+on-button-left=exec $HOME/.config/mango/scripts/claude-notify.sh click "$id"
 
 # Claude is stopped, waiting on the user (permission/plan/question prompt) —
 # stays open past the default timeout instead of hiding while ignored.

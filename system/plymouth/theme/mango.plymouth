@@ -1,0 +1,16 @@
+# mango — the plymouth theme that matches the mango-sddm greeter.
+# Installed to /usr/share/plymouth/themes/mango/ by system/plymouth/install.sh.
+#
+# No Font= key on purpose: the script never renders text. Every colour, the
+# blurred wallpaper and every glyph arrive as PNGs in dyn/, delivered by the
+# early initrd /boot/mango-plymouth.img (see plymouth-theme-sync). The host
+# copy of this directory never contains dyn/ — that is what keeps a wallpaper
+# switch from needing `mkinitcpio -P`.
+[Plymouth Theme]
+Name=mango
+Description=Material You LUKS prompt for the mango desktop
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/mango
+ScriptFile=/usr/share/plymouth/themes/mango/mango.script

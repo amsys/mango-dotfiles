@@ -1,0 +1,278 @@
+# mango.script — plymouth script-plugin theme, the boot-time twin of
+# system/sddm/theme/Main.qml.
+#
+# Nothing here is a colour or a string of text. Every visual comes from a PNG
+# in dyn/ (rendered by /usr/local/bin/plymouth-theme-sync on each wallpaper
+# switch, shipped in the early initrd). A missing image is tolerated: the
+# sprite stays empty, the passphrase prompt still works. That is the fallback
+# for the shutdown splash on the host, which has no dyn/ at all.
+#
+# Layout constants mirror Main.qml: card padding 20, row spacing 14, panel
+# spacing 28, clock/date spacing 2, entry left padding 12.
+#
+# Status updates: only the fixed grammar sent by /usr/local/bin/mango-totp
+# (`plymouth update --status=...`) is understood — "mango:HHMM:DDDDDD",
+# "mango:HHMM:fail" or "mango:HHMM:". Anything else is ignored. Not
+# display-message: the details (text) plugin prints every message as a
+# console line, while its update_status is a no-op, so Esc to the text view
+# never floods the passphrase prompt.
+
+CARD_PAD = 20;
+ROW_GAP = 14;
+PANEL_GAP = 28;
+CLOCK_GAP = 2;
+ENTRY_PAD = 12;
+
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+
+screen.w = Window.GetWidth();
+screen.h = Window.GetHeight();
+
+# ---------------------------------------------------------------- images
+
+fun load(name) {
+	return Image("dyn/" + name + ".png");
+}
+
+img.background = load("background");
+img.card = load("card");
+img.card_msg = load("card-msg");
+img.label = load("label");
+img.entry = load("entry");
+img.arrow = load("arrow");
+img.bullet = load("bullet");
+img.wrong = load("wrong");
+img.tpm_fail = load("tpm-fail");
+img.totp_icon = load("totp-icon");
+for (d = 0; d < 10; d++) {
+	img.clock[d] = load("clock-" + d);
+	img.code[d] = load("code-" + d);
+}
+img.clock_colon = load("clock-colon");
+
+# A sprite with no image draws nothing; every sprite is created once.
+fun sprite(image, z) {
+	s = Sprite();
+	if (image)
+		s.SetImage(image);
+	s.SetZ(z);
+	s.SetOpacity(0);
+	return s;
+}
+
+fun show(s, x, y) {
+	s.SetX(x);
+	s.SetY(y);
+	s.SetOpacity(1);
+}
+
+fun hide(s) {
+	s.SetOpacity(0);
+}
+
+# ------------------------------------------------------------ background
+
+if (img.background && (img.background.GetWidth() != screen.w || img.background.GetHeight() != screen.h))
+	img.background = img.background.Scale(screen.w, screen.h);
+
+sp.background = sprite(img.background, 1);
+show(sp.background, 0, 0);
+
+# ------------------------------------------------------------- geometry
+#
+# Main.qml centres a column: clock, 2, date line, 28, card. The card is
+# 115 px high without a message. Sizes come from the images so the helper
+# owns every pixel value; only the gaps live here.
+
+fun h(image) { if (image) return image.GetHeight(); return 0; }
+fun w(image) { if (image) return image.GetWidth(); return 0; }
+
+clock.h = h(img.clock[0]);
+clock.adv = w(img.clock[0]);
+date.h = h(img.code[0]);
+code.adv = w(img.code[0]);
+card.w = w(img.card);
+card.h = h(img.card);
+
+panel.h = clock.h + CLOCK_GAP + date.h + PANEL_GAP + card.h;
+panel.top = Math.Int((screen.h - panel.h) / 2);
+clock.top = panel.top;
+date.top = clock.top + clock.h + CLOCK_GAP;
+card.top = date.top + date.h + PANEL_GAP;
+card.left = Math.Int((screen.w - card.w) / 2);
+
+# ---------------------------------------------------------------- clock
+# HH:MM composed from clock-<d>.png / clock-colon.png, advance = glyph width.
+
+clock.left = Math.Int((screen.w - 5 * clock.adv) / 2);
+for (i = 0; i < 5; i++)
+	sp.clock[i] = sprite(NULL, 10);
+
+fun digit_of(ch) {
+	for (d = 0; d < 10; d++)
+		if (ch == "" + d)
+			return d;
+	return NULL;
+}
+
+fun set_clock(hhmm) {
+	if (String(hhmm).Length() != 4)
+		return;
+	for (i = 0; i < 5; i++) {
+		if (i == 2) {
+			image = img.clock_colon;
+		} else {
+			pos = i;
+			if (i > 2) pos = i - 1;
+			d = digit_of(String(hhmm).CharAt(pos));
+			if (d == NULL) return;
+			image = img.clock[d];
+		}
+		if (!image) return;
+		sp.clock[i].SetImage(image);
+		show(sp.clock[i], clock.left + i * clock.adv, clock.top);
+	}
+}
+
+# --------------------------------------------------- date line = TOTP code
+# icon, 6 px, three digits, one digit-width gap, three digits — centred.
+
+for (i = 0; i < 6; i++)
+	sp.code[i] = sprite(NULL, 10);
+sp.totp_icon = sprite(img.totp_icon, 10);
+sp.tpm_fail = sprite(img.tpm_fail, 10);
+
+fun clear_code() {
+	for (i = 0; i < 6; i++) hide(sp.code[i]);
+	hide(sp.totp_icon);
+	hide(sp.tpm_fail);
+}
+
+# Parameter is not named "code": a function parameter with a global's name
+# shadows the global hash (code.adv) inside the function.
+fun set_code(digits) {
+	clear_code();
+	if (digits == "fail") {
+		if (img.tpm_fail)
+			show(sp.tpm_fail, Math.Int((screen.w - w(img.tpm_fail)) / 2), date.top);
+		return;
+	}
+	if (String(digits).Length() != 6)
+		return;
+	total = w(img.totp_icon) + 6 + 7 * code.adv;
+	x = Math.Int((screen.w - total) / 2);
+	if (img.totp_icon) {
+		y = date.top + Math.Int((date.h - h(img.totp_icon)) / 2);
+		show(sp.totp_icon, x, y);
+	}
+	x += w(img.totp_icon) + 6;
+	for (i = 0; i < 6; i++) {
+		d = digit_of(String(digits).CharAt(i));
+		if (d == NULL || !img.code[d]) { clear_code(); return; }
+		if (i == 3) x += code.adv;
+		sp.code[i].SetImage(img.code[d]);
+		show(sp.code[i], x, date.top);
+		x += code.adv;
+	}
+}
+
+# "mango:<clock>:<code>" — split on ':' so an empty field cannot shift the
+# rest. Fields are rebuilt with CharAt: SubString's end bound is not documented.
+fun message(text) {
+	str = String(text);
+	n = str.Length();
+	if (str.SubString(0, 6) != "mango:")
+		return;
+	clock_text = "";
+	code_text = "";
+	field = 0;
+	for (i = 6; i < n; i++) {
+		ch = str.CharAt(i);
+		if (ch == ":") { field++; continue; }
+		if (field == 0) clock_text += ch;
+		else if (field == 1) code_text += ch;
+	}
+	set_clock(clock_text);
+	set_code(code_text);
+}
+Plymouth.SetUpdateStatusFunction(message);
+
+# ----------------------------------------------------------------- card
+
+sp.card = sprite(img.card, 20);
+sp.label = sprite(img.label, 21);
+sp.entry = sprite(img.entry, 21);
+sp.arrow = sprite(img.arrow, 21);
+sp.wrong = sprite(img.wrong, 22);
+MAX_BULLETS = 32;
+for (i = 0; i < MAX_BULLETS; i++)
+	sp.bullet[i] = sprite(img.bullet, 22);
+
+dialog.asks = 0;
+
+fun show_card(bullets, with_message) {
+	if (with_message && img.card_msg)
+		sp.card.SetImage(img.card_msg);
+	else if (img.card)
+		sp.card.SetImage(img.card);
+	show(sp.card, card.left, card.top);
+
+	y = card.top + CARD_PAD;
+	if (img.label)
+		show(sp.label, Math.Int((screen.w - w(img.label)) / 2), y);
+	y += h(img.label) + ROW_GAP;
+
+	entry.left = card.left + CARD_PAD;
+	entry.top = y;
+	show(sp.entry, entry.left, entry.top);
+	show(sp.arrow, entry.left + w(img.entry) + 8, entry.top);
+
+	bx = entry.left + ENTRY_PAD;
+	by = entry.top + Math.Int((h(img.entry) - h(img.bullet)) / 2);
+	for (i = 0; i < MAX_BULLETS; i++) {
+		if (i < bullets && bx + w(img.bullet) <= entry.left + w(img.entry) - ENTRY_PAD) {
+			show(sp.bullet[i], bx, by);
+			bx += w(img.bullet);
+		} else {
+			hide(sp.bullet[i]);
+		}
+	}
+
+	y += h(img.entry) + ROW_GAP;
+	if (with_message && img.wrong)
+		show(sp.wrong, Math.Int((screen.w - w(img.wrong)) / 2), y);
+	else
+		hide(sp.wrong);
+}
+
+fun hide_card() {
+	hide(sp.card);
+	hide(sp.label);
+	hide(sp.entry);
+	hide(sp.arrow);
+	hide(sp.wrong);
+	for (i = 0; i < MAX_BULLETS; i++) hide(sp.bullet[i]);
+}
+
+# systemd re-asks after a wrong passphrase: a fresh prompt with zero bullets
+# after one was already answered means the previous answer was refused.
+fun display_password(prompt, bullets) {
+	if (bullets == 0 && dialog.answered)
+		dialog.asks++;
+	dialog.answered = 0;
+	if (bullets > 0)
+		dialog.answered = 1;
+	show_card(bullets, dialog.asks > 0);
+}
+Plymouth.SetDisplayPasswordFunction(display_password);
+
+fun display_normal() {
+	hide_card();
+}
+Plymouth.SetDisplayNormalFunction(display_normal);
+
+fun quit() {
+	hide_card();
+}
+Plymouth.SetQuitFunction(quit);

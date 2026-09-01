@@ -51,6 +51,7 @@ Editing them works until the next wallpaper switch, then silently reverts:
 /usr/share/sddm/themes/mango-sddm/Colors.qml
 /usr/share/sddm/themes/mango-sddm/background.*
 /boot/mango-palette.img
+/boot/mango-plymouth.img
 ```
 
 `ironbar/style.css` comes from `matugen/templates/ironbar/style.css`;
@@ -102,6 +103,27 @@ in the docs/install.md checklist if it cannot be tracked as a file:
   `sudo system/cryptbox/install.sh` is what pushes them out, and it also runs
   `mkinitcpio -P` and `grub-mkconfig`, the only two steps that touch `/boot`
   outside of a wallpaper switch
+- the plymouth prompt's *installed* side: `/usr/share/plymouth/themes/mango/`
+  (never with a `dyn/` inside), `/usr/local/bin/plymouth-theme-sync`,
+  `/etc/sudoers.d/plymouth-theme-sync`, `/etc/plymouth/plymouthd.conf`,
+  `/etc/systemd/system/sddm.service.d/10-mango.conf` (After=plymouth-quit-wait;
+  never a `plymouth quit --retain-splash` drop-in — that hangs X under SDDM
+  on i915), the `plymouth` hook in `HOOKS`, `splash` and the second image in `GRUB_EARLY_INITRD_LINUX_CUSTOM`
+  in `/etc/default/grub`. Sources in `system/plymouth/`; `sudo
+  system/plymouth/install.sh` pushes them out (runs `mkinitcpio -P` and
+  `grub-regen`)
+- the attestation code's *installed* side: `/usr/local/bin/mango-totp`,
+  `/usr/local/share/mango-totp/mango-totp.service`,
+  `/usr/lib/initcpio/install/mango-totp`, the `mango-totp` hook in `HOOKS`,
+  and the secret in the TPM's NV index (never a file). Sources in
+  `system/tpm-totp/`
+- GRUB's *installed* side beyond the above: `/usr/local/bin/grub-regen`,
+  `GRUB_TIMEOUT_STYLE`/`GRUB_TIMEOUT`/`GRUB_TERMINAL_OUTPUT`/`GRUB_BACKGROUND`
+  in `/etc/default/grub` and `/boot/grub/mango-logo.png` (`system/grub/`,
+  always the `--gfx` variant: the EFI text console is blank on this
+  firmware), the `# BEGIN mango-pin` block in `/etc/grub.d/40_custom` and
+  `/boot/pinned/` (`system/boot-pin/`; never `/boot/*-pinned*` — `10_linux`
+  globs `/boot/vmlinuz-*` and would make the pinned copy the default entry)
 - battery power attribution: `/etc/udev/rules.d/mango-rapl.rules` (group-reads
   RAPL's `energy_uj` for `wheel`) and `/etc/sudoers.d/mango-powertop`
   (NOPASSWD, arg-less `powertop`). Sources tracked in `system/rapl/` —

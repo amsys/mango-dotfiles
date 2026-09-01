@@ -72,6 +72,17 @@ input_path = '~/.config/matugen/templates/console/palette.conf'
 output_path = '~/.local/state/mango/generated/console-palette.conf'
 post_hook = 'sudo -n /usr/local/bin/console-palette-sync || true'
 
+# Rendered as martin into a state file, then turned into the PNG assets of the
+# plymouth LUKS prompt (/boot/mango-plymouth.img) by
+# /usr/local/bin/plymouth-theme-sync — root-owned, argument-free, and it
+# refuses anything but the fixed "<role> <rrggbb>" grammar. See
+# system/plymouth/. `|| true` so a missing sudoers rule can't break a
+# wallpaper switch.
+[templates.plymouth]
+input_path = '~/.config/matugen/templates/plymouth/colors.conf'
+output_path = '~/.local/state/mango/generated/plymouth-colors.conf'
+post_hook = 'sudo -n /usr/local/bin/plymouth-theme-sync || true'
+
 [templates.wlogout]
 input_path = '~/.config/matugen/templates/wlogout/style.css'
 output_path = '~/.config/wlogout/style.css'

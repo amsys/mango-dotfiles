@@ -2,16 +2,20 @@
 
 ## What this is
 
-One ironbar pill (`remote`, right end of the bar) toggles four units
-together:
+One ironbar pill (`remote`, right end of the bar) drives four units. The
+left click starts and stops the VNC set (wayvnc, wayvnc-privacy,
+mango-keepawake) and starts kdeconnectd with it. The right click starts and
+stops kdeconnectd alone. A left click that turns VNC off leaves kdeconnectd
+running:
 
 - **wayvnc** — VNC server, the screen. Talks to mango directly (wlr-screencopy
   + virtual pointer/keyboard), no portal involved.
 - **kdeconnectd** — KDE Connect daemon, input/clipboard/files/notifications
-  from a paired phone. Has no screen view of its own.
+  from a paired phone. Has no screen view of its own. It is useful without
+  VNC, so it has its own switch: the pill's right click.
 - **mango-keepawake** — blocks idle suspend and lid-switch suspend for as
   long as remote access is armed, so a 15-minute idle timeout does not end
-  the session out from under a remote user. Stopped again on toggle-off,
+  the session out from under a remote user. Stopped again on VNC toggle-off,
   but only if this pill is what started it — a keep-awake you had already
   switched on yourself from its own pill is left alone.
 - **wayvnc-privacy** — watches for a connected VNC client and blanks every
@@ -20,20 +24,28 @@ together:
 
 None is enabled at login — `install-config.sh` links all four units but does
 not `systemctl --user enable` them (see `LINK_ONLY_UNITS` there). The pill's
-click handler (`ironbar/scripts/remote.sh --toggle`) is the only thing that
-starts or stops them.
+click handlers (`ironbar/scripts/remote.sh --toggle-vnc` on the left,
+`--toggle-kdeconnect` on the right) are the only thing that starts or stops
+them. Eco power mode also turns VNC off when no client is connected; it does
+not touch kdeconnectd, and leaving eco does not start VNC again.
 
 ## The virtual output
 
-wayvnc doesn't capture a physical panel. `--toggle` creates a headless
+wayvnc doesn't capture a physical panel. `--toggle-vnc` creates a headless
 output (`mmsg dispatch create_virtual_output`, named `HEADLESS-<n>` —
 wlroots increments `<n>` on every create and never reuses a name, so
 `remote.sh` re-discovers it after each create rather than hardcoding it) and
 pins wayvnc to it (`--vnc-exec`). The remote user works entirely on that
 output; the physical panels stay blanked by `wayvnc-privacy` (below) rather
-than shown. `--toggle` also regenerates and reloads the bar config, so the
-virtual output gets a full ironbar bar of its own for as long as VNC is
-armed, and loses it again on toggle-off.
+than shown. `--toggle-vnc` also regenerates and reloads the bar config, so
+the virtual output gets an ironbar bar of its own — a remote-control strip,
+not a copy of a normal bar (see "Moving a tag onto it" below) — for as long
+as VNC is armed, and loses it again on toggle-off.
+
+Toggle-off moves every window still on the virtual output to the first
+physical monitor before it destroys that output. mango does not move them
+itself, so a window left there would be lost. Toggle-off then turns the
+physical panels back on.
 
 wayvnc resizes a headless output to match the connecting client automatically
 (built in since 0.10.1, on by default — `-R/--disable-resizing` opts out,
@@ -43,13 +55,20 @@ never a physical one). No sizing code needed here.
 Nothing is on the virtual output at first — it's empty desktop. Move a tag
 onto it with:
 
-- **A grid click** — open the pill's popup and click a cell. Each row is a
-  physical monitor, each column a tag; the label is the same occupancy dot
-  count the real tag pills show.
+- **The headless bar itself** — its `start` row is a remote-control strip
+  (`genconfig.rs::build()`'s `HEADLESS` branch, `remote_pills()`): a private
+  pill first (click: send any pulled tag back — `--restore`), then each
+  physical monitor's name and its nine tag pills. Clicking a pill pulls
+  that tag (`remote.sh --pull <mon> <n>`) instead of viewing it. This is
+  the mouse path — the earlier design put a clickable grid in the `remote`
+  pill's own popup on the *physical* bars, which a remote viewer can never
+  reach while those panels are blanked; it was deleted for exactly that
+  reason (see IRONBAR.md's T-remote-popup entry) and rebuilt here, on the
+  one bar that actually is reachable.
 - **`SUPER+CTRL+Next`/`SUPER+CTRL+Prior`** (`--pull-next`/`--pull-prev`) —
-  cycle through every occupied tag on both physical monitors. Also the
-  pill's right-click. Reachable from a client that can only send modifiers
-  plus Tab/Esc/PgUp/PgDown/Home.
+  cycle through every occupied tag on both physical monitors without a
+  mouse. Reachable from a client that can only send modifiers plus
+  Tab/Esc/PgUp/PgDown/Home.
 - **`SUPER+CTRL+Home`** (`--restore`) — send the pulled tag back to its own
   monitor.
 
@@ -59,7 +78,7 @@ never `all-tags`: that command's own `client_count` field reports the
 compositor-wide client total for every occupied tag, not the tag's own
 count (verified live — worth reporting upstream, not a bug in this repo).
 Restoring is safe to call twice, and also runs automatically on VNC client
-disconnect (see "Panel blanking") and on toggle-off.
+disconnect (see "Panel blanking") and on VNC toggle-off.
 
 ## Panel blanking
 

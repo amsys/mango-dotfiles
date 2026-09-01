@@ -1,0 +1,73 @@
+#!/usr/bin/sh
+# Feed the TPM-sealed TOTP and the clock to the plymouth prompt. Runs inside
+# the initramfs as mango-totp.service (see mkinitcpio-install); never on the
+# host. POSIX sh: busybox ash inside the initramfs, bash on the host.
+#
+# Two channels, chosen once from the kernel command line:
+#
+#   `splash` present  — plymouth shows the graphical theme. Send
+#                       `plymouth update --status=mango:HHMM:CODE`, parsed by
+#                       /usr/share/plymouth/themes/mango/mango.script:
+#                         mango:HHMM:DDDDDD   code for this 30 s slot
+#                         mango:HHMM:fail     the TPM refused (PCRs changed)
+#                         mango:HHMM:         no TPM device yet — clock only
+#                       Not display-message: the details (text) view prints
+#                       every message as a console line, while its
+#                       update_status is a no-op, so Esc to the text view
+#                       never floods the passphrase prompt.
+#   `splash` absent   — plymouth runs its text prompt. Write one line to the
+#                       top of the console and rewrite it in place (save
+#                       cursor, home, clear line, print, restore cursor). No
+#                       newline, so nothing scrolls and the passphrase line
+#                       stays where it is.
+#
+# Sends every second, unchanged or not. plymouthd drops a status update
+# that arrives before it has a display to draw on (on_update: boot_splash is
+# NULL until DRM is up, often after the first send here) and never replays
+# it; a once-per-change send therefore lost the clock and the code for the
+# whole boot. One socket message a second costs nothing. Exits 0 the moment
+# plymouth is gone. A missing TPM only means no code.
+
+wait=0
+while [ ! -e /dev/tpmrm0 ] && [ "$wait" -lt 100 ]; do
+	sleep 0.1
+	wait=$((wait + 1))
+done
+
+if grep -qw splash /proc/cmdline 2>/dev/null; then
+	mode=splash
+else
+	mode=text
+fi
+
+# console_line HHMM CODE: the human form for the text prompt.
+console_line() {
+	case "$2" in
+		fail) printf '  %s:%s  TPM mismatch: do not unlock' "${1%??}" "${1#??}" ;;
+		'') printf '  %s:%s' "${1%??}" "${1#??}" ;;
+		*) printf '  %s:%s  %s %s' "${1%??}" "${1#??}" "${2%???}" "${2#???}" ;;
+	esac
+}
+
+code=
+slot=
+while [ -e /run/plymouth/pid ]; do
+	now=$(date +%s)
+	if [ -e /dev/tpmrm0 ] && [ "$((now / 30))" != "$slot" ]; then
+		slot=$((now / 30))
+		code=$(tpm2-totp calculate 2>/dev/null) || code=fail
+		case "$code" in
+			[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+			*) code=fail ;;
+		esac
+	fi
+	hhmm=$(date +%H%M)
+	if [ "$mode" = splash ]; then
+		plymouth update --status="mango:$hhmm:$code" 2>/dev/null || exit 0
+	else
+		printf '\0337\033[1;1H\033[K%s\0338' "$(console_line "$hhmm" "$code")" \
+			>/dev/console 2>/dev/null
+	fi
+	sleep 1
+done
+exit 0

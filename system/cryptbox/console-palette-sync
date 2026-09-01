@@ -47,15 +47,20 @@ check_palette() {
 		die "duplicate colour index: $candidate"
 }
 
-# Build /boot/mango-palette.img: a cpio archive whose only member is
-# /etc/mango/palette.conf, staged and installed atomically.
+# Build /boot/mango-palette.img: a cpio archive holding /etc/mango/palette.conf
+# and its parent directories, staged and installed atomically.
+#
+# The directory entries are not optional. The kernel unpacks early cpios into
+# an empty rootfs and creates no parent directories: an archive holding only
+# the file silently drops it (verified in a VM — the palette was never applied
+# before this was fixed, and the "themed" band was the VT default blue).
 install_image() {
 	candidate=$1
 	tmp=$(mktemp -d) || die "could not create a temp dir"
 
 	install -Dm644 -- "$candidate" "$tmp/etc/mango/palette.conf" ||
 		{ rm -rf "$tmp"; die "could not stage the palette"; }
-	(cd "$tmp" && printf 'etc/mango/palette.conf\n' | cpio --quiet -o -H newc) \
+	(cd "$tmp" && printf 'etc\netc/mango\netc/mango/palette.conf\n' | cpio --quiet -o -H newc) \
 		>"$tmp/image.cpio" ||
 		{ rm -rf "$tmp"; die "could not build the cpio image"; }
 

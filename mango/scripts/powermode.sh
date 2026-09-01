@@ -300,6 +300,27 @@ hermes_resume() {
 	hermes_pids | xargs -r kill -CONT 2> /dev/null
 }
 
+# Eco entry policy for remote access: an idle VNC session is turned off to
+# save power; a connected VNC session stays alive so eco never drops the
+# user mid-session; kdeconnectd is a separate service and is never touched
+# here. Best-effort: a failure here must not fail the mode switch.
+vnc_eco_off() {
+	if [ -n "${MANGO_PM_TEST:-}" ]; then
+		# The self-check counts hook firings through this trace file.
+		[ -n "${VNC_ECO_TRACE:-}" ] && echo fired >> "$VNC_ECO_TRACE"
+		return 0
+	fi
+	systemctl --user is-active --quiet wayvnc.service || return 0
+	# A failed query is not the fact "zero clients". Keep VNC alive unless
+	# wayvncctl answers and the client list is empty.
+	VNC_CLIENTS=$(wayvncctl -j client-list 2> /dev/null) || return 0
+	[ -z "$(printf '%s' "$VNC_CLIENTS" | jq -c '.[]' 2> /dev/null)" ] || return 0
+	# In the background: the toggle stops units and reloads the bar, and a
+	# caller such as battery-guard's low path must not stall on that while
+	# it holds the mode lock at a critical charge.
+	"$HOME/.config/ironbar/scripts/remote.sh" --toggle-vnc > /dev/null 2>&1 &
+}
+
 # omp and pi both run under an interpreter (bun, node) shared with unrelated
 # dev tools, so `ps -eo comm=` (bun, node-MainThread) can't tell them apart —
 # matching has to be on the full command line, same reasoning as
@@ -453,6 +474,7 @@ notify_mode() { # mode, detail
 
 set_mode() { # mode
 	m=$1
+	prev_mode=$(current_mode)
 	printf '%s' "$m" > "$MODE_FILE"
 	apply_root "$m"
 	case "$m" in
@@ -463,6 +485,10 @@ set_mode() { # mode
 	if [ "$m" = eco ]; then
 		hermes_pause
 		drain_start
+		# vnc_eco_off flips VNC off, so only fire on the eco entry edge —
+		# re-applying eco while already in eco (weak(), a repeated auto())
+		# must not flip it back on.
+		[ "$prev_mode" = eco ] || vnc_eco_off
 	else
 		drain_stop
 		hermes_resume
@@ -613,6 +639,18 @@ if [ "${1:-}" = test ]; then
 	unweak
 	[ -f "$WEAK_FILE" ] && { echo "unweak should clear the latch"; exit 1; }
 	[ "$(current_mode)" = full ] || { echo "unweak should re-decide from AC state: $(current_mode)"; exit 1; }
+
+	# the VNC-off hook fires once per entry into eco, never on re-application
+	# (a second fire would toggle VNC back on)
+	VNC_ECO_TRACE="$T/vnc-eco"
+	force eco
+	force eco # already eco: must not fire again
+	[ "$(grep -c fired "$VNC_ECO_TRACE" 2> /dev/null)" = 1 ] || { echo "vnc_eco_off must fire exactly once per eco entry"; exit 1; }
+	force full
+	force eco # a fresh entry fires again
+	[ "$(grep -c fired "$VNC_ECO_TRACE")" = 2 ] || { echo "vnc_eco_off must fire again on a fresh eco entry"; exit 1; }
+	force full
+	unset VNC_ECO_TRACE
 
 	# payload shape: every key present, mode-appropriate values
 	P=$(payload eco)

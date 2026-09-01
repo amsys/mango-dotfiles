@@ -34,6 +34,12 @@ CPU power knobs). All of them follow one pattern:
     login.
   - `console-palette-sync` accepts only exactly 16 valid
     `<index> <rrggbb>` lines before it writes `/boot/mango-palette.img`.
+  - `plymouth-theme-sync` accepts nine fixed `<role> <rrggbb>` lines and
+    one wallpaper path, then renders every PNG itself and packs them into
+    `/boot/mango-plymouth.img`. Nothing user-written reaches `/boot` as-is.
+    Residual risk, accepted: plymouthd decodes those PNGs as root inside
+    the initramfs; the inputs are the same files SDDM already displays
+    and libpng is the only parser.
   - `mango-powermode` re-validates every `KEY=value` from stdin against a
     closed set before it touches sysfs, and it never reads the
     user-writable config file itself.

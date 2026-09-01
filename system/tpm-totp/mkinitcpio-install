@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Installed to /usr/lib/initcpio/install/mango-totp by
+# system/tpm-totp/install.sh. Add `mango-totp` to HOOKS in
+# /etc/mkinitcpio.conf right after `plymouth`, then `mkinitcpio -P`.
+
+build() {
+	add_binary /usr/bin/tpm2-totp
+	# dlopen'd by tctildr, so add_binary's dependency walk does not see it
+	add_binary /usr/lib/libtss2-tcti-device.so.0
+	add_binary /usr/local/bin/mango-totp
+	# mkinitcpio's busybox has no date applet
+	add_binary /usr/bin/date
+	add_file /usr/lib/udev/rules.d/60-tpm-udev.rules
+	# local time for the clock on the prompt
+	if [ -e /etc/localtime ]; then
+		add_file "$(readlink -f /etc/localtime)" /etc/localtime
+	fi
+	add_file /usr/local/share/mango-totp/mango-totp.service \
+		/usr/lib/systemd/system/mango-totp.service 0644
+	add_symlink /usr/lib/systemd/system/sysinit.target.wants/mango-totp.service \
+		../mango-totp.service
+}
+
+help() {
+	cat <<HELPEOF
+This hook shows a TPM-sealed time-based one-time password on the plymouth
+LUKS prompt, so the boot chain can be checked against a phone before the
+passphrase is typed. Needs a secret sealed with `tpm2-totp generate`. See
+mango-dotfiles/system/tpm-totp/.
+HELPEOF
+}
+
+# vim: set ft=sh ts=4 sw=4 et:

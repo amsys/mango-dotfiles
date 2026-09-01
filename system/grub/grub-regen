@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Regenerate /boot/grub/grub.cfg with guards. Shared by every install script
+# under system/ that changes what GRUB boots.
+#
+#   grub-regen [<grep -E pattern> ...]
+#
+# Steps:
+#   1. grub-mkconfig into a temp file, never straight into /boot.
+#   2. Drop the "Loading Linux ..." / "Loading initial ramdisk ..." echo
+#      lines. /etc/grub.d/10_linux emits them unconditionally, and they print
+#      over the firmware logo that system/grub/install.sh keeps on screen.
+#   3. Refuse to install a config with no kernel entry, or one that misses a
+#      pattern the caller expects (the thing it just configured).
+#   4. Timestamped backup, then atomic install.
+#
+# Exit 0 only when the new config is in place.
+
+set -eu
+
+CFG=/boot/grub/grub.cfg
+
+die() {
+	printf 'grub-regen: %s\n' "$1" >&2
+	exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || die "must run as root"
+command -v grub-mkconfig >/dev/null || die "grub-mkconfig not found"
+
+new=$(mktemp) || die "could not create a temp file"
+trap 'rm -f "$new"' EXIT
+
+grub-mkconfig -o "$new"
+
+sed -i -E "/^[[:space:]]*echo[[:space:]]+'Loading (Linux|initial ramdisk)/d" "$new"
+
+grep -q 'vmlinuz-linux' "$new" ||
+	die "generated config has no kernel entry — not installing it"
+for pattern in "$@"; do
+	grep -qE -- "$pattern" "$new" ||
+		die "generated config does not match '$pattern' — not installing it"
+done
+
+stamp=$(date +%Y%m%d-%H%M%S)
+if [ -f "$CFG" ]; then
+	cp -a "$CFG" "$CFG.bak.$stamp"
+	echo "grub-regen: backup at $CFG.bak.$stamp"
+fi
+install -m 0644 -- "$new" "$CFG"
+echo "grub-regen: installed $CFG"

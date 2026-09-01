@@ -1,6 +1,6 @@
 [Unit]
 Description=wayvnc-privacy — blanks the local panels while a VNC client is connected
-# Started/stopped only by ironbar/scripts/remote.sh --toggle, alongside
+# Started/stopped only by ironbar/scripts/remote.sh --toggle-vnc, alongside
 # wayvnc.service. No [Install] section — deliberately not enabled at login,
 # same as wayvnc.service. BindsTo+After wayvnc.service: this watcher is
 # useless without a running wayvnc to send it events, and a stopped/crashed

@@ -395,7 +395,7 @@ async fn dispatch_refresh(
     if topic == "colors" {
         crate::tooltip::reload_palette();
     }
-    // remote.sh's --toggle pokes this after `ironbar reload` (a new/dropped
+    // remote.sh's --toggle-vnc pokes this after `ironbar reload` (a new/dropped
     // HEADLESS bar needs a fresh config). A plain reload swaps ironbar's
     // widget tree back to its process-start state — every ironvar it holds
     // resets — but this daemon's own `Vars::live` cache never learns that,
@@ -474,8 +474,8 @@ async fn dispatch_refresh(
         // only (reached from --toggle/--menu, never --status) — T6b D2's
         // only event source for this collector.
         "hotspot" => hotspot.refresh(vars).await,
-        // remote.sh's toggle() pokes this on the actual state-change edge —
-        // same shape as hotspot's arm above.
+        // remote.sh's toggle verbs poke this on the actual state-change
+        // edge — same shape as hotspot's arm above.
         "remote" => remote.refresh(vars).await,
         // keepawake.sh's toggle() pokes this on the actual state-change
         // edge — same shape as remote's arm above.

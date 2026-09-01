@@ -1,7 +1,8 @@
 [Unit]
 Description=kdeconnectd — KDE Connect daemon for the remote-access bar toggle
-# Started/stopped only by ironbar/scripts/remote.sh --toggle. No [Install]
-# section — deliberately not enabled at login.
+# Started/stopped by ironbar/scripts/remote.sh --toggle-kdeconnect, and
+# also started by --toggle-vnc when VNC turns on. No [Install] section —
+# deliberately not enabled at login.
 #
 # kdeconnectd binds 0.0.0.0 with no bind-address option; ufw
 # (system/remote/install.sh) is the only boundary. kdeconnect ships no unit

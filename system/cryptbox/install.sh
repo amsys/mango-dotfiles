@@ -61,7 +61,8 @@ if [ ! -f /boot/mango-palette.img ]; then
 		i=$((i + 1))
 	done >"$tmp/palette.conf"
 	install -Dm644 -- "$tmp/palette.conf" "$tmp/etc/mango/palette.conf"
-	(cd "$tmp" && printf 'etc/mango/palette.conf\n' | cpio --quiet -o -H newc) \
+	# directory entries included: the kernel creates no parents when unpacking
+	(cd "$tmp" && printf 'etc\netc/mango\netc/mango/palette.conf\n' | cpio --quiet -o -H newc) \
 		>/boot/mango-palette.img
 	rm -rf "$tmp"
 fi

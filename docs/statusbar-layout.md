@@ -383,6 +383,30 @@ and strengthens INV-3 further since scroll-to-adjust is non-destructive.
 No other reordering is specified. Moving the clock off `center` is explicitly
 **out of scope**.
 
+### 4.1 `HEADLESS-*` bars — a deliberate exception
+
+This whole document describes a bar sat in front of by its own monitor.
+The bar ironbar builds for a `HEADLESS-*` output (wayvnc's capture surface,
+see `system/remote/README.md`) is not that — nobody looks at that output's
+own tags, they look at whichever physical tag they pulled onto it. It is
+exempt from §3 by design (`genconfig.rs::build()`'s `HEADLESS` branch):
+
+- No `center`/`end` — omitted outright, not empty. §3.2-3.8 don't apply.
+- `start` is a remote-control strip, not launcher→tags→focus: one private
+  pill, then per physical monitor a name label and nine pull pills
+  (`remote_pills()`). INV-4's "constant X" still holds (fixed member
+  count per monitor, `ws.empty` dims instead of hiding), but INV-2's magic
+  corner doesn't apply — there is no `spark`/`power` on this bar to bleed
+  into it.
+- The remote pills deliberately drop the `show_if` gate INV-1 would
+  otherwise want (see `remote_pills()`'s own doc comment): gating a
+  monitor's block on *that monitor's* overview state would reflow this
+  bar for a screen the viewer isn't looking at, which is worse than the
+  small, bounded width this document's INV-1 exists to prevent elsewhere.
+
+A future pass should not "fix" this bar to match §3 — it is intentionally a
+different kind of bar, not an incomplete one.
+
 ---
 
 ## 5. Reference implementation (ironbar / `mango-bard`)

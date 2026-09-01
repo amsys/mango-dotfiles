@@ -19,7 +19,8 @@ TOOL_PKGS=(grim slurp swappy hyprpicker tesseract tesseract-data-eng
 	wf-recorder wlopm
 	brightnessctl playerctl wireplumber networkmanager nm-connection-editor
 	iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs
-	btop dmidecode imagemagick python-gobject wayvnc kdeconnect upower)
+	btop dmidecode imagemagick python-gobject wayvnc kdeconnect upower
+	qt6-wayland)
 LOOK_PKGS=(fish starship eza ttf-jetbrains-mono-nerd adw-gtk-theme-git
 	breeze-plus kde-cli-tools ttf-ibm-plex ttf-material-symbols-variable-git
 	darkly-bin ttf-rubik-vf)
@@ -27,7 +28,11 @@ LOOK_PKGS=(fish starship eza ttf-jetbrains-mono-nerd adw-gtk-theme-git
 # git-delta every paged git command fails outright, because git/config sets it
 # as core.pager.
 SHELL_PKGS=(fd fzf zoxide bat yazi git-delta wget)
-OPTIONAL_PKGS=(keepassxc nextcloud-client dolphin arch-update)
+# qt5-wayland pairs with keepassxc and qt6-wayland (TOOL_PKGS) with
+# pavucontrol-qt: Qt does not depend on its own Wayland plugin, so without it
+# a Qt app does not fail, it silently starts on XWayland under a different
+# appid and every windowrule that names its Wayland app_id stops matching.
+OPTIONAL_PKGS=(keepassxc qt5-wayland nextcloud-client dolphin arch-update)
 # Nothing in this repo references these — they are here so the list of what
 # makes this machine pleasant to use lives in one place rather than in memory.
 SUGGESTED_PKGS=(tealdeer entr lazygit sd dust duf trash-cli satty udiskie
@@ -46,6 +51,18 @@ done
 MISSING_SUGGESTED=()
 for pkg in "${SUGGESTED_PKGS[@]}"; do
 	pacman -Qq "$pkg" >/dev/null 2>&1 || MISSING_SUGGESTED+=("$pkg")
+done
+
+# A package installed --asdeps lives only as long as whatever pulled it in.
+# When that holder goes, `pacman -Rns $(pacman -Qtdq)` takes this one too —
+# that is how qt5-wayland vanished on 2026-09-01 and put KeePassXC on XWayland.
+# `pacman -Qi` (not -Qeq) so a provides-name like rofi-wayland still resolves
+# to its real package (rofi) and reads that package's own install reason.
+ASDEPS=()
+for pkg in "${CORE_PKGS[@]}" "${TOOL_PKGS[@]}" "${LOOK_PKGS[@]}" \
+	"${SHELL_PKGS[@]}" "${OPTIONAL_PKGS[@]}"; do
+	reason=$(pacman -Qi "$pkg" 2>/dev/null | awk -F': ' '/^Install Reason/{print $2}')
+	[[ -z $reason || $reason == Explicit* ]] || ASDEPS+=("$pkg")
 done
 
 if ((${#MISSING[@]})); then
@@ -73,4 +90,9 @@ fi
 
 if ((${#MISSING_SUGGESTED[@]})); then
 	log "  missing (suggested, nothing depends on them): ${MISSING_SUGGESTED[*]}"
+fi
+
+if ((${#ASDEPS[@]})); then
+	log "  installed as a dependency, an orphan sweep can remove them: ${ASDEPS[*]}"
+	log "  pin: sudo pacman -D --asexplicit ${ASDEPS[*]}"
 fi

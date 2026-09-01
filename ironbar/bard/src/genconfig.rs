@@ -322,15 +322,33 @@ pub fn build(monitors: &[String]) -> Value {
         // close to the button" (no per-widget offset field exists).
         bar.insert("popup_gap".into(), json!(12));
         if name.starts_with("HEADLESS") {
-            // T-headless-bar: a HEADLESS-* output is a VNC capture
+            // T-headless-strip: a HEADLESS-* output is a VNC capture
             // surface, not a real screen edge — clock/tray/audio/etc.
-            // have no viewer to serve, so the bar carries only the
-            // workspace pills a remote viewer needs to switch tags.
-            // `workspace_pills` is the same builder `start_modules` calls
-            // for every other bar, so the pill JSON can't drift between
-            // the two branches. No `center`/`end`: omitted, not empty
-            // arrays, since nothing populates them here.
-            bar.insert("start".into(), json!(workspace_pills(name, slug)));
+            // have no viewer to serve. It also has no tags of its own
+            // worth showing: whatever the remote viewer opened there is
+            // already on screen. The bar instead carries a
+            // remote-control strip — one private pill (`headless_pill`),
+            // then every physical monitor's name and nine pills
+            // (`remote_pills`), whose click pulls that monitor's tag onto
+            // this output (`remote.sh --pull`) instead of viewing it.
+            // `remote_pills` reuses `ws_pill`'s module names, so
+            // `mango-bard`'s per-monitor `@class`/label sends
+            // (`mango.rs::apply()`) already reach these copies with no
+            // daemon change — `ironbar style add-class` fans a class out
+            // to every module with that name, and the live bar already
+            // repeats plain module names (`clock`, `battery`, ...) across
+            // bar-DP-1/bar-eDP-1/bar-default the same way. No
+            // `center`/`end`: omitted, not empty arrays, since nothing
+            // populates them here.
+            let mut start = vec![headless_pill()];
+            for (pmon, pslug) in monitors.iter().zip(&slugs) {
+                if pmon.starts_with("HEADLESS") {
+                    continue;
+                }
+                start.push(mon_label(pmon));
+                start.extend(remote_pills(pmon, pslug, &bar_name));
+            }
+            bar.insert("start".into(), json!(start));
         } else {
             bar.insert(
                 "start".into(),
@@ -506,7 +524,7 @@ fn window_module(bar_name: &str) -> Value {
 fn start_modules(bar_name: &str, mon_slug: Option<(&str, &str)>) -> Vec<Value> {
     let mut m = vec![spark_module()];
     if let Some((mon, slug)) = mon_slug {
-        m.extend(workspace_pills(mon, slug));
+        m.extend(workspace_pills(mon, slug, bar_name));
     }
     m.push(window_module(bar_name));
     m
@@ -1154,17 +1172,18 @@ fn hotspot_module(bar_name: &str) -> Value {
 /// Unlike `hotspot_module` above, no `show_if` — a toggle that hides itself
 /// once off has no way to be clicked back on, so this pill stays visible
 /// and carries its on/off/partial state entirely through `@class/remote`
-/// (style.css's `.remote.active`/`.remote.partial`). `on_click_right` pulls
-/// the next occupied tag onto wayvnc's virtual output (remote.sh's own
-/// header has the full verb list) — same left-toggle/right-action shape as
-/// `hotspot_module` above.
+/// (style.css's `.remote.active`/`.remote.partial`). `on_click_left` toggles
+/// VNC only (turning it on also starts kdeconnectd; turning it off leaves
+/// kdeconnectd running); `on_click_right` toggles kdeconnectd only. Tag
+/// pull cycling moved off the pill onto the SUPER+CTRL keybinds — a
+/// three-state pill (VNC/KDE Connect/pull) has no room left for a third
+/// click.
 ///
 /// T-remote-popup: the popup is the plain `popup()` stack again, same as
 /// every other simple pill. A deleted helper used to append a clickable
 /// per-monitor tag grid below the body. The grid was dropped on user report
 /// — a popup that only opens on hover over a 20px pill is not a place a tag
-/// button can be reached in practice, and `--pull-next` on the pill itself
-/// already does the job. The popup is read-only status now.
+/// button can be reached in practice. The popup is read-only status now.
 fn remote_module(bar_name: &str) -> Value {
     json!({
         "type": "custom",
@@ -1174,8 +1193,8 @@ fn remote_module(bar_name: &str) -> Value {
         "popup": popup("remote_tip", bar_name),
         "on_mouse_enter": format!("mango-bard hover enter {bar_name} remote -q"),
         "on_mouse_exit": format!("mango-bard hover exit {bar_name} remote -q"),
-        "on_click_left": "~/.config/ironbar/scripts/remote.sh --toggle",
-        "on_click_right": "~/.config/ironbar/scripts/remote.sh --pull-next"
+        "on_click_left": "~/.config/ironbar/scripts/remote.sh --toggle-vnc",
+        "on_click_right": "~/.config/ironbar/scripts/remote.sh --toggle-kdeconnect"
     })
 }
 
@@ -1394,17 +1413,6 @@ fn inhibit_module(bar_name: &str) -> Value {
     })
 }
 
-/// Nine numbered pills plus one overview pill for `mon` — and nothing else.
-/// `build()` puts exactly this in the bar's `center` slot, so the pill group
-/// (a fixed 324px — see `.ws-overview`'s own width comment in style.css) is
-/// the only thing GTK centres there; clock/pomo/colorpicker/darkmode/snip/
-/// inhibit used to trail this same array (T8a), which meant `center` really
-/// held 15 variable-width modules, not the 9 pills a viewer reads as "the
-/// centre" — any of those other 6 changing width (a longer pomodoro label,
-/// a class toggle) shifted the pills sideways. They moved to
-/// `rightcenter_modules()`, appended to `end` instead (see that function's
-/// own doc comment).
-///
 /// Each pill is a `custom` module (not a widget) because `style
 /// add-class`/`remove-class` match module names, and `popup` exists only on
 /// `custom` modules.
@@ -1431,42 +1439,95 @@ fn inhibit_module(bar_name: &str) -> Value {
 /// shape `window_module()` already uses for `truncate` (a field that
 /// likewise only exists on `LabelWidget`) — `justify` now reaches the
 /// label that actually needs it.
-fn workspace_pills(mon: &str, slug: &str) -> Vec<Value> {
-    let bar_name = format!("bar-{mon}");
+///
+/// One numbered tag pill's module JSON, for `mon`'s tag `n`. Shared by
+/// [`workspace_pills`] (the physical bar — clicks/scrolls act on mango's
+/// focused monitor, `scrollable: true`) and [`remote_pills`] (the headless
+/// bar's copy of a physical monitor's pills — click pulls the tag instead,
+/// `scrollable: false`; see that function's own doc comment).
+/// `bar_name` is the bar the pill is actually rendered on, not necessarily
+/// `mon`'s own bar — `remote_pills` renders `mon`'s pills on the headless
+/// bar, so the module's `popup`/hover/toggle-popup targets must name that
+/// bar, not `mon`'s.
+/// `gated` sets `show_if: "#ws_<slug>_tags"` (hides the pill while `mon`
+/// is in overview). `workspace_pills` wants that — a monitor's own pills
+/// should vanish on its own overview screen. `remote_pills` passes
+/// `gated: false`: gating the headless strip's copy on a *different*
+/// monitor's overview state would reflow the whole strip (the other
+/// monitor's block sliding over) in response to a screen the remote
+/// viewer can't see — see `remote_pills`'s own doc comment.
+fn ws_pill(
+    mon: &str,
+    slug: &str,
+    n: u64,
+    bar_name: &str,
+    on_click_left: String,
+    scrollable: bool,
+    gated: bool,
+) -> Value {
+    let module = ws_module(mon, n);
+    let mut pill = serde_json::Map::new();
+    pill.insert("type".into(), json!("custom"));
+    pill.insert("name".into(), json!(module));
+    pill.insert("class".into(), json!("ws"));
+    if gated {
+        pill.insert("show_if".into(), json!(format!("#{}", var_tags(slug))));
+    }
+    pill.insert(
+        "bar".into(),
+        json!([ { "type": "button", "widgets": [
+            { "type": "label", "justify": "center", "label": format!("#{}", var_lbl(slug, n)) }
+        ] } ]),
+    );
+    pill.insert("popup".into(), popup(&var_tip(slug, n), bar_name));
+    pill.insert("on_click_left".into(), json!(on_click_left));
+    // T-hover: hover opens/closes the popup; right-click's own
+    // toggle-popup stays too, as a harmless manual fallback — unlike
+    // cpu/memory/docker/battery/volume/bluetooth, this gesture isn't in
+    // tension with hover (it's a different click, not the redundant one
+    // hover replaced). No refresh is dispatched on hover-open here:
+    // mango.apply() already keeps every tag's tip live off its own mmsg
+    // event stream, so there is nothing stale to lazily rebuild.
+    pill.insert(
+        "on_mouse_enter".into(),
+        json!(format!("mango-bard hover enter {bar_name} {module} -q")),
+    );
+    pill.insert(
+        "on_mouse_exit".into(),
+        json!(format!("mango-bard hover exit {bar_name} {module} -q")),
+    );
+    pill.insert(
+        "on_click_right".into(),
+        json!(format!("ironbar bar {bar_name} toggle-popup {module}")),
+    );
+    if scrollable {
+        pill.insert("on_scroll_up".into(), json!("mmsg dispatch viewtoleft,0"));
+        pill.insert(
+            "on_scroll_down".into(),
+            json!("mmsg dispatch viewtoright,0"),
+        );
+    }
+    // T-next (item 5): default `show_if` transition is `slide_start` — a
+    // left-to-right slide, which read as the pill group shuffling
+    // sideways rather than a tag simply appearing/disappearing. Ironbar
+    // has no slide-from-top option (`--print-schema`: slide_start/
+    // slide_end/crossfade/none only), so a fade is the closest match.
+    pill.insert("transition_type".into(), json!("crossfade"));
+    Value::Object(pill)
+}
+
+fn workspace_pills(mon: &str, slug: &str, bar_name: &str) -> Vec<Value> {
     let mut pills: Vec<Value> = (1..=TAG_COUNT)
         .map(|n| {
-            let module = ws_module(mon, n);
-            json!({
-                "type": "custom",
-                "name": module,
-                "class": "ws",
-                "show_if": format!("#{}", var_tags(slug)),
-                "bar": [ { "type": "button", "widgets": [
-                    { "type": "label", "justify": "center", "label": format!("#{}", var_lbl(slug, n)) }
-                ] } ],
-                "popup": popup(&var_tip(slug, n), &bar_name),
-                "on_click_left": format!("mmsg dispatch view,{n},0"),
-                // T-hover: hover opens/closes the popup; right-click's own
-                // toggle-popup stays too, as a harmless manual fallback —
-                // unlike cpu/memory/docker/battery/volume/bluetooth, this
-                // gesture isn't in tension with hover (it's a different
-                // click, not the redundant one hover replaced). No refresh
-                // is dispatched on hover-open here: mango.apply() already
-                // keeps every tag's tip live off its own mmsg event stream,
-                // so there is nothing stale to lazily rebuild.
-                "on_mouse_enter": format!("mango-bard hover enter {bar_name} {module} -q"),
-                "on_mouse_exit": format!("mango-bard hover exit {bar_name} {module} -q"),
-                "on_click_right": format!("ironbar bar {bar_name} toggle-popup {module}"),
-                "on_scroll_up": "mmsg dispatch viewtoleft,0",
-                "on_scroll_down": "mmsg dispatch viewtoright,0",
-                // T-next (item 5): default `show_if` transition is
-                // `slide_start` — a left-to-right slide, which read as the
-                // pill group shuffling sideways rather than a tag simply
-                // appearing/disappearing. Ironbar has no slide-from-top
-                // option (`--print-schema`: slide_start/slide_end/
-                // crossfade/none only), so a fade is the closest match.
-                "transition_type": "crossfade"
-            })
+            ws_pill(
+                mon,
+                slug,
+                n,
+                bar_name,
+                format!("mmsg dispatch view,{n},0"),
+                true,
+                true,
+            )
         })
         .collect();
 
@@ -1486,6 +1547,71 @@ fn workspace_pills(mon: &str, slug: &str) -> Vec<Value> {
         "transition_type": "crossfade"
     }));
     pills
+}
+
+/// T-headless-strip: the headless bar's copy of `mon`'s nine tag pills.
+/// Same module names as `mon`'s own bar (see `ws_pill`'s doc comment for
+/// why that's safe), but `on_click_left` pulls the tag onto the headless
+/// output (`remote.sh --pull`) instead of viewing it, and there is no
+/// scroll and no overview pill: `viewtoleft`/`viewtoright`/
+/// `toggleoverview` act on mango's *focused* monitor, which on this bar is
+/// never `mon` — they would move the viewer's own headless view, not
+/// `mon`'s. Not gated on `mon`'s own `ws_<slug>_tags` either — the strip
+/// shows every physical monitor at once, so hiding `mon`'s block whenever
+/// `mon` happens to be in overview would reflow the neighbouring block
+/// sideways for a reason the viewer can't see (they aren't looking at
+/// `mon`'s screen).
+fn remote_pills(mon: &str, slug: &str, bar_name: &str) -> Vec<Value> {
+    (1..=TAG_COUNT)
+        .map(|n| {
+            ws_pill(
+                mon,
+                slug,
+                n,
+                bar_name,
+                format!("~/.config/ironbar/scripts/remote.sh --pull {mon} {n}"),
+                false,
+                false,
+            )
+        })
+        .collect()
+}
+
+/// Static screen-name label ahead of `mon`'s pills on the headless bar's
+/// remote-control strip. No ironvar: a connector name never changes at
+/// runtime, so there is nothing for `mango-bard` to keep live here.
+fn mon_label(mon: &str) -> Value {
+    json!({
+        "type": "custom",
+        "name": format!("ws-{mon}-name"),
+        "class": "ws-mon",
+        "bar": [ { "type": "label", "label": mon } ]
+    })
+}
+
+/// The headless bar's own private pill — leads the strip, before any
+/// physical monitor's pills. No ironvar and no number: the headless
+/// output's own tags are already private (nobody else can see them), so
+/// this doesn't need to own a specific one to mean "my own view" — it just
+/// needs a fixed, always-first target that sends any pulled tag back,
+/// which `remote.sh --restore` already does. The label is a static home
+/// glyph, reusing [`overview_label`]'s three-line shape (invisible mirror
+/// row / content / invisible mirror row) so its height matches a numbered
+/// pill's exactly.
+fn headless_pill() -> Value {
+    let glyph = "\u{f02dc}"; // mdi-home
+    let mirror = format!("<span size=\"38%\" alpha=\"1%\">{glyph}</span>");
+    json!({
+        "type": "custom",
+        "name": "ws-home",
+        "class": "ws ws-home",
+        "bar": [ { "type": "button", "widgets": [
+            { "type": "label", "justify": "center", "label": format!("{mirror}\n{glyph}\n{mirror}") }
+        ] } ],
+        "tooltip": "Your own view — click to send any pulled tag back",
+        "on_click_left": "~/.config/ironbar/scripts/remote.sh --restore",
+        "transition_type": "crossfade"
+    })
 }
 
 #[cfg(test)]
@@ -1722,28 +1848,35 @@ mod tests {
     }
 
     #[test]
-    fn remote_left_toggles_right_pulls_next() {
+    fn remote_left_toggles_vnc_right_toggles_kdeconnect() {
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let remote = end.iter().find(|m| m["name"] == "remote").unwrap();
         assert_eq!(
             remote["on_click_left"],
-            json!("~/.config/ironbar/scripts/remote.sh --toggle")
+            json!("~/.config/ironbar/scripts/remote.sh --toggle-vnc")
         );
         assert_eq!(
             remote["on_click_right"],
-            json!("~/.config/ironbar/scripts/remote.sh --pull-next")
+            json!("~/.config/ironbar/scripts/remote.sh --toggle-kdeconnect")
         );
     }
 
     #[test]
     fn remote_popup_is_the_plain_read_only_stack() {
         // Replaces `remote_popup_has_one_pull_row_per_physical_monitor…`.
-        // T-remote-popup deleted the clickable tag grid. Equality against
-        // `popup()` is the whole assertion for this bar: the plain stack has
-        // no extra section by construction, so no grid row and no button can
-        // hide in it. The config-wide `--pull ` check then covers the other
-        // bars too — a grid cell cannot exist without its own pull command.
+        // T-remote-popup deleted the clickable tag grid from the physical
+        // bars' `remote` pill. Equality against `popup()` is the whole
+        // assertion for this bar: the plain stack has no extra section by
+        // construction, so no grid row and no button can hide in it.
+        //
+        // T-headless-strip put `--pull` back — deliberately, on the
+        // HEADLESS bar only, where a remote viewer can actually reach it
+        // (see genconfig.rs module doc / IRONBAR.md's T-headless-strip
+        // entry). So the "no pull command anywhere" check narrows to the
+        // physical bars and the fallback bar: nothing reachable only via
+        // SUPER+CTRL keybinds (unreachable to a remote viewer) may also
+        // carry a pull button.
         let cfg = build(&[
             "eDP-1".to_string(),
             "DP-1".to_string(),
@@ -1752,23 +1885,15 @@ mod tests {
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let remote = end.iter().find(|m| m["name"] == "remote").unwrap();
         assert_eq!(remote["popup"], popup("remote_tip", "bar-eDP-1"));
-        let whole = serde_json::to_string(&cfg).unwrap();
-        assert!(
-            !whole.contains("remote.sh --pull "),
-            "no per-tag pull command may survive on any bar; --pull-next on the pill stays"
-        );
-
-        // T-headless-bar: HEADLESS-4 gets a pills-only bar (no center/end),
-        // eDP-1 keeps its full start/center/end.
-        let headless = &cfg["monitors"]["HEADLESS-4"];
-        let headless_start = headless["start"].as_array().unwrap();
-        let headless_slug = crate::mango::slug("HEADLESS-4");
-        assert_eq!(
-            headless_start,
-            &workspace_pills("HEADLESS-4", &headless_slug)
-        );
-        assert!(headless.get("center").is_none());
-        assert!(headless.get("end").is_none());
+        for bar in ["eDP-1", "DP-1"] {
+            let whole = serde_json::to_string(&cfg["monitors"][bar]).unwrap();
+            assert!(
+                !whole.contains("remote.sh --pull"),
+                "no pull command may survive on {bar}'s own bar — a remote viewer can't reach it while the panels are dark"
+            );
+        }
+        let fallback = build(&[]);
+        assert!(!serde_json::to_string(&fallback).unwrap().contains("remote.sh --pull"));
 
         let edp_start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let edp_names: Vec<&str> = edp_start
@@ -1779,6 +1904,54 @@ mod tests {
         assert_eq!(edp_names.last(), Some(&"win"));
         assert!(cfg["monitors"]["eDP-1"]["center"].as_array().is_some());
         assert!(cfg["monitors"]["eDP-1"]["end"].as_array().is_some());
+    }
+
+    #[test]
+    fn headless_bar_is_the_remote_control_strip() {
+        // T-headless-strip: the HEADLESS bar's `start` is a private pill,
+        // then one screen-name label + nine pull pills per physical
+        // monitor — not a copy of the headless output's own tags (that was
+        // T-headless-bar; see the module doc comment above `workspace_pills`
+        // for why it was wrong).
+        let cfg = build(&[
+            "eDP-1".to_string(),
+            "DP-1".to_string(),
+            "HEADLESS-4".to_string(),
+        ]);
+        let headless = &cfg["monitors"]["HEADLESS-4"];
+        assert!(headless.get("center").is_none());
+        assert!(headless.get("end").is_none());
+
+        let start = headless["start"].as_array().unwrap();
+        let names: Vec<String> = start
+            .iter()
+            .map(|m| m["name"].as_str().unwrap().to_string())
+            .collect();
+        let mut expected = vec!["ws-home".to_string(), "ws-eDP-1-name".to_string()];
+        expected.extend((1..=TAG_COUNT).map(|n| ws_module("eDP-1", n)));
+        expected.push("ws-DP-1-name".to_string());
+        expected.extend((1..=TAG_COUNT).map(|n| ws_module("DP-1", n)));
+        assert_eq!(names, expected);
+
+        let home = &start[0];
+        assert_eq!(home["on_click_left"], json!("~/.config/ironbar/scripts/remote.sh --restore"));
+
+        for pill in start.iter().filter(|m| {
+            let n = m["name"].as_str().unwrap();
+            n.starts_with("ws-eDP-1-") && n != "ws-eDP-1-name" || n.starts_with("ws-DP-1-") && n != "ws-DP-1-name"
+        }) {
+            let name = pill["name"].as_str().unwrap();
+            let (mon, tag) = name.strip_prefix("ws-").unwrap().rsplit_once('-').unwrap();
+            assert_eq!(
+                pill["on_click_left"],
+                json!(format!("~/.config/ironbar/scripts/remote.sh --pull {mon} {tag}"))
+            );
+            assert!(pill.get("show_if").is_none(), "{name} must not be show_if-gated — see genconfig.rs's remote_pills doc comment");
+            assert!(pill.get("on_scroll_up").is_none(), "{name} must not scroll the viewer's own headless view");
+            assert!(pill.get("on_scroll_down").is_none());
+        }
+
+        assert!(!names.iter().any(|n| n.ends_with("-ov")), "no overview pill on the remote strip");
     }
 
     #[test]

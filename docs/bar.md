@@ -36,6 +36,13 @@ Start (launcher → tags → focus):
 | *(9 tag pills + overview)* | per-monitor tags — left-click views a tag, scroll moves through tags, hover lists a tag's windows | — |
 | win | focused window title, repo-prefixed for kitty windows (kitty/repo-title.py) | scroll: brightness |
 
+A `HEADLESS-*` bar (the wayvnc capture output) is different: no clock, tray,
+or audio pills, and `start` is a remote-control strip instead of that
+output's own tags — one private pill (click: send any pulled tag back), then
+each physical monitor's name and nine tag pills, click-to-pull instead of
+click-to-view. See [remote.sh](../ironbar/scripts/remote.sh) and
+`genconfig.rs::build()`'s `HEADLESS` branch.
+
 Center (time):
 
 | Pill | Shows | Click |
@@ -62,7 +69,7 @@ End (tray → resources → tools → audio → connectivity → session):
 | volume, mic | audio | `pavucontrol-qt`; scroll: volume |
 | net-spinner, wifi, eth, netsec | network state and a security grade | menus; see below |
 | hotspot | hidden unless active | left: menu; right: toggle |
-| remote | popup: read-only status — VNC on/off, whether the local screens are blanked, the pulled tag, KDE Connect on/off | left: toggle; right: pull next tag |
+| remote | popup: read-only status — VNC on/off, whether the local screens are blanked, the pulled tag, KDE Connect on/off | left: VNC toggle (also starts KDE Connect); right: KDE Connect toggle; pull cycling: SUPER+CTRL keybinds, or click a tag pill on the headless bar's own remote-control strip |
 | bluetooth | devices | right: `blueman-manager` |
 | power | — | session menu |
 
@@ -98,7 +105,7 @@ The daemon covers the data collection. Interactive actions stay in
 | `docker-menu.sh` | rofi docker actions |
 | `hotspot.sh` | hotspot menu and toggle |
 | `keepawake.sh` | toggles `mango-keepawake.service` (idle + lid inhibit) |
-| `remote.sh` | toggles `wayvnc.service` + `kdeconnectd.service` + keep-awake + panel blanking, on a virtual (headless) output; `--pull`/`--pull-next`/`--pull-prev`/`--restore` move a physical monitor's tag onto it and back |
+| `remote.sh` | `--toggle-vnc` switches `wayvnc.service` + keep-awake + panel blanking on a virtual (headless) output, and starts `kdeconnectd.service` with it; `--toggle-kdeconnect` switches `kdeconnectd.service` alone; `--pull`/`--pull-next`/`--pull-prev`/`--restore` move a physical monitor's tag onto the virtual output and back |
 | `darkmode.sh` | light/dark toggle, then re-theme |
 | `clock.sh --calendar` | focus or start the calendar app |
 | `tray-click.sh` | tray `on_click_left` — jumps to an already-open window, else SNI `Activate` |
