@@ -50,7 +50,6 @@ Editing them works until the next wallpaper switch, then silently reverts:
 ~/.config/wlogout/style.css
 /usr/share/sddm/themes/mango-sddm/Colors.qml
 /usr/share/sddm/themes/mango-sddm/background.*
-/boot/mango-palette.img
 /boot/mango-plymouth.img
 ```
 
@@ -93,16 +92,6 @@ in the docs/install.md checklist if it cannot be tracked as a file:
   tracked in `system/sddm/` — `sudo system/sddm/install.sh` is what pushes them
   out. Editing the installed copies directly is the same mistake as editing
   matugen output
-- the boot-time colour frame's *installed* side: `/usr/local/bin/mango-cryptbox`,
-  `/usr/local/bin/console-palette-sync`,
-  `/usr/local/share/mango-cryptbox/ask-password-dropin.conf`,
-  `/usr/lib/initcpio/install/mango-cryptbox`,
-  `/etc/sudoers.d/console-palette-sync`, the `mango-cryptbox` hook in
-  `/etc/mkinitcpio.conf`'s `HOOKS`, and `GRUB_EARLY_INITRD_LINUX_CUSTOM` in
-  `/etc/default/grub`. The *sources* are tracked in `system/cryptbox/` —
-  `sudo system/cryptbox/install.sh` is what pushes them out, and it also runs
-  `mkinitcpio -P` and `grub-mkconfig`, the only two steps that touch `/boot`
-  outside of a wallpaper switch
 - the plymouth prompt's *installed* side: `/usr/share/plymouth/themes/mango/`
   (never with a `dyn/` inside), `/usr/local/bin/plymouth-theme-sync`,
   `/etc/sudoers.d/plymouth-theme-sync`, `/etc/plymouth/plymouthd.conf`,

@@ -4,11 +4,10 @@
 #
 #   sudo ~/src/mango-dotfiles/system/plymouth/install.sh
 #
-# Ordered like system/cryptbox/install.sh: everything that only lays files
-# down comes first, the two edits that change what boots (HOOKS and the grub
-# defaults + grub.cfg) next, and the one slow step that bakes them in
-# (`mkinitcpio -P`) last. Abandoning the script before that point changes
-# nothing about the next boot.
+# Ordered so everything that only lays files down comes first, the two edits
+# that change what boots (HOOKS and the grub defaults + grub.cfg) next, and
+# the one slow step that bakes them in (`mkinitcpio -P`) last. Abandoning the
+# script before that point changes nothing about the next boot.
 #
 # The theme's colours, wallpaper and glyphs are not in the initramfs at all:
 # they travel as PNGs in the early initrd /boot/mango-plymouth.img, rebuilt
@@ -17,8 +16,9 @@
 # stock plymouth hook copies the whole directory, and a stale dyn/ baked into
 # the main image would shadow the early initrd forever.
 #
-# mango-cryptbox stays installed as the fallback: systemd only starts the
-# console password agent (and with it cryptbox) when plymouth is not running.
+# When plymouth is not running, systemd falls back to a plain text console
+# password agent — no themed fallback prompt here; mango-cryptbox, which
+# used to theme it, is gone.
 #
 # The handover to SDDM is plymouth's plain `quit`, plus an sddm.service
 # drop-in that waits for plymouth-quit-wait. `quit --retain-splash` is not
@@ -38,8 +38,8 @@ for cmd in plymouthd plymouth-set-default-theme mkinitcpio grub-mkconfig magick 
 	command -v "$cmd" >/dev/null || { echo "missing dependency: $cmd" >&2; exit 1; }
 done
 [ -f /usr/lib/initcpio/install/plymouth ] || { echo "plymouth's mkinitcpio hook is missing" >&2; exit 1; }
-grep -qE '\bmango-cryptbox\b' /etc/mkinitcpio.conf ||
-	{ echo "mango-cryptbox is not in HOOKS — run system/cryptbox/install.sh first" >&2; exit 1; }
+grep -qE '\bsd-encrypt\b' /etc/mkinitcpio.conf ||
+	{ echo "no 'sd-encrypt' hook found in HOOKS — add plymouth to HOOKS by hand" >&2; exit 1; }
 if [ -e "$THEME_DIR/dyn" ]; then
 	echo "$THEME_DIR/dyn exists — remove it first; dynamic assets must never live in the host theme dir" >&2
 	exit 1
@@ -84,7 +84,7 @@ if grep -qE '\bplymouth\b' /etc/mkinitcpio.conf; then
 	echo "    plymouth hook already present, skipping"
 else
 	cp -a /etc/mkinitcpio.conf "/etc/mkinitcpio.conf.bak.$STAMP"
-	sed -i -E 's/\bmango-cryptbox\b/plymouth mango-cryptbox/' /etc/mkinitcpio.conf
+	sed -i -E 's/\bsd-encrypt\b/plymouth sd-encrypt/' /etc/mkinitcpio.conf
 	grep -qE '\bplymouth\b' /etc/mkinitcpio.conf ||
 		{ echo "could not add plymouth to HOOKS" >&2; exit 1; }
 fi
@@ -94,9 +94,9 @@ grep -qE '\bkms\b' /etc/mkinitcpio.conf ||
 echo "==> $DEFAULTS (backup: $DEFAULTS.bak.$STAMP)"
 cp -a "$DEFAULTS" "$DEFAULTS.bak.$STAMP"
 if grep -q '^GRUB_EARLY_INITRD_LINUX_CUSTOM=' "$DEFAULTS"; then
-	sed -i 's|^GRUB_EARLY_INITRD_LINUX_CUSTOM=.*|GRUB_EARLY_INITRD_LINUX_CUSTOM="mango-palette.img mango-plymouth.img"|' "$DEFAULTS"
+	sed -i 's|^GRUB_EARLY_INITRD_LINUX_CUSTOM=.*|GRUB_EARLY_INITRD_LINUX_CUSTOM="mango-plymouth.img"|' "$DEFAULTS"
 else
-	printf '\nGRUB_EARLY_INITRD_LINUX_CUSTOM="mango-palette.img mango-plymouth.img"\n' >>"$DEFAULTS"
+	printf '\nGRUB_EARLY_INITRD_LINUX_CUSTOM="mango-plymouth.img"\n' >>"$DEFAULTS"
 fi
 if grep -qE '^GRUB_CMDLINE_LINUX_DEFAULT=".*\bsplash\b' "$DEFAULTS"; then
 	echo "    splash already on the kernel command line"
@@ -107,7 +107,7 @@ else
 fi
 
 echo "==> regenerating /boot/grub/grub.cfg"
-"$REPO_DIR/system/grub/grub-regen" 'mango-palette.img /mango-plymouth.img' 'splash'
+"$REPO_DIR/system/grub/grub-regen" 'mango-plymouth.img' 'splash'
 
 echo "==> mkinitcpio -P (the only slow step)"
 mkinitcpio -P

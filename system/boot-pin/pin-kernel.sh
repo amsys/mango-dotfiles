@@ -15,7 +15,7 @@
 #     booting the old kernel after every upgrade (seen 2026-09-01).
 #   - the pinned entry has no `splash`: plymouth runs its text prompt there,
 #     with the attestation code on the top line. The verbose entry has
-#     `plymouth.enable=0`: systemd's console prompt with mango-cryptbox.
+#     `plymouth.enable=0`: systemd's plain text console prompt.
 #
 # --force: pin even when /boot/vmlinuz-linux is not the running kernel
 # (default refuses: an untested kernel is not a rescue).
@@ -96,20 +96,12 @@ block=$(cat <<BLOCK
 menuentry 'Arch Linux (pinned $kver, $(date +%F))' --class arch --class gnu-linux --class gnu --class os \$menuentry_id_option 'mango-pinned' {
 $prelude
 $pinned_linux
-	if [ -f /mango-palette.img ]; then
-		initrd	/intel-ucode.img /mango-palette.img /pinned/initramfs-linux-pinned.img
-	else
-		initrd	/intel-ucode.img /pinned/initramfs-linux-pinned.img
-	fi
+	initrd	/intel-ucode.img /pinned/initramfs-linux-pinned.img
 }
 menuentry 'Arch Linux (verbose console, current kernel)' --class arch --class gnu-linux --class gnu --class os \$menuentry_id_option 'mango-verbose' {
 $prelude
 $verbose_linux
-	if [ -f /mango-palette.img ]; then
-		initrd	/intel-ucode.img /mango-palette.img /initramfs-linux.img
-	else
-		initrd	/intel-ucode.img /initramfs-linux.img
-	fi
+	initrd	/intel-ucode.img /initramfs-linux.img
 }
 # END mango-pin
 BLOCK

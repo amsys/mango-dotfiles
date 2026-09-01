@@ -32,8 +32,6 @@ CPU power knobs). All of them follow one pattern:
     from a root-owned reference by color literals alone. It refuses
     structural changes, because the greeter executes this file before
     login.
-  - `console-palette-sync` accepts only exactly 16 valid
-    `<index> <rrggbb>` lines before it writes `/boot/mango-palette.img`.
   - `plymouth-theme-sync` accepts nine fixed `<role> <rrggbb>` lines and
     one wallpaper path, then renders every PNG itself and packs them into
     `/boot/mango-plymouth.img`. Nothing user-written reaches `/boot` as-is.

@@ -1,8 +1,0 @@
-# Installed to /etc/sudoers.d/console-palette-sync (0440) by
-# system/cryptbox/install.sh.
-#
-# Lets matugen's post_hook refresh the boot-time colour palette without a
-# password prompt on every wallpaper switch. The target is root-owned and not
-# user-writable, and the trailing "" forbids arguments — so this grants
-# exactly one fixed action, not root.
-%wheel ALL=(root) NOPASSWD: /usr/local/bin/console-palette-sync ""

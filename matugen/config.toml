@@ -62,16 +62,6 @@ output_path = '~/.config/kdeglobals'
 input_path = '~/.config/matugen/templates/wallpaper.txt'
 output_path = '~/.local/state/mango/generated/wallpaper/path.txt'
 
-# Rendered as martin into a state file, then installed into /boot by
-# /usr/local/bin/console-palette-sync — root-owned, argument-free, and it
-# refuses anything that is not exactly 16 "<index> <rrggbb>" lines. See
-# system/cryptbox/. `|| true` so a missing sudoers rule can't break a
-# wallpaper switch.
-[templates.console_palette]
-input_path = '~/.config/matugen/templates/console/palette.conf'
-output_path = '~/.local/state/mango/generated/console-palette.conf'
-post_hook = 'sudo -n /usr/local/bin/console-palette-sync || true'
-
 # Rendered as martin into a state file, then turned into the PNG assets of the
 # plymouth LUKS prompt (/boot/mango-plymouth.img) by
 # /usr/local/bin/plymouth-theme-sync — root-owned, argument-free, and it

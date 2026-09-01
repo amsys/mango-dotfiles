@@ -74,7 +74,6 @@ scheme and reruns `switchwall.sh --noswitch`.
 | `kde/color.txt` | state dir `color.txt` | read by `vscode-set-color.sh` |
 | `colors.json` | state dir `colors.json` | read by `keybinds-cheatsheet.py` |
 | `wallpaper.txt` | state dir `wallpaper/path.txt` | — |
-| `console/palette.conf` | state dir `console-palette.conf` | `console-palette-sync` (boot prompt) |
 | `plymouth/colors.conf` | state dir `plymouth-colors.conf` | `plymouth-theme-sync` (boot prompt) |
 | `sddm/Colors.qml` | state dir `sddm-colors.qml` | `sddm-theme-sync` (login screen) |
 
@@ -152,9 +151,7 @@ refuses to run if it exists.
 
 **Early initrds need directory entries.** The kernel unpacks them into an
 empty rootfs and creates no parent directories; a cpio holding only files is
-dropped without a message. `plymouth-theme-sync` and `console-palette-sync`
-both include the parents (the palette one did not before 2026-09-01, and the
-"themed" console band was the VT default blue all along).
+dropped without a message. `plymouth-theme-sync` includes the parents.
 
 Preview without touching `/boot`: `plymouth-theme-sync test <dir>` renders
 the assets and the cpio from the current state files with no root.
@@ -210,20 +207,6 @@ initrds (PCR 8/9 are not part of the seal, on purpose — the early initrds
 change on every wallpaper switch). A swapped initramfs is only caught by a
 UKI booted under Secure Boot (PCR 11), a later project.
 
-## Boot prompt fallback (mango-cryptbox)
-
-`mango-cryptbox` draws a themed band around systemd's *console* LUKS prompt.
-It only runs when plymouth is not (`plymouth.enable=0` on the kernel line,
-the verbose GRUB entry, or a DRM failure): systemd's console password agent
-has `ConditionPathExists=!/run/plymouth/pid`. The palette travels in
-`/boot/mango-palette.img`, built by `console-palette-sync` (root-owned, no
-arguments, exactly 16 `<index> <rrggbb>` lines).
-
-```bash
-sudo system/cryptbox/install.sh    # once, and after any change under system/cryptbox/
-mango-cryptbox --demo              # preview in a terminal
-```
-
 ## GRUB and the rescue entries
 
 `system/grub/install.sh --gfx` hides the menu (F4, Esc or a held Shift
@@ -240,6 +223,6 @@ console shows no text at all, so the menu cannot be used.
 `/boot/pinned/` and adds two entries to `/etc/grub.d/40_custom` that every
 `grub-mkconfig` keeps: the pinned kernel (plymouth text prompt, quiet) and a
 verbose-console entry for the current kernel (no `quiet`, no `splash`,
-plymouth off, mango-cryptbox prompt). The copies must stay out of `/boot`
+plymouth off, systemd's console prompt). The copies must stay out of `/boot`
 itself: `10_linux` globs `/boot/vmlinuz-*` and makes the pinned copy the
 default entry. Re-run it after a kernel you trust has booted.

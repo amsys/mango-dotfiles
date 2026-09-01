@@ -75,7 +75,6 @@ with its own root script and is never symlinked:
 | `system/sddm/` | the matugen-themed SDDM greeter and its color sync tool | [theming.md](theming.md) |
 | `system/plymouth/` | the plymouth LUKS prompt that matches the greeter, and its asset sync tool | [theming.md](theming.md) |
 | `system/tpm-totp/` | the TPM boot-attestation code on the prompt | [theming.md](theming.md) |
-| `system/cryptbox/` | the console LUKS prompt band (fallback when plymouth is off) and its palette sync tool | [theming.md](theming.md) |
 | `system/grub/` | hidden GRUB menu with the firmware logo kept, and the shared guarded `grub-regen` | [theming.md](theming.md) |
 | `system/boot-pin/` | pinned-kernel and verbose-console GRUB rescue entries | [theming.md](theming.md) |
 | `system/powermode/` | the root helper that writes CPU/PCI power knobs | [power.md](power.md) |
