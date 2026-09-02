@@ -37,7 +37,9 @@ The script reads its intent from `~/.config/mango/theme.json`
 (`background.wallpaperPath`, `appearance.palette.{accentColor,type}`) and
 writes the first two back on each switch. It applies the wallpaper with
 `swaybg` first — mango shows a bare root color otherwise — and then runs
-matugen.
+matugen. At login `config.conf` starts `swaybg` directly from
+`theme.json` before `switchwall.sh --noswitch` runs; the script leaves a
+`swaybg` with identical arguments alone, so the wallpaper never drops out.
 
 **Spanning wallpapers.** When the image aspect matches the total monitor
 layout within 10% (for example a 3840x1080 panorama across two 1080p
@@ -218,6 +220,18 @@ the background, the same blurred wallpaper plymouth and SDDM show
 `grub-mkconfig` wrapper) strips the "Loading Linux ..." echo lines. The
 plain console variant (no `--gfx`) is blank on this firmware: the EFI text
 console shows no text at all, so the menu cannot be used.
+
+`--gfx` also pins `GRUB_FONT` to `/boot/grub/fonts/unicode.pf2`, the copy on
+the ESP. Without it, `/etc/grub.d/00_header` picks
+`/usr/share/grub/unicode.pf2` on the encrypted root, so `grub.cfg` mounts the
+LUKS volume just to read the font. The passphrase is typed once, at the
+plymouth prompt, so that `cryptomount` never prompts and fails silently:
+`loadfont` fails, `gfxterm` never starts, `background_image` never runs, and
+GRUB draws nothing — the ASUS logo survives GRUB and both handover gaps, with
+no error printed anywhere, even though `GRUB_TERMINAL_OUTPUT` and
+`GRUB_BACKGROUND` are both set correctly. `grub-regen` refuses to install a
+config that lost the `loadfont /grub/fonts/unicode.pf2` line, so this cannot
+regress silently again.
 
 `system/boot-pin/pin-kernel.sh` copies the running kernel and initramfs to
 `/boot/pinned/` and adds two entries to `/etc/grub.d/40_custom` that every

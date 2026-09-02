@@ -232,6 +232,7 @@ install_image() {
 		mv -f "$BOOT_IMAGE.new" "$BOOT_IMAGE"
 	fi
 	if [ -f "$GRUB_BG" ] && cmp -s "$1/background.png" "$GRUB_BG"; then
+		sign_boot
 		return 0
 	fi
 	# ponytail: full 1920x1080 PNG (~800 KB) so GRUB's frame is byte-identical
@@ -241,6 +242,16 @@ install_image() {
 	install -D -m 644 -- "$1/background.png" "$GRUB_BG.new" ||
 		die "could not stage $GRUB_BG"
 	mv -f "$GRUB_BG.new" "$GRUB_BG"
+	sign_boot
+}
+
+# Re-sign the boot files GRUB reads when system/secureboot is prepared; a
+# no-op before that. Once Secure Boot enforcement is live, an unsigned
+# mango-bg.png or mango-plymouth.img would fail to load at boot.
+sign_boot() {
+	[ -x /usr/local/bin/mango-sign-boot ] || return 0
+	/usr/local/bin/mango-sign-boot ||
+		die "mango-sign-boot failed — /boot signatures are stale"
 }
 
 neutral_colors() {

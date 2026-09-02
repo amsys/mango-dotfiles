@@ -1,0 +1,22 @@
+#!/bin/sh
+# Installed to /etc/grub.d/45_mango-extras by system/grub/install.sh.
+# Adds one top-level menu entry after the generated ones:
+#   Recovery (single user) — the current kernel, rescue shell, no splash.
+# mango-sign-boot signs every file this entry loads, so it keeps
+# working under the verifying GRUB-SB image. The Memtest86+ entry comes
+# from the memtest86+-efi package (/etc/grub.d/60_memtest86+-efi), not
+# from here. supergrub2 is not here on purpose: it is reachable only
+# from the firmware boot menu.
+set -e
+
+. /usr/share/grub/grub-mkconfig_lib
+
+boot_access="$(prepare_grub_to_access_device "${GRUB_DEVICE_BOOT}" | grub_add_tab)"
+
+cat <<EOF
+menuentry 'Recovery (single user)' --class arch --class gnu-linux --class os \$menuentry_id_option 'mango-recovery' {
+${boot_access}
+	linux	/vmlinuz-linux root=UUID=${GRUB_DEVICE_UUID} rw ${GRUB_CMDLINE_LINUX} single plymouth.enable=0
+	initrd	/intel-ucode.img /initramfs-linux.img
+}
+EOF

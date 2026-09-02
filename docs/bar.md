@@ -123,6 +123,14 @@ that replaces its predecessor. Breaks open a full-screen overlay
 (`mango/scripts/focus-break.sh`); `focus-note.sh` keeps a parking lot and
 `focus-review.sh` runs the weekly review.
 
+The pomodoro pauses across every screen lock, not only across suspend —
+`SUPER+L` and hypridle's idle-timeout lock both go through
+`sleep-lock.py lock` (see `docs/power.md`), so a phase boundary landing
+while the screen is locked never fires a bell. `focus-break.sh` also
+refuses to open its overlay while `swaylock` is running, and auto-closes it
+after 120s (`OVERLAY_TIMEOUT`) if it ever ends up unable to take keyboard
+input — `SUPER+SHIFT+Escape` kills any stuck rofi by hand.
+
 ## Self-checks
 
 `mango-bard` has unit tests (`cargo test` in `ironbar/bard/`). The scripts

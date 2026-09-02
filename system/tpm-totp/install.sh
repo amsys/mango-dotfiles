@@ -13,6 +13,18 @@
 # 8/9: GRUB does not measure the kernel or initrds here, and the wallpaper
 # early initrds would churn PCR 9 on every switch. After a firmware update or
 # turning Secure Boot on:  sudo tpm2-totp -P - -p 0,2,4,7 reseal
+#
+# What the code attests. The TPM refuses to unseal when a sealed PCR
+# changed, and mango-totp then shows "TPM mismatch: do not unlock" — a
+# tampered chain cannot compute the correct code. But UNTIL
+# system/secureboot is activated, swapping a file on the unencrypted ESP
+# (grub.cfg, initramfs) changes no sealed PCR, so a tampered initramfs
+# still shows the correct code. After activation the property holds:
+# GRUB-SB refuses tampered files outright, and every way around it moves a
+# sealed PCR — another loader binary is PCR 4, Secure Boot off or other
+# keys is PCR 7, firmware changes are PCR 0/2. 8/9 stay excluded even then:
+# signature enforcement already pins the file contents, and PCR 9 would
+# still churn on wallpaper switches.
 
 set -eu
 

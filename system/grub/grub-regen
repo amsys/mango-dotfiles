@@ -47,4 +47,8 @@ if [ -f "$CFG" ]; then
 	echo "grub-regen: backup at $CFG.bak.$stamp"
 fi
 install -m 0644 -- "$new" "$CFG"
+# Keep the GPG boot signatures valid when system/secureboot is prepared;
+# a no-op before that. A signing failure must be loud: once Secure Boot
+# enforcement is live, an unsigned grub.cfg does not boot.
+[ -x /usr/local/bin/mango-sign-boot ] && /usr/local/bin/mango-sign-boot
 echo "grub-regen: installed $CFG"

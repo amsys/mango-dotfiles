@@ -19,17 +19,33 @@
 # gap shows the framebuffer GRUB itself last drew, so drawing the wallpaper
 # here carries it through the gap too.
 #
+# --gfx also pins GRUB_FONT to the copy on the ESP
+# (/boot/grub/fonts/unicode.pf2). Without it, /etc/grub.d/00_header falls
+# back to /usr/share/grub/unicode.pf2 on the encrypted root, so grub.cfg
+# mounts the LUKS volume just to read the font. The user types the
+# passphrase once, at the plymouth prompt, so that cryptomount never
+# prompts and fails silently — loadfont then fails, gfxterm never
+# initialises, and background_image never runs, all with no error message.
+# The result looks identical to variant 1 (ASUS logo, no wallpaper) even
+# though GRUB_TERMINAL_OUTPUT=gfxterm and GRUB_BACKGROUND are both set.
+#
 # GRUB opens the hidden menu on Esc, F4 or a held Shift during the 2 s
 # timeout (grub_key_is_interrupt); this firmware also reacts to other keys.
 #
 # Both variants keep every generated entry (Windows, the pinned one). The
 # "Loading ..." echo lines are dropped by grub-regen for the same reason.
+#
+# Both variants also install /etc/grub.d/45_mango-extras: a top-level
+# "Recovery (single user)" entry. The memtest86+-efi package brings its
+# own entry via /etc/grub.d/60_memtest86+-efi. Firmware boot menu
+# entries are separate: run efi-menu.sh for those.
 
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULTS=/etc/default/grub
 GRUB_BG=/boot/grub/mango-bg.png
+GRUB_FONT=/boot/grub/fonts/unicode.pf2
 STAMP="$(date +%Y%m%d-%H%M%S)"
 variant=console
 
@@ -56,6 +72,12 @@ set_kv() {
 echo "==> grub-regen -> /usr/local/bin/grub-regen"
 install -m 0755 -o root -g root "$SRC_DIR/grub-regen" /usr/local/bin/grub-regen
 
+echo "==> 45_mango-extras -> /etc/grub.d/45_mango-extras"
+install -m 0755 -o root -g root "$SRC_DIR/45_mango-extras" /etc/grub.d/45_mango-extras
+extra_patterns=(mango-recovery)
+# The memtest entry comes from the package's own 60_memtest86+-efi.
+[ -f /boot/memtest86+/memtest.efi ] && extra_patterns+=('/memtest86\+/memtest\.efi')
+
 echo "==> $DEFAULTS (backup: $DEFAULTS.bak.$STAMP)"
 cp -a "$DEFAULTS" "$DEFAULTS.bak.$STAMP"
 set_kv GRUB_TIMEOUT_STYLE hidden
@@ -64,14 +86,17 @@ set_kv GRUB_TIMEOUT 2
 if [ "$variant" = console ]; then
 	set_kv GRUB_TERMINAL_OUTPUT console
 	sed -i '/^GRUB_BACKGROUND=/d' "$DEFAULTS"
-	"$SRC_DIR/grub-regen" 'timeout_style=hidden' 'terminal_output console'
+	"$SRC_DIR/grub-regen" 'timeout_style=hidden' 'terminal_output console' "${extra_patterns[@]}"
 else
 	[ -f "$GRUB_BG" ] ||
 		{ echo "no $GRUB_BG yet — run ~/.config/mango/scripts/switchwall.sh --noswitch first" >&2; exit 1; }
+	[ -f "$GRUB_FONT" ] ||
+		{ echo "no $GRUB_FONT — run grub-install first" >&2; exit 1; }
 	set_kv GRUB_TERMINAL_OUTPUT gfxterm
 	set_kv GRUB_GFXMODE '1920x1080,auto'
 	set_kv GRUB_BACKGROUND "$GRUB_BG"
-	"$SRC_DIR/grub-regen" 'timeout_style=hidden' 'terminal_output gfxterm' 'mango-bg.png'
+	set_kv GRUB_FONT "$GRUB_FONT"
+	"$SRC_DIR/grub-regen" 'timeout_style=hidden' 'terminal_output gfxterm' 'mango-bg.png' 'loadfont /grub/fonts/unicode\.pf2' "${extra_patterns[@]}"
 fi
 
 cat <<MSG

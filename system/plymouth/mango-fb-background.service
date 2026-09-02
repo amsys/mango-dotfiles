@@ -1,0 +1,30 @@
+# Installed to /etc/systemd/system/ and enabled by system/plymouth/install.sh.
+#
+# The gap between `plymouth quit` and the first SDDM frame shows the fbcon
+# buffer. The firmware leaves its vendor logo there and nothing overwrites
+# it (verified 2026-09-02: a dump of /dev/fb0 on the running system still
+# held the ASUS BGRT logo). This unit paints the blurred wallpaper into
+# /dev/fb0 while plymouth still owns the display, so the write is invisible
+# and the gap then shows the same wallpaper as plymouth and SDDM.
+#
+# /boot/grub/mango-bg.png is the 1920x1080 render plymouth-theme-sync keeps
+# for GRUB; i915drmfb is 1920x1080 32bpp with a packed 7680-byte stride, so
+# the raw BGRA stream fills the device exactly.
+#
+# ponytail: geometry is hardcoded to the laptop panel; if fbcon ever runs at
+# another size, wrap this in a script that reads
+# /sys/class/graphics/fb0/virtual_size first.
+
+[Unit]
+Description=Paint the wallpaper into the console framebuffer
+Before=plymouth-quit.service plymouth-quit-wait.service
+RequiresMountsFor=/boot
+ConditionPathExists=/dev/fb0
+ConditionPathExists=/boot/grub/mango-bg.png
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/magick /boot/grub/mango-bg.png -depth 8 bgra:/dev/fb0
+
+[Install]
+WantedBy=multi-user.target

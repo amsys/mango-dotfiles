@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Installed to /etc/initcpio/post/mango-sign-boot by
+# system/secureboot/install.sh. mkinitcpio runs every script in that
+# directory after it builds an image, so each rebuild — pacman kernel
+# update or a manual mkinitcpio -P — leaves fresh GPG signatures behind.
+[ -x /usr/local/bin/mango-sign-boot ] || exit 0
+exec /usr/local/bin/mango-sign-boot

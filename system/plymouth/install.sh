@@ -69,7 +69,12 @@ if [ -e /etc/systemd/system/plymouth-quit.service.d/10-mango.conf ]; then
 	rm -f /etc/systemd/system/plymouth-quit.service.d/10-mango.conf
 	rmdir /etc/systemd/system/plymouth-quit.service.d 2>/dev/null || true
 fi
+
+echo "==> gap frame unit -> /etc/systemd/system/mango-fb-background.service"
+install -m 0644 -o root -g root "$SRC_DIR/mango-fb-background.service" \
+	/etc/systemd/system/mango-fb-background.service
 systemctl daemon-reload
+systemctl enable -q mango-fb-background.service
 
 # matugen has not necessarily rendered yet: seed neutral assets so the first
 # boot after install shows the prompt, and so grub-mkconfig (which silently
@@ -141,6 +146,8 @@ Rollback:
   sudo cp $DEFAULTS.bak.$STAMP $DEFAULTS
   sudo cp /etc/mkinitcpio.conf.bak.$STAMP /etc/mkinitcpio.conf   # if a backup was made
   sudo rm -f /boot/mango-plymouth.img /etc/systemd/system/sddm.service.d/10-mango.conf
+  sudo systemctl disable -q mango-fb-background.service
+  sudo rm -f /etc/systemd/system/mango-fb-background.service
   sudo /usr/local/bin/grub-regen
   sudo mkinitcpio -P
 MSG

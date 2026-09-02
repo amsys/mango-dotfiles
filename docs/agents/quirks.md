@@ -79,9 +79,19 @@ in the docs/install.md checklist if it cannot be tracked as a file:
 - `/usr/local/bin/keepassxc-stash-pw` + the SDDM PAM hook feeding
   `/run/keepassxc-unlock/$USER` — retired. `keepassxc-autounlock.sh` no longer
   reads the stash, so both must be removed by hand (see docs/install.md)
+- the AUR `keepassxc-unlock` package (`keepassxc-login-monitor.service`,
+  `keepassxc-unlock@.service`) — also retired, removed 2026-09-01. It tried
+  to open the database over DBus with a TPM-sealed credential; the TPM key
+  did not match, so it always failed and its failed `openDatabase` call
+  raised KeePassXC's separate "Unlock Database" window alongside the main
+  window at every login — the second-window-at-startup symptom. You type
+  the password by hand; there is no auto-unlock on this machine
 - `~/.config/keepassxc/keepassxc.ini` — `MinimizeOnStartup=false` shows the
   unlock prompt at login, `MinimizeAfterUnlock=true` hides the window after
-  you unlock it. `ShowTrayIcon` and `MinimizeToTray` must stay false
+  you unlock it. `ShowTrayIcon` and `MinimizeToTray` must stay false. The
+  `windowrule` in `mango/config.conf` matches on appid only, not title: mango
+  applies window rules once at map, and the main window's title is still
+  "[Locked]" at that point, so a title-anchored rule never matches
 - `systemd --user` masks for `gnome-keyring-daemon.{service,socket}` → `/dev/null`
   (this is what lets KeePassXC own the Secret Service)
 - `~/.config/autostart/`, `~/.config/environment.d/`, `~/.config/mimeapps.list`

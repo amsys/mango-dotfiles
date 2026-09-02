@@ -1,0 +1,18 @@
+# Installed to /etc/pacman.d/hooks/zz-mango-secureboot.hook by
+# system/secureboot/install.sh. Re-stage the verifying GRUB image and
+# refresh every boot signature after a grub, kernel, or microcode update.
+# "zz-" so it runs after 90-mkinitcpio-install has built the new images.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/grub/*
+Target = usr/lib/modules/*/vmlinuz
+Target = boot/intel-ucode.img
+Target = boot/memtest86+/*
+
+[Action]
+Description = Signing boot files (mango-sign-boot)...
+When = PostTransaction
+Exec = /usr/local/bin/mango-sign-boot --stage-grub

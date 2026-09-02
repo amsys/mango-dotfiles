@@ -10,6 +10,11 @@
 # Layout constants mirror Main.qml: card padding 20, row spacing 14, panel
 # spacing 28, clock/date spacing 2, entry left padding 12.
 #
+# After the passphrase is accepted the whole panel fades out, so plymouth
+# ends on the bare blurred wallpaper (which mango-fb-background.service also
+# paints into fbcon for the handover gap). A repeat prompt fades it back in.
+# The background sprite never fades.
+#
 # Status updates: only the fixed grammar sent by /usr/local/bin/mango-totp
 # (`plymouth update --status=...`) is understood — "mango:HHMM:DDDDDD",
 # "mango:HHMM:fail" or "mango:HHMM:". Anything else is ignored. Not
@@ -52,23 +57,35 @@ for (d = 0; d < 10; d++) {
 img.clock_colon = load("clock-colon");
 
 # A sprite with no image draws nothing; every sprite is created once.
+# Each is a hash {s, on}: `on` is the wanted visibility, the drawn opacity
+# is `on * fade.op`. The list in all[] lets the fade touch every one.
+FADE_STEP = 0.04;
+fade.op = 1;
+fade.target = 1;
+all.n = 0;
+
 fun sprite(image, z) {
-	s = Sprite();
+	local.p.s = Sprite();
 	if (image)
-		s.SetImage(image);
-	s.SetZ(z);
-	s.SetOpacity(0);
-	return s;
+		p.s.SetImage(image);
+	p.s.SetZ(z);
+	p.s.SetOpacity(0);
+	p.on = 0;
+	all[all.n] = p;
+	all.n++;
+	return p;
 }
 
-fun show(s, x, y) {
-	s.SetX(x);
-	s.SetY(y);
-	s.SetOpacity(1);
+fun show(p, x, y) {
+	p.s.SetX(x);
+	p.s.SetY(y);
+	p.on = 1;
+	p.s.SetOpacity(fade.op);
 }
 
-fun hide(s) {
-	s.SetOpacity(0);
+fun hide(p) {
+	p.on = 0;
+	p.s.SetOpacity(0);
 }
 
 # ------------------------------------------------------------ background
@@ -76,8 +93,11 @@ fun hide(s) {
 if (img.background && (img.background.GetWidth() != screen.w || img.background.GetHeight() != screen.h))
 	img.background = img.background.Scale(screen.w, screen.h);
 
-sp.background = sprite(img.background, 1);
-show(sp.background, 0, 0);
+# The background is a raw sprite, outside all[], so it never fades.
+sp.background = Sprite();
+if (img.background)
+	sp.background.SetImage(img.background);
+sp.background.SetZ(1);
 
 # ------------------------------------------------------------- geometry
 #
@@ -130,7 +150,7 @@ fun set_clock(hhmm) {
 			image = img.clock[d];
 		}
 		if (!image) return;
-		sp.clock[i].SetImage(image);
+		sp.clock[i].s.SetImage(image);
 		show(sp.clock[i], clock.left + i * clock.adv, clock.top);
 	}
 }
@@ -171,7 +191,7 @@ fun set_code(digits) {
 		d = digit_of(String(digits).CharAt(i));
 		if (d == NULL || !img.code[d]) { clear_code(); return; }
 		if (i == 3) x += code.adv;
-		sp.code[i].SetImage(img.code[d]);
+		sp.code[i].s.SetImage(img.code[d]);
 		show(sp.code[i], x, date.top);
 		x += code.adv;
 	}
@@ -213,9 +233,9 @@ dialog.asks = 0;
 
 fun show_card(bullets, with_message) {
 	if (with_message && img.card_msg)
-		sp.card.SetImage(img.card_msg);
+		sp.card.s.SetImage(img.card_msg);
 	else if (img.card)
-		sp.card.SetImage(img.card);
+		sp.card.s.SetImage(img.card);
 	show(sp.card, card.left, card.top);
 
 	y = card.top + CARD_PAD;
@@ -255,9 +275,32 @@ fun hide_card() {
 	for (i = 0; i < MAX_BULLETS; i++) hide(sp.bullet[i]);
 }
 
+# ----------------------------------------------------------------- fade
+# One step per refresh tick (~50 Hz): FADE_STEP 0.04 is a half-second fade.
+# show() draws at the current fade.op, so status updates that arrive while
+# the panel is faded out stay invisible.
+
+fun refresh() {
+	if (fade.op == fade.target)
+		return;
+	if (fade.op < fade.target) {
+		fade.op += FADE_STEP;
+		if (fade.op > fade.target)
+			fade.op = fade.target;
+	} else {
+		fade.op -= FADE_STEP;
+		if (fade.op < fade.target)
+			fade.op = fade.target;
+	}
+	for (i = 0; i < all.n; i++)
+		all[i].s.SetOpacity(all[i].on * fade.op);
+}
+Plymouth.SetRefreshFunction(refresh);
+
 # systemd re-asks after a wrong passphrase: a fresh prompt with zero bullets
 # after one was already answered means the previous answer was refused.
 fun display_password(prompt, bullets) {
+	fade.target = 1;
 	if (bullets == 0 && dialog.answered)
 		dialog.asks++;
 	dialog.answered = 0;
@@ -267,8 +310,13 @@ fun display_password(prompt, bullets) {
 }
 Plymouth.SetDisplayPasswordFunction(display_password);
 
+# An answered prompt fades the whole panel out; before any answer this is
+# the plain start-of-boot state and hides nothing but the card.
 fun display_normal() {
-	hide_card();
+	if (dialog.answered)
+		fade.target = 0;
+	else
+		hide_card();
 }
 Plymouth.SetDisplayNormalFunction(display_normal);
 

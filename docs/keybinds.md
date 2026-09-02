@@ -28,13 +28,14 @@ and `Print` is not a text-editing key.
 | ``SUPER+` `` | jump back to the previous window |
 | `Alt+Tab` | mango's jump labels — not an alt-tab switcher |
 | `SUPER+W` | wallpaper switch (see [theming.md](theming.md)) |
-| `SUPER+L` | lock (swaylock) |
+| `SUPER+L` | lock — `sleep-lock.py lock` (swaylock, and pauses the pomodoro for as long as the screen stays locked) |
 | `SUPER+SHIFT+L` | suspend |
 | `CTRL+ALT+Delete` | power menu |
 | `Alt+H` | hotspot menu |
 | `Alt+Shift+O` | OCR a region to the clipboard |
 | `SUPER+SHIFT+T` / `+N` / `+R` | pomodoro: name task / parking-lot note / weekly review |
 | `SUPER+SHIFT+M` | mute the pomodoro chime |
+| `SUPER+SHIFT+Escape` | kill any stuck rofi (`pkill -x rofi`) — manual escape, see [bar.md](bar.md)'s Pomodoro section |
 | `SUPER+CTRL+Next` / `+Prior` | remote access: pull the next/previous tag onto the VNC virtual output (`remote.sh --pull-next`/`--pull-prev`, see [bar.md](bar.md)) |
 | `SUPER+CTRL+Home` | remote access: send the pulled tag back (`remote.sh --restore`) |
 

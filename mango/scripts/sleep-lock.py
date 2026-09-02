@@ -20,21 +20,30 @@ the pomodoro (`mango-bard pomo pause`) before sleep and resumes it
 leaves the `CLOCK_REALTIME` phase timer to fire a stack of missed-boundary
 alerts on wake (see pomo.rs's `catch_up`).
 
-hypridle's own idle-timeout lock (the 300s listener in hypridle.conf) is
-untouched and keeps calling plain `swaylock` on its own. If that lock is
-already running when the machine is asked to sleep, this script trusts it
-and releases the inhibitor at once rather than waiting again — a second
-`swaylock --ready-fd` would just exit 2 ("another lockscreen running").
-ponytail: this accepts a narrow, hard-to-hit race (idle-lock firing in the
-same instant as a manual suspend, before it has actually drawn the lock
-screen) rather than unifying every lock path through one owner; upgrade to
-a single-owner `lock` subcommand here if that race is ever observed.
+Every lock path — `SUPER,l` and hypridle's own 300s idle-timeout listener —
+calls `sleep-lock.py lock` instead of bare `swaylock`, so the pomodoro pauses
+for every lock, not only across suspend (a phase boundary landing while the
+screen was locked used to spawn a full-screen rofi overlay behind the lock
+surface, which then came back deaf on unlock — see `mango-bard`'s pomo.rs
+`alert()` and `focus-break.sh`'s own swaylock guard, the second line of
+defense). `lock` checks for an already-running swaylock first, the same
+guard `begin_sleep()` uses below, and does nothing if it finds one — the
+already-running lock's own caller owns that pause/unpause pair.
+
+If a lock is already running when the machine is asked to *sleep* (a
+manual `lock` invocation, or hypridle's idle listener, won by a hair before
+`PrepareForSleep`), `begin_sleep()` below trusts it and releases the
+inhibitor at once rather than waiting again — a second `swaylock --ready-fd`
+would just exit 2 ("another lockscreen running").
 
 Run as a systemd user unit (../../systemd/mango-sleep-lock.service) — it
 must never die silently, since once `before_sleep_cmd` is gone it is the
 only thing locking the screen before sleep.
 
     sleep-lock.py         run the daemon (systemd ExecStart)
+    sleep-lock.py lock     lock the screen and pause the pomodoro — what
+                            every lock keybind/listener should call instead
+                            of bare `swaylock`
     sleep-lock.py test     non-disruptive self-check: no real lock spawned
     SIGUSR1                rehearse a real lock+pause+unlock cycle without
                             waiting for an actual suspend (see selftest()'s
@@ -42,9 +51,11 @@ only thing locking the screen before sleep.
 """
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 import gi
@@ -74,6 +85,60 @@ def log(msg):
 def running_swaylock_pid():
     out = subprocess.run(["pidof", "swaylock"], capture_output=True, text=True).stdout.split()
     return int(out[0]) if out else None
+
+
+# Module-level, not SleepLock methods: neither touches `self` — both just
+# shell out to `mango-bard` — so `do_lock()` (the `lock` subcommand) can
+# reuse them without standing up a dbus bus and a SleepLock instance it has
+# no other use for.
+def pause_pomodoro():
+    try:
+        out = subprocess.run(
+            ["mango-bard", "pomo", "pause"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"mango-bard pomo pause failed, leaving the timer as-is: {e}")
+        return False
+    # "ok" means it paused a *running* block — that, and only that, is
+    # ours to undo on unlock. "noop" (idle, or already paused by hand)
+    # must not be resumed by us later.
+    return out == "ok"
+
+
+def unpause_pomodoro():
+    try:
+        subprocess.run(["mango-bard", "pomo", "unpause"], capture_output=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"mango-bard pomo unpause failed: {e}")
+
+
+def do_lock():
+    """`sleep-lock.py lock` — the one command every lock path (`SUPER,l` and
+    hypridle's 300s idle listener) calls instead of bare `swaylock`. Pauses
+    the pomodoro before swaylock draws and resumes it once swaylock exits,
+    using the same "ok" vs "noop" ownership contract as `begin_sleep()`
+    below, so a pause already held by a suspend in progress is never
+    double-unpaused.
+
+    Checks for an already-running swaylock first, same guard and same
+    reasoning as `begin_sleep()`'s own check: swaylock refuses a second
+    instance (exit 2), and pausing here first would leave this call owning
+    a pause it has no way to time an unpause for, since `swaylock` would
+    return the moment the second instance is rejected, not when the real
+    lock clears.
+    """
+    if running_swaylock_pid() is not None:
+        log("lock: another swaylock is already running — nothing to do")
+        return 0
+    owns_pause = pause_pomodoro()
+    ret = subprocess.run(["swaylock"]).returncode
+    if owns_pause:
+        unpause_pomodoro()
+        log("lock: pomodoro resumed")
+    return ret
 
 
 class SleepLock:
@@ -135,37 +200,11 @@ class SleepLock:
         self.inhibit_fd = None
         log("inhibitor released")
 
-    # ------------------------------------------------------------- pomodoro
-
-    def pause_pomodoro(self):
-        try:
-            out = subprocess.run(
-                ["mango-bard", "pomo", "pause"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            ).stdout.strip()
-        except (OSError, subprocess.TimeoutExpired) as e:
-            log(f"mango-bard pomo pause failed, leaving the timer as-is: {e}")
-            return False
-        # "ok" means it paused a *running* block — that, and only that, is
-        # ours to undo on unlock. "noop" (idle, or already paused by hand)
-        # must not be resumed by us later.
-        return out == "ok"
-
-    def unpause_pomodoro(self):
-        try:
-            subprocess.run(
-                ["mango-bard", "pomo", "unpause"], capture_output=True, timeout=2
-            )
-        except (OSError, subprocess.TimeoutExpired) as e:
-            log(f"mango-bard pomo unpause failed: {e}")
-
     # --------------------------------------------------------------- locking
 
     def begin_sleep(self, rehearsal=False):
         self.rehearsal = rehearsal
-        self.owns_pause = self.pause_pomodoro()
+        self.owns_pause = pause_pomodoro()
         self._t0 = time.monotonic()
 
         pid = running_swaylock_pid()
@@ -259,7 +298,7 @@ class SleepLock:
             self.proc = None
         log("swaylock has exited — treating as unlocked")
         if self.owns_pause:
-            self.unpause_pomodoro()
+            unpause_pomodoro()
             log("pomodoro resumed")
         self.owns_pause = False
         return False  # one-shot watch
@@ -335,7 +374,61 @@ def selftest():
     assert handler.proc is None, "_on_pid_exit did not reap the child"
     assert proc.returncode is not None, "child left as a zombie"
 
+    selftest_lock()
     print("ok")
+
+
+def selftest_lock():
+    """`do_lock()`'s call order — pause, then swaylock, then unpause — using
+    stub `mango-bard` and `swaylock` on PATH. Never touches the real logind
+    inhibitor or the real pomodoro."""
+    tmp = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(tmp, "calls")
+
+        def write_stub(name, body):
+            path = os.path.join(tmp, name)
+            with open(path, "w") as f:
+                f.write(f"#!/usr/bin/env bash\n{body}\n")
+            os.chmod(path, 0o755)
+
+        write_stub(
+            "mango-bard",
+            f'if [ "$2" = pause ]; then echo -n ok; fi; echo "$2" >>"{calls}"',
+        )
+        write_stub("swaylock", f'echo lock >>"{calls}"')
+        write_stub("pidof", "exit 1")  # no swaylock running yet
+
+        env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}")
+        ret = subprocess.run(
+            [sys.executable, __file__, "lock"], env=env, capture_output=True, text=True
+        )
+        assert ret.returncode == 0, f"lock exited {ret.returncode}: {ret.stderr}"
+        with open(calls) as f:
+            order = f.read().split()
+        assert order == ["pause", "lock", "unpause"], f"wrong call order: {order}"
+
+        # A "noop" pause (another lock already owns it) must not unpause.
+        os.remove(calls)
+        write_stub("mango-bard", f'echo "$2" >>"{calls}"')  # pause -> stdout "" -> noop
+        ret = subprocess.run(
+            [sys.executable, __file__, "lock"], env=env, capture_output=True, text=True
+        )
+        assert ret.returncode == 0, f"lock exited {ret.returncode}: {ret.stderr}"
+        with open(calls) as f:
+            order = f.read().split()
+        assert order == ["pause", "lock"], f"noop pause was unpaused: {order}"
+
+        # An already-running swaylock must skip pause/lock/unpause entirely.
+        os.remove(calls)
+        write_stub("pidof", "echo 12345")
+        ret = subprocess.run(
+            [sys.executable, __file__, "lock"], env=env, capture_output=True, text=True
+        )
+        assert ret.returncode == 0, f"lock exited {ret.returncode}: {ret.stderr}"
+        assert not os.path.exists(calls), "an already-running lock should be left alone"
+    finally:
+        shutil.rmtree(tmp)
 
 
 def main():
@@ -359,4 +452,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "test":
         selftest()
         sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "lock":
+        sys.exit(do_lock())
     main()

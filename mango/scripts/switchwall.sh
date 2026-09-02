@@ -123,16 +123,20 @@ $geometry"
 # once to pick up its own tile, same as ironbar already needs for its own
 # per-monitor bars. Known limitation, not a watcher: YAGNI until it bites.
 apply_wallpaper() {
-	pkill -x swaybg 2>/dev/null || true
 	local tiles name path argv=()
 	if tiles="$(span_tiles "$1")" && [[ -n "$tiles" ]]; then
 		while read -r name path; do
 			argv+=(-o "$name" -i "$path" -m fill)
 		done <<<"$tiles"
-		setsid swaybg "${argv[@]}" >/dev/null 2>&1 &
 	else
-		setsid swaybg -i "$1" -m fill >/dev/null 2>&1 &
+		argv=(-i "$1" -m fill)
 	fi
+	# A swaybg with the same arguments already shows this wallpaper — at login
+	# config.conf starts it directly, before this script. Restarting it would
+	# drop the layer surface and show the root color for a few hundred ms.
+	pgrep -fx "swaybg ${argv[*]}" >/dev/null && return 0
+	pkill -x swaybg 2>/dev/null || true
+	setsid swaybg "${argv[@]}" >/dev/null 2>&1 &
 }
 
 main() {

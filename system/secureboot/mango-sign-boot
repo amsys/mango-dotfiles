@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Sign everything the boot chain loads. Safe to re-run: a file is only
+# re-signed when it is newer than its .sig.
+#
+#   mango-sign-boot                # GPG-sign boot files that changed
+#   mango-sign-boot --stage-grub   # also (re)build + sign the verifying
+#                                  # GRUB image at /boot/EFI/GRUB-SB/
+#
+# Two signature layers:
+#   1. sbctl (Authenticode, db key): the GRUB EFI binaries, memtest, and
+#      the kernels. The firmware checks these once Secure Boot is on —
+#      kernels included, because GRUB boots them through LoadImage when
+#      no shim is present.
+#   2. GPG detached .sig files: every file GRUB itself reads — grub.cfg,
+#      grubenv, fonts, background, modules, kernels, initrds, early cpios.
+#      The GRUB-SB image has the public key embedded, which turns GRUB's
+#      check_signatures enforcement on.
+#
+# Called from: /etc/initcpio/post/mango-sign-boot (every initramfs build),
+# /etc/pacman.d/hooks/zz-mango-secureboot.hook (kernel/grub/ucode updates,
+# with --stage-grub), grub-regen, and plymouth-theme-sync. All of these are
+# inert until system/secureboot/install.sh has created the keys.
+
+set -eu
+
+ETC=/etc/mango-secureboot
+export GNUPGHOME=$ETC/gnupg
+PUBKEY=$ETC/grub-pubkey.gpg
+STAGED=/boot/EFI/GRUB-SB/grubx64.efi
+
+die() { printf 'mango-sign-boot: %s\n' "$1" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "must run as root"
+[ -d "$GNUPGHOME" ] || die "no $GNUPGHOME — run system/secureboot/install.sh first"
+
+stage=no
+case "${1:-}" in
+	'') ;;
+	--stage-grub) stage=yes ;;
+	*) echo "usage: $0 [--stage-grub]" >&2; exit 1 ;;
+esac
+
+if [ "$stage" = yes ]; then
+	[ -f "$PUBKEY" ] || die "no $PUBKEY"
+	# Writes /boot/EFI/GRUB-SB/ and refreshes /boot/grub/x86_64-efi/ with
+	# the same package version the live loader already uses. --no-nvram:
+	# no boot entry — the firmware "Boot From File" menu reaches it for
+	# tests, activation adds the entry. --disable-shim-lock: we enroll our
+	# own PK, there is no shim, and without this flag GRUB refuses to
+	# start a kernel once Secure Boot is on. tpm: measure what we load
+	# into PCR 8/9 for attestation.
+	grub-install --target=x86_64-efi --efi-directory=/boot \
+		--boot-directory=/boot --bootloader-id=GRUB-SB \
+		--no-nvram --disable-shim-lock --modules=tpm \
+		--pubkey "$PUBKEY"
+	if sbctl list-files | grep -qF "$STAGED"; then
+		sbctl sign "$STAGED"
+	else
+		sbctl sign -s "$STAGED"
+	fi
+	# memtest86+-efi, when installed: GRUB chainloads it, so it needs both
+	# signatures — sbctl for the firmware's LoadImage check, and the GPG
+	# .sig (below) for GRUB's own file verification.
+	MEMTEST=/boot/memtest86+/memtest.efi
+	if [ -f "$MEMTEST" ]; then
+		sbctl list-files | grep -qF "$MEMTEST" &&
+			sbctl sign "$MEMTEST" || sbctl sign -s "$MEMTEST"
+	fi
+fi
+
+# The firmware verifies the kernel too: with Secure Boot on and no shim,
+# GRUB linux.mod boots vmlinuz through the firmware LoadImage call. The
+# firmware checks the Authenticode signature against db. Sign the kernels
+# with sbctl before the GPG pass, so each .sig covers the signed file.
+for k in /boot/vmlinuz-* /boot/pinned/vmlinuz-*; do
+	[ -f "$k" ] || continue
+	case $k in *.sig|*.bak.*) continue ;; esac
+	if sbctl list-files | grep -qF "$k"; then
+		sbctl sign "$k"
+	else
+		sbctl sign -s "$k"
+	fi
+done
+
+# sign FILE — GPG detached signature next to the file, mtime-gated.
+signed=0
+sign() {
+	[ -f "$1" ] || return 0
+	case $1 in *.sig|*.bak.*) return 0 ;; esac
+	[ "$1.sig" -nt "$1" ] && return 0
+	gpg --batch --yes --detach-sign -o "$1.sig" "$1" || die "signing $1 failed"
+	signed=$((signed + 1))
+}
+
+for f in /boot/vmlinuz-* /boot/initramfs-*.img /boot/intel-ucode.img \
+	/boot/mango-plymouth.img /boot/pinned/* /boot/memtest86+/memtest.efi \
+	/boot/grub/grub.cfg /boot/grub/grubenv /boot/grub/mango-bg.png \
+	/boot/grub/fonts/* /boot/grub/x86_64-efi/*; do
+	sign "$f"
+done
+
+# Drop signatures whose file is gone (removed kernels, renamed modules).
+{
+	find /boot -maxdepth 1 -name '*.sig'
+	find /boot/grub /boot/pinned /boot/memtest86+ -name '*.sig' 2>/dev/null
+} | while read -r s; do
+	[ -e "${s%.sig}" ] || rm -f -- "$s"
+done
+
+echo "mango-sign-boot: $signed file(s) signed"

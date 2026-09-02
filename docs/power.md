@@ -115,8 +115,19 @@ Hyprland lock-notify protocol, hypridle releases its sleep inhibitor as
 soon as the lock command is spawned, before the screen is locked.
 `hypr/hypridle.conf` carries the full explanation.
 
-`sleep-lock.py test` runs a self-check; `SIGUSR1` on the running daemon
-runs a lock-and-pause rehearsal without a suspend.
+The same file's `sleep-lock.py lock` subcommand extends the pause to every
+*lock*, not only suspend: `SUPER+L` and hypridle's 300s idle-timeout
+listener both call it instead of bare `swaylock`. Without this, the
+pomodoro kept running while the screen was locked, and a phase boundary in
+that window fired a full-screen rofi overlay that came back unable to take
+keyboard input after unlock — `docs/bar.md`'s Pomodoro section has the
+symptom and the rest of the fix (`focus-break.sh`'s own swaylock guard and
+timeout). `lock` checks for an already-running swaylock first and does
+nothing if it finds one, so it is safe to bind unconditionally.
+
+`sleep-lock.py test` runs a self-check, including `lock`'s pause/swaylock/
+unpause call order; `SIGUSR1` on the running daemon runs a lock-and-pause
+rehearsal without a suspend.
 
 ## Keep-awake
 
