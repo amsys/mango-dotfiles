@@ -79,7 +79,9 @@ systemctl enable -q mango-fb-background.service
 # matugen has not necessarily rendered yet: seed neutral assets so the first
 # boot after install shows the prompt, and so grub-mkconfig (which silently
 # drops a missing early initrd) sees the file.
-if [ ! -f /boot/mango-plymouth.img ]; then
+# The second condition catches an already-installed machine that predates
+# the shutdown splash: seed renders and installs both halves.
+if [ ! -f /boot/mango-plymouth.img ] || [ ! -d "$THEME_DIR/shutdown" ]; then
 	echo "==> seeding a neutral /boot/mango-plymouth.img (matugen will replace it)"
 	/usr/local/bin/plymouth-theme-sync seed
 fi
@@ -137,6 +139,7 @@ Installed. Next:
 
   ~/.config/mango/scripts/switchwall.sh --noswitch     # render the real assets
   cpio -t < /boot/mango-plymouth.img                   # should list dyn/*.png
+  ls /usr/share/plymouth/themes/mango/shutdown         # 4 PNGs, the shutdown splash
   lsinitcpio /boot/initramfs-linux.img | grep -c themes/mango/dyn   # must be 0
   reboot                                               # the only real test
   (plymouth.enable=0 on the kernel line brings the console prompt back;

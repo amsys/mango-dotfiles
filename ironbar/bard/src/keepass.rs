@@ -46,12 +46,13 @@ impl Keepass {
             // ponytail: unscoped to the whole `org.freedesktop.secrets`
             // service, not just our collection's object path — busctl has
             // no member/path filter, and resolving the path needs an async
-            // fork this sync constructor can't make. Every Secret Service
-            // call from any app (browser extensions included) triggers a
-            // refresh; each refresh is two cheap forks (ReadAlias +
-            // get-property), so this is wasted work, not wrong output.
-            // Upgrade: scope with `gdbus monitor --object-path <resolved>`
-            // once the unscoped noise is measurably a problem.
+            // fork this sync constructor can't make. main.rs's select arm
+            // only re-arms a refresh on a `signal` line (see
+            // `is_signal_line`, below), so a method call from another app
+            // is still parsed but no longer triggers work — measurably
+            // cheap, unlike the feedback loop this used to be
+            // (T-keepass-loop). Upgrade: scope with `gdbus monitor
+            // --object-path <resolved>` once even that parsing shows up.
             mon: MonitorChild::new(
                 "busctl",
                 &["--user", "monitor", "--json=short", "org.freedesktop.secrets"],
@@ -142,6 +143,24 @@ impl Keepass {
     }
 }
 
+/// True only for a genuine D-Bus signal line off the unscoped monitor —
+/// `Locked`/`PropertiesChanged`, the events this pill needs to react to.
+/// `refresh()`'s own `ReadAlias` / `get-property` forks land on this same
+/// monitor as `method_call`/`method_return` lines (`new()`'s doc comment
+/// above explains why the monitor can't be scoped tighter); treating those
+/// as triggers is a feedback loop — refresh forks calls, calls appear on
+/// the monitor, the monitor re-arms refresh — measured at ~40 busctl/sec
+/// sustained, enough to exhaust the session bus's per-UID quota
+/// (T-keepass-loop). Filtering to signals breaks the loop at its source;
+/// the hover-triggered and startup refreshes (main.rs) still catch a state
+/// change this filter would otherwise miss.
+pub fn is_signal_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| v.get("type")?.as_str().map(str::to_string))
+        .is_some_and(|t| t == "signal")
+}
+
 impl Default for Keepass {
     fn default() -> Self {
         Self::new()
@@ -155,5 +174,28 @@ mod tests {
     #[test]
     fn class_key_uses_the_shared_class_prefix() {
         assert_eq!(class_key("keepass"), "@class/keepass");
+    }
+
+    #[test]
+    fn is_signal_line_accepts_a_signal() {
+        let line = r#"{"type":"signal","member":"PropertiesChanged"}"#;
+        assert!(is_signal_line(line));
+    }
+
+    #[test]
+    fn is_signal_line_rejects_our_own_refresh_traffic() {
+        assert!(!is_signal_line(
+            r#"{"type":"method_call","member":"ReadAlias"}"#
+        ));
+        assert!(!is_signal_line(
+            r#"{"type":"method_return","reply_cookie":1}"#
+        ));
+        assert!(!is_signal_line(r#"{"type":"error","error_name":"x"}"#));
+    }
+
+    #[test]
+    fn is_signal_line_rejects_garbage() {
+        assert!(!is_signal_line("not json"));
+        assert!(!is_signal_line(""));
     }
 }

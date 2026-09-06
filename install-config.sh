@@ -214,6 +214,7 @@ log
 # file each.
 UNITS=(
 	"ironbar/mango-bard.service:mango-bard.service"
+	"ironbar/ironbar.service:ironbar.service"
 	"systemd/mango-sleep-lock.service:mango-sleep-lock.service"
 	"systemd/mango-powerkey.service:mango-powerkey.service"
 	"systemd/mango-outputs.service:mango-outputs.service"

@@ -6,6 +6,11 @@
 # early initrd /boot/mango-plymouth.img (see plymouth-theme-sync). The host
 # copy of this directory never contains dyn/ — that is what keeps a wallpaper
 # switch from needing `mkinitcpio -P`.
+#
+# It does contain shutdown/: the shutdown and reboot splash runs from the root
+# filesystem and never sees the early initrd. Different directory, different
+# filenames, so the two can never overwrite each other — plymouth-theme-sync's
+# install_shutdown explains why that matters.
 [Plymouth Theme]
 Name=mango
 Description=Material You LUKS prompt for the mango desktop

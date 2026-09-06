@@ -397,6 +397,12 @@ pub fn tunnel_devices(link_show_json: &Value) -> Vec<String> {
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// A child that exits before living this long was never really up — most
+/// likely killed for being a resource hog (T-keepass-loop's `busctl
+/// monitor` was disconnected by dbus-broker itself), not a one-off blip.
+/// Below this, backoff keeps doubling on respawn instead of resetting.
+const MIN_ALIVE_TO_RESET_BACKOFF: Duration = Duration::from_secs(10);
+
 /// A restartable line-streaming child (`nmcli monitor` / `ip -o monitor
 /// route`) — same restart/backoff/cancel-safety shape as mango.rs's
 /// `Watch`, minus the `mmsg get` snapshot pairing: neither command has an
@@ -409,6 +415,7 @@ pub struct MonitorChild {
     lines: Option<Lines<BufReader<ChildStdout>>>,
     child: Option<Child>,
     backoff: Duration,
+    spawned_at: Option<Instant>,
 }
 
 impl MonitorChild {
@@ -419,6 +426,7 @@ impl MonitorChild {
             lines: None,
             child: None,
             backoff: BACKOFF_START,
+            spawned_at: None,
         }
     }
 
@@ -435,7 +443,6 @@ impl MonitorChild {
                     self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
                     continue;
                 }
-                self.backoff = BACKOFF_START;
             }
             match self
                 .lines
@@ -444,12 +451,32 @@ impl MonitorChild {
                 .next_line()
                 .await
             {
-                Ok(Some(line)) => return line,
+                Ok(Some(line)) => {
+                    // Reset backoff only once the child has proven itself
+                    // alive, not on every spawn — a child that connects and
+                    // is disconnected right away (T-keepass-loop: a
+                    // `busctl monitor` dbus-broker keeps killing for using
+                    // too much of the bus quota) used to reset backoff to
+                    // zero on that one line, making the respawn loop tight
+                    // instead of backed off.
+                    if self
+                        .spawned_at
+                        .is_some_and(|t| t.elapsed() >= MIN_ALIVE_TO_RESET_BACKOFF)
+                    {
+                        self.backoff = BACKOFF_START;
+                    }
+                    return line;
+                }
                 Ok(None) | Err(_) => {
                     self.lines = None;
                     if let Some(mut child) = self.child.take() {
                         let _ = child.start_kill();
                     }
+                    // Same backoff as a failed spawn — a child that exits
+                    // right after starting used to respawn with no delay
+                    // at all here (found investigating T-keepass-loop).
+                    tokio::time::sleep(self.backoff).await;
+                    self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
                 }
             }
         }
@@ -465,6 +492,7 @@ impl MonitorChild {
         let stdout = child.stdout.take().expect("piped stdout requested above");
         self.lines = Some(BufReader::new(stdout).lines());
         self.child = Some(child);
+        self.spawned_at = Some(Instant::now());
         Ok(())
     }
 

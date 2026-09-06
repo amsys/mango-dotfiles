@@ -1,0 +1,18 @@
+# Installed to /etc/udev/rules.d/72-vault-powerbtn.rules by
+# system/vault/install.sh.
+#
+# Grant the active-seat user an ACL on the Power Button evdev node ONLY.
+#
+# Why: martin is in the `input` group, so /dev/input/event* (root:input 0660)
+# are readable by any process the user runs — raw, focus-independent keystroke
+# and mouse capture, for X11 and Wayland apps alike (see VAULT.md section 1A).
+# The hardening step is to leave the input group. The one thing that then
+# breaks is powerkey.py (mango-powerkey.service), which opens the Power Button
+# node directly to measure press duration — logind's power-key handling does
+# not expose that. This rule hands back read/write on that single node via the
+# same uaccess mechanism that already grants /dev/dri to the active session,
+# so every keyboard and mouse node stays inaccessible while the power button
+# keeps working.
+#
+# 72- so it runs before systemd's 73-seat-late.rules, which acts on the tag.
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Power Button", KERNEL=="event*", TAG+="uaccess"

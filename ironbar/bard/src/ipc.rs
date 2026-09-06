@@ -20,6 +20,13 @@ const ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct IronbarIpc {
     sock: PathBuf,
     last_ino: Option<u64>,
+    /// Whether the most-logged send outcome was a failure — lets the flush
+    /// loop (main.rs) log one line on the down→up and up→down edges instead
+    /// of one line per failing key per flush. Found investigating
+    /// T-keepass-loop: an ironbar restart left every key failing
+    /// `Connection refused` and flush_vars logged each of them, every
+    /// flush, at ~2000 lines/minute for as long as ironbar stayed down.
+    down: bool,
 }
 
 impl IronbarIpc {
@@ -31,7 +38,23 @@ impl IronbarIpc {
         Self {
             sock,
             last_ino: None,
+            down: false,
         }
+    }
+
+    /// Call after a send fails. Returns true only on the up→down edge — the
+    /// one time this failure is worth a log line, not every repeat of it.
+    pub fn note_failure(&mut self) -> bool {
+        let edge = !self.down;
+        self.down = true;
+        edge
+    }
+
+    /// Call after a send succeeds. Returns true only on the down→up edge.
+    pub fn note_success(&mut self) -> bool {
+        let edge = self.down;
+        self.down = false;
+        edge
     }
 
     /// True if the socket's inode changed since the last successful flush —

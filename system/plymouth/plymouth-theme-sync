@@ -27,6 +27,7 @@ set -u
 BOOT_IMAGE=/boot/mango-plymouth.img
 GRUB_BG=/boot/grub/mango-bg.png
 DYN_DIR=usr/share/plymouth/themes/mango/dyn
+SHUTDOWN_DIR=/usr/share/plymouth/themes/mango/shutdown
 FONT='JetBrainsMono Nerd Font'
 SCREEN_W=1920   # eDP-1 native mode; the script scales for other displays
 SCREEN_H=1080
@@ -186,8 +187,22 @@ render() {
 	text "$out/clock-colon.png" 76 "$light" "${C[on_surface]}" ":" 46x102 ||
 		die "could not render clock-colon.png"
 
+	# shutdown/: the splash plymouthd draws in --mode=shutdown|reboot. A
+	# subdirectory, so build_image's "$1"/*.png glob leaves it out of the
+	# early initrd — nothing here is read before the root filesystem is
+	# mounted. See install_shutdown for why it cannot simply be dyn/.
+	mkdir -p "$out/shutdown"
+	cp -- "$out/background.png" "$out/shutdown/background.png" ||
+		die "could not stage shutdown/background.png"
+	cp -- "$out/bullet.png" "$out/shutdown/dot.png" ||
+		die "could not stage shutdown/dot.png"
+	text "$out/shutdown/label-shutdown.png" 15 "$regular" "${C[on_surface]}" "Shutting down" ||
+		die "could not render shutdown/label-shutdown.png"
+	text "$out/shutdown/label-reboot.png" 15 "$regular" "${C[on_surface]}" "Restarting" ||
+		die "could not render shutdown/label-reboot.png"
+
 	# every output is a PNG of the geometry the script expects
-	for png in "$out"/*.png; do
+	for png in "$out"/*.png "$out"/shutdown/*.png; do
 		[ "$(file --brief --mime-type -- "$png")" = image/png ] || die "not a PNG: $png"
 	done
 	expect() {
@@ -202,6 +217,8 @@ render() {
 	expect bullet.png 9x21
 	expect code-0.png 9x22
 	expect clock-0.png 46x102
+	expect shutdown/background.png "${SCREEN_W}x${SCREEN_H}"
+	expect shutdown/dot.png 9x21
 }
 
 # build_image <rendered-dir> <out.cpio>: the early initrd. Every parent
@@ -231,6 +248,7 @@ install_image() {
 			die "could not stage $BOOT_IMAGE"
 		mv -f "$BOOT_IMAGE.new" "$BOOT_IMAGE"
 	fi
+	install_shutdown "$1/shutdown"
 	if [ -f "$GRUB_BG" ] && cmp -s "$1/background.png" "$GRUB_BG"; then
 		sign_boot
 		return 0
@@ -243,6 +261,35 @@ install_image() {
 		die "could not stage $GRUB_BG"
 	mv -f "$GRUB_BG.new" "$GRUB_BG"
 	sign_boot
+}
+
+# install_shutdown <rendered shutdown dir>: the host copy of the splash the
+# shutdown and reboot plymouthd draws. That plymouthd runs from the root
+# filesystem, and then from a ramfs mkinitcpio's plymouth-shutdown hook
+# rebuilds at every shutdown; neither sees dyn/, which exists only inside the
+# early initrd. Without these assets every sprite is empty and the screen
+# stays black for the whole shutdown.
+#
+# Why not just put dyn/ here: mkinitcpio's plymouth hook does add_full_dir on
+# the theme directory, so a host dyn/ is baked into initramfs-linux.img — and
+# GRUB loads that AFTER /boot/mango-plymouth.img, so the stale copy would
+# overwrite the fresh early-initrd one and freeze the LUKS wallpaper at the
+# last `mkinitcpio -P`. A different directory with different filenames cannot
+# collide. system/plymouth/install.sh asserts the dyn/ half of this.
+#
+# Not /boot: nothing here is read before the root filesystem is mounted, so
+# it needs no signature.
+install_shutdown() {
+	local src=$1 png dest
+	install -d -m 0755 -- "$SHUTDOWN_DIR" || die "could not create $SHUTDOWN_DIR"
+	for png in "$src"/*.png; do
+		dest=$SHUTDOWN_DIR/${png##*/}
+		if [ -f "$dest" ] && cmp -s "$png" "$dest"; then
+			continue
+		fi
+		install -m 644 -- "$png" "$dest.new" || die "could not stage $dest"
+		mv -f "$dest.new" "$dest"
+	done
 }
 
 # Re-sign the boot files GRUB reads when system/secureboot is prepared; a
@@ -325,6 +372,8 @@ if [ "${1:-}" = "test" ]; then
 	outdir=${2:-$work/render}
 	render "$outdir" "$wallpaper"
 	printf 'ok    rendered %s assets into %s\n' "$(ls "$outdir"/*.png | wc -l)" "$outdir"
+	printf 'ok    rendered %s shutdown assets into %s\n' \
+		"$(ls "$outdir"/shutdown/*.png | wc -l)" "$outdir/shutdown"
 	build_image "$outdir" "$outdir.cpio"
 	printf 'ok    early initrd %s (%s bytes, %s entries)\n' "$outdir.cpio" \
 		"$(stat -c %s "$outdir.cpio")" "$(cpio --quiet -t <"$outdir.cpio" | wc -l)"

@@ -83,6 +83,7 @@ ACTION_DESC = {
 CMD_FRIENDLY = {
     "dolphin": "File manager",
     "kitty": "Terminal",
+    "claude.sh": "Claude Code",
     "hyprpicker": "Color picker → clipboard",
     "wlogout": "Session menu",
 }

@@ -344,10 +344,19 @@ async fn flush_vars(vars: &mut Vars, ipc: &mut IronbarIpc, stats: &mut Stats) {
             Ok(()) => {
                 vars.ack(&k);
                 stats.var_sets += 1;
+                if ipc.note_success() {
+                    eprintln!("mango-bard: ipc recovered, sends succeeding again");
+                }
             }
             Err(e) => {
                 stats.ipc_errors += 1;
-                eprintln!("mango-bard: ipc error setting {k}: {e}");
+                // Log the down-edge only, not every failing key on every
+                // flush — an ironbar outage used to log ~2000 lines/minute
+                // here, one per dirty key per flush, for as long as ironbar
+                // stayed down (T-keepass-loop).
+                if ipc.note_failure() {
+                    eprintln!("mango-bard: ipc error setting {k}: {e}");
+                }
                 // Cool this key down instead of leaving it as the permanent
                 // head of `dirty` — otherwise a key that fails forever (e.g.
                 // a workspace class for an output mango has destroyed) wins
@@ -732,12 +741,10 @@ async fn run() -> Result<(), String> {
     let mut power_due: Option<Instant> = None;
     // Same shape again, for docker.rs's `refresh()` — a `docker compose up`
     // can start several containers in a burst, each its own event line.
-    // Same shape again, for keepass.rs's `refresh()` — its own monitor is
-    // unscoped to the whole Secret Service (keepass.rs's doc comment), and
-    // refresh() itself makes two Secret Service calls, so an undebounced
-    // refresh here is a feedback loop: each refresh's busctl calls appear
-    // on the monitor it is fed by, forking two more. Measured at ~40
-    // busctl/sec sustained, saturating the session bus (T-keepass-loop).
+    // Same shape again, for keepass.rs's `refresh()`. Its trigger arm below
+    // filters to real signals only (`keepass::is_signal_line`) so this
+    // debounce collapses a genuine signal burst — it no longer has to stop
+    // a feedback loop, that was T-keepass-loop and is fixed at the filter.
     let mut keepass_due: Option<Instant> = None;
     // hotspot.rs/darkmode.rs need no `_due` var: neither has an event stream
     // that can burst (T6b D2/D3) — their refreshes are called directly,
@@ -1036,17 +1043,15 @@ async fn run() -> Result<(), String> {
                 }
             }
 
-            // T28: `busctl --user monitor` line — every event re-resolves
-            // and re-reads the collection's `Locked` property directly
-            // (keepass.rs's own doc comment explains why this isn't
-            // narrowed further). refresh() itself makes two Secret Service
-            // calls, which the unscoped monitor also observes, so a direct
-            // refresh here — no `_due` debounce — is a feedback loop: each
-            // refresh forks two more `busctl`, forever. `keepass_due`
-            // collapses a burst to one refresh (T-keepass-loop).
+            // T28: `busctl --user monitor` line. Only a genuine `signal`
+            // re-arms the debounce — `keepass::is_signal_line`'s doc
+            // comment has the measured feedback-loop rate this filter
+            // breaks (T-keepass-loop). `keepass_due`'s 150 ms debounce
+            // still collapses a real signal burst to one refresh.
             line = keepass.mon.next_line() => {
-                let _ = line;
-                keepass_due = Some(Instant::now());
+                if keepass::is_signal_line(&line) {
+                    keepass_due = Some(Instant::now());
+                }
             }
 
             // T28: `playerctl --follow` line — already the fully-parsed

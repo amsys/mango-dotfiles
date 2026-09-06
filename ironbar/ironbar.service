@@ -1,0 +1,22 @@
+[Unit]
+Description=ironbar — Wayland status bar
+# ironbar used to be exec-once'd straight from mango/config.conf with no
+# supervision: any later exit (a session-bus disconnect, T-keepass-loop)
+# was permanent until the next login. Same shape as mango-bard.service —
+# one unit, restarted by systemd instead of by the compositor.
+PartOf=graphical-session.target
+After=graphical-session.target mango-bard.service
+Wants=mango-bard.service
+
+[Service]
+Type=simple
+# start.sh generates the bar config, clears a stale IPC socket, and retries
+# once itself before giving up — see its own comment. This unit's
+# Restart=on-failure is the outer safety net for everything after that:
+# ironbar exiting later in its life, not just failing to start.
+ExecStart=%h/.config/ironbar/scripts/start.sh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
