@@ -4,33 +4,66 @@
 # symlinks and never dirties this repo.
 #
 # Usage:
-#   ./install-config.sh            # install
+#   ./install-config.sh            # install, and back up whatever it replaces
 #   ./install-config.sh --dry-run  # print every action, change nothing
+#   ./install-config.sh --skip     # leave every file that already exists
+#   ./install-config.sh --force    # replace an existing file with no backup
+#
+# --skip and --force change the symlink step only. The per-machine files
+# (theme.json, local.conf, git/config.local) hold values that belong to this
+# machine alone, so --force never overwrites them either.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 DRY_RUN=0
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+CONFLICT=backup # backup | skip | force — what to do with a file already there
+for arg in "$@"; do
+	case "$arg" in
+	--dry-run) DRY_RUN=1 ;;
+	--skip) CONFLICT=skip ;;
+	--force) CONFLICT=force ;;
+	*)
+		printf 'install-config.sh: unknown option %s\n' "$arg" >&2
+		exit 2
+		;;
+	esac
+done
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 LINKED=0
 BACKED_UP=0
+SKIPPED=0
 
 log() { printf '%s\n' "$*"; }
 
-# link SRC DEST — backs up an existing regular file/dir, symlinks otherwise.
-# No-op if DEST is already the correct symlink.
+# link SRC DEST — symlinks SRC to DEST. No-op if DEST is already that link.
+# What happens to a DEST that exists and is something else depends on
+# $CONFLICT: back it up (default), leave it alone (--skip), or delete it
+# (--force).
 link() {
 	local src="$1" dest="$2"
 	if [[ -L "$dest" && "$(readlink -f "$dest")" == "$(readlink -f "$src")" ]]; then
 		return 0
 	fi
 	if [[ -e "$dest" || -L "$dest" ]]; then
-		log "  backup: $dest -> $dest.bak.$STAMP"
-		((DRY_RUN)) || mv "$dest" "$dest.bak.$STAMP"
-		BACKED_UP=$((BACKED_UP + 1))
+		case "$CONFLICT" in
+		skip)
+			log "  skip:   $dest (exists, --skip)"
+			SKIPPED=$((SKIPPED + 1))
+			return 0
+			;;
+		force)
+			log "  delete: $dest (no backup, --force)"
+			((DRY_RUN)) || rm -rf -- "$dest"
+			;;
+		*)
+			log "  backup: $dest -> $dest.bak.$STAMP"
+			((DRY_RUN)) || mv "$dest" "$dest.bak.$STAMP"
+			BACKED_UP=$((BACKED_UP + 1))
+			;;
+		esac
 	fi
 	log "  link:   $dest -> $src"
 	if ((DRY_RUN)); then
@@ -183,28 +216,36 @@ fi
 log
 
 # mango-bard: the daemon behind the bar's dynamic content (IRONBAR.md).
-# Rebuilt only when a source file changed since the last build — same
-# staleness check as the fast-tooltips shim above, for the same reason
-# (skip the ~20s rebuild on every login when nothing changed).
+# `cargo install` puts a real binary in ~/.local/bin. Do not symlink to
+# the build output instead. The build output is not permanent: .gitignore
+# makes ironbar/bard/target/ disposable, and $CARGO_HOME/config.toml sets
+# build.target-dir to /tmp/cargo-target, which is tmpfs. A symlink to it
+# thus breaks at each reboot. On 2026-09-06 the link went dead, both
+# systemd units failed (mango-bard 203/EXEC, ironbar 127, an endless
+# restart loop) and no bar started. `cargo install` also finds the build
+# output itself, so this code does not need to know the target-dir.
+# Rebuilt only when a source file changed since the installed binary —
+# same staleness check as the fast-tooltips shim above, for the same
+# reason (skip the ~20s rebuild on every login when nothing changed).
 BARD_DIR="$REPO/ironbar/bard"
-BARD_BIN="$BARD_DIR/target/release/mango-bard"
+BARD_BIN="$HOME/.local/bin/mango-bard"
 log "-- mango-bard --"
 if ! command -v cargo >/dev/null 2>&1; then
 	log "  skip:   cargo not installed"
-elif [[ -x "$BARD_BIN" && -z "$(find "$BARD_DIR/src" -name '*.rs' -newer "$BARD_BIN")" ]]; then
+elif [[ -f "$BARD_BIN" && -x "$BARD_BIN" && ! -L "$BARD_BIN" \
+	&& -z "$(find "$BARD_DIR/src" -name '*.rs' -newer "$BARD_BIN")" ]]; then
 	log "  keep:   $BARD_BIN (up to date)"
 elif ((DRY_RUN)); then
-	log "  (dry run) would run: cargo build --release (in $BARD_DIR)"
+	log "  (dry run) would run: cargo install --path $BARD_DIR --root $HOME/.local"
 else
-	if (cd "$BARD_DIR" && cargo build --release); then
-		log "  build:  $BARD_BIN"
+	# Remove the old symlink first. `cargo install` replaces the file, but
+	# a stale link here points into a target-dir that may not exist.
+	rm -f "$BARD_BIN"
+	if (cd "$BARD_DIR" && cargo install --path . --root "$HOME/.local" --locked --force); then
+		log "  install: $BARD_BIN"
 	else
 		log "  WARNING: mango-bard build failed — the bar will have no dynamic content."
 	fi
-fi
-if [[ -x "$BARD_BIN" ]]; then
-	log "  link:   ~/.local/bin/mango-bard -> $BARD_BIN"
-	((DRY_RUN)) || { mkdir -p "$HOME/.local/bin"; ln -sf "$BARD_BIN" "$HOME/.local/bin/mango-bard"; }
 fi
 log
 
@@ -302,4 +343,4 @@ else
 fi
 log
 
-log "== $LINKED linked, $BACKED_UP backed up =="
+log "== $LINKED linked, $BACKED_UP backed up, $SKIPPED skipped =="

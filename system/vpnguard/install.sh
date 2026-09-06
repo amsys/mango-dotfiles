@@ -9,6 +9,7 @@
 # Choosing and ordering VPNs is a plain unprivileged `nmcli connection
 # modify` after this script finishes, not an edit to a file here. See
 # README.md.
+# check: /usr/local/bin/mango-vpnguard
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

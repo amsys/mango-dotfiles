@@ -10,6 +10,7 @@
 # 72-vault-powerbtn.rules for why a per-node uaccess rule is used, and
 # VAULT.md section 1 for the full sniffing threat model.
 
+# check: /etc/udev/rules.d/72-vault-powerbtn.rules
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

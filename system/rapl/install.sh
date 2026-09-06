@@ -13,6 +13,7 @@
 # the watts" — see udev-rapl.rules for why a udev rule was used instead of the
 # more obvious tmpfiles.d z-line.
 
+# check: /etc/udev/rules.d/mango-rapl.rules
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

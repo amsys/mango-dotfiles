@@ -8,6 +8,7 @@
 #
 # See README.md in this directory for why ufw blocks libvirt DHCP/DNS by
 # default even though libvirt's own nftables rules look correct.
+# check: ufw:libvirt DHCP
 set -eu
 
 [ "$(id -u)" -eq 0 ] || { echo "run me with sudo" >&2; exit 1; }

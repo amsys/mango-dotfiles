@@ -90,3 +90,12 @@ post_hook = 'makoctl reload || true'
 input_path = '~/.config/matugen/templates/sddm/Colors.qml'
 output_path = '~/.local/state/mango/generated/sddm-colors.qml'
 post_hook = 'sudo -n /usr/local/bin/sddm-theme-sync || true'
+
+# Orca (stably-orca-bin) keeps its settings inside orca-data.json, an app-state
+# blob it rewrites live, so matugen renders both terminal themes here and
+# mango/scripts/orca-set-color.sh patches them in. No post_hook: that script is
+# called from switchwall.sh, like vscode-set-color.sh, because it needs this
+# render to exist first.
+[templates.orca]
+input_path = '~/.config/matugen/templates/orca/themes.json.in'
+output_path = '~/.local/state/mango/generated/orca-themes.json'

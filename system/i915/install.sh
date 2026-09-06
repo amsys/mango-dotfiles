@@ -10,6 +10,7 @@
 # See 99-i915-compute-timeouts.rules for why, and
 # plans/iterative-watching-spring.md for the crash this addresses.
 
+# check: /etc/udev/rules.d/99-i915-compute-timeouts.rules
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

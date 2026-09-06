@@ -1,25 +1,25 @@
 # Theming — the matugen color pipeline
 
 One wallpaper is the single color source. `mango/scripts/switchwall.sh`
-applies the wallpaper and runs matugen, which renders one template per
-themed application.
+applies the wallpaper and runs matugen. matugen renders one template for
+each themed application.
 
 ## The rule
 
 **Never edit a generated file.** The next wallpaper switch overwrites it.
-Edit the matching file under `matugen/templates/` and run:
+Edit the related file in `matugen/templates/`. Then run:
 
 ```bash
 switchwall.sh --noswitch
 ```
 
-The generated files are listed in `.gitignore` as a safety net. If
-`git status` is dirty directly after a theme switch, the
-tracked-vs-generated split is broken.
+`.gitignore` lists the generated files as a safety net. If `git status`
+shows changes directly after a theme switch, the split between the tracked
+files and the generated files is broken.
 
 ## switchwall.sh
 
-Bound to `SUPER+W`:
+`SUPER+W` starts the script:
 
 ```
 switchwall.sh                        # rofi thumbnail grid, then set + theme
@@ -30,82 +30,93 @@ switchwall.sh --type scheme-tonal-spot   # or scheme-expressive, ...
 switchwall.sh --color RRGGBB         # theme from a color, no wallpaper
 ```
 
-The picker (`rofi/wallpaper.sh`) lists the images under `~/Wallpapers` as a
+The picker (`rofi/wallpaper.sh`) shows the images in `~/Wallpapers` as a
 thumbnail grid.
 
-The script reads its intent from `~/.config/mango/theme.json`
-(`background.wallpaperPath`, `appearance.palette.{accentColor,type}`) and
-writes the first two back on each switch. It applies the wallpaper with
-`swaybg` first — mango shows a bare root color otherwise — and then runs
-matugen. At login `config.conf` starts `swaybg` directly from
-`theme.json` before `switchwall.sh --noswitch` runs; the script leaves a
-`swaybg` with identical arguments alone, so the wallpaper never drops out.
+The script reads its intent from `~/.config/mango/theme.json`:
+`background.wallpaperPath` and `appearance.palette.{accentColor,type}`. It
+writes the first two keys back at each switch. It applies the wallpaper with
+`awww` first, because mango shows a bare root color if it does not. Then it
+runs matugen. At login, `config.conf` starts `awww-daemon` and shows
+`/boot/grub/mango-bg.png`. That is the blurred image which GRUB, the
+plymouth prompt and the console framebuffer also show, so the desktop opens
+on the boot image. `switchwall.sh --noswitch` then dissolves it into the
+sharp wallpaper. `awww` changes the image inside one daemon, thus no layer
+surface is dropped and the wallpaper never disappears.
 
-**Spanning wallpapers.** When the image aspect matches the total monitor
-layout within 10% (for example a 3840x1080 panorama across two 1080p
-outputs), the script cuts one tile per output with imagemagick and runs one
-`swaybg` group per monitor. Tiles cache under
-`~/.local/state/mango/generated/wallpaper/`. Other aspects fill each output
-with the whole image. Nothing reruns this on monitor hotplug — press
-`SUPER+W` again after you replug.
+The fade must come from `awww`. mango does not animate a background layer
+surface: with `animation_duration_close=1200` the screen showed the root
+color 106 ms after the wallpaper client died, and an open fade never ramped
+(measured 2026-09-07). A `layerrule` on `layer_name:wallpaper` has no
+effect.
 
-After matugen, the script switches the theme *names* that matugen cannot
-recolor: `adw-gtk3`/`adw-gtk3-dark` (GTK) and `breeze-plus`/
-`breeze-plus-dark` (icons) via `gsettings` and `kwriteconfig6`. The
-`--notify` flag on `kwriteconfig6` makes running KDE applications repaint
-without a restart.
+**Spanning wallpapers.** The image aspect can agree with the total monitor
+layout within 10%, for example a 3840x1080 panorama across two 1080p
+outputs. The script then cuts one tile for each output with imagemagick, and
+it sends one `awww img -o` for each monitor. The tiles cache in
+`~/.local/state/mango/generated/wallpaper/`. A different aspect fills each
+output with the whole image. No component runs this again at a monitor
+hotplug. Press `SUPER+W` again after you connect the monitor again.
 
-The bar's `darkmode` button toggles light/dark: it flips the gsettings color
-scheme and reruns `switchwall.sh --noswitch`.
+After matugen, the script changes the theme *names* that matugen cannot
+recolor. These are `adw-gtk3`/`adw-gtk3-dark` for GTK and `breeze-plus`/
+`breeze-plus-dark` for the icons. The script uses `gsettings` and
+`kwriteconfig6`. The `--notify` flag of `kwriteconfig6` makes the running
+KDE applications repaint without a restart.
+
+The `darkmode` button of the bar changes between light and dark. It changes
+the gsettings color scheme and runs `switchwall.sh --noswitch` again.
 
 ## Templates
 
-`matugen/config.toml` fans the source color out to every themed app:
+`matugen/config.toml` sends the source color to each themed application:
 
 | Template | Output | Reload |
 |---|---|---|
 | `kitty/theme.conf` | `~/.config/kitty/theme.conf` | `pkill -USR1 kitty` |
-| `mango/colors.conf` | `~/.config/mango/colors.conf` | mango sources it live |
-| `ironbar/style.css` | `~/.config/ironbar/style.css` | ironbar restart (bar start script) |
-| `swaylock/config` | `~/.config/swaylock/config` | read fresh on each lock |
+| `mango/colors.conf` | `~/.config/mango/colors.conf` | mango reads it live |
+| `ironbar/style.css` | `~/.config/ironbar/style.css` | the bar start script restarts ironbar |
+| `swaylock/config` | `~/.config/swaylock/config` | read again at each lock |
 | `mako/config` | `~/.config/mako/config` | `makoctl reload` |
-| `rofi/colors.rasi` | `~/.config/rofi/colors.rasi` | read fresh on each launch |
+| `rofi/colors.rasi` | `~/.config/rofi/colors.rasi` | read again at each start |
 | `gtk-3.0/gtk.css`, `gtk-4.0/gtk.css` | `~/.config/gtk-{3,4}.0/gtk.css` | — |
-| `wlogout/style.css` | `~/.config/wlogout/style.css` | read on each menu open |
+| `wlogout/style.css` | `~/.config/wlogout/style.css` | read at each menu open |
 | `kde/kdeglobals` | `~/.config/kdeglobals` | `kwriteconfig6 --notify` |
 | `kde/color.txt` | state dir `color.txt` | read by `vscode-set-color.sh` |
 | `colors.json` | state dir `colors.json` | read by `keybinds-cheatsheet.py` |
 | `wallpaper.txt` | state dir `wallpaper/path.txt` | — |
 | `plymouth/colors.conf` | state dir `plymouth-colors.conf` | `plymouth-theme-sync` (boot prompt) |
 | `sddm/Colors.qml` | state dir `sddm-colors.qml` | `sddm-theme-sync` (login screen) |
+| `orca/themes.json.in` | state dir `orca-themes.json` | `orca-set-color.sh`. It patches only while Orca is stopped. The patch applies at login |
 
 "State dir" is `~/.local/state/mango/generated/`.
 
-`[config.custom_colors]` seeds the ANSI terminal colors from a gruvbox-dark
-base with `blend = true`, so the terminal palette shifts toward the
-wallpaper's hue instead of staying fixed.
+`[config.custom_colors]` sets the ANSI terminal colors from a gruvbox-dark
+base. It uses `blend = true`. The terminal palette thus moves to the hue of
+the wallpaper. It does not stay fixed.
 
-**Template trap:** never put matugen slot syntax inside a comment. Tera
-expands templates whole, and one bad slot fails the entire matugen run.
+**Template trap:** Do not put matugen slot syntax in a comment. Tera expands
+the whole template. One bad slot makes the full matugen run fail.
 
 ## Lock screen (swaylock)
 
-The full swaylock config is generated from
-`matugen/templates/swaylock/config`. It embeds the current wallpaper path,
-so the lock screen matches the desktop, and maps the ring and text colors
-onto the palette. `SUPER+L` locks; a `pgrep` guard prevents duplicate
-instances. `indicator-caps-lock` is on — the ring shows caps-lock state.
+matugen generates the full swaylock config from
+`matugen/templates/swaylock/config`. The config contains the current
+wallpaper path, thus the lock screen agrees with the desktop. It also maps
+the ring color and the text color onto the palette. `SUPER+L` locks the
+screen. A `pgrep` guard prevents a duplicate instance.
+`indicator-caps-lock` is on, thus the ring shows the caps-lock state.
 
 ## Login screen (SDDM)
 
-The greeter theme lives in `system/sddm/theme/` (one `Main.qml`). It follows
-the wallpaper, the palette, and light/dark mode.
+The greeter theme is in `system/sddm/theme/` (one `Main.qml`). It follows
+the wallpaper, the palette, and the light or dark mode.
 
 ```bash
 sudo system/sddm/install.sh    # once, and after any change under system/sddm/
 ```
 
-Preview without an install:
+Preview the theme without an install:
 
 ```bash
 sed -E 's/"\{\{[^"]*\}\}"/"#808080"/g' matugen/templates/sddm/Colors.qml \
@@ -113,130 +124,155 @@ sed -E 's/"\{\{[^"]*\}\}"/"#808080"/g' matugen/templates/sddm/Colors.qml \
 sddm-greeter-qt6 --test-mode --theme system/sddm/theme
 ```
 
-**How colors reach a root-owned directory.** matugen renders as the user
-into the state dir. A post-hook calls `/usr/local/bin/sddm-theme-sync`
-through one sudoers rule. The tool is root-owned, takes no arguments, and
-installs the render only when it differs from a root-owned reference by
-color literals alone. It refuses structural changes, because the greeter
-runs this QML before anyone has logged in. After you edit the template, run
-the install script again — it refreshes the reference copy.
+**How colors reach a root-owned directory.** matugen renders the file as the
+user into the state dir. A post-hook calls `/usr/local/bin/sddm-theme-sync`
+through one sudoers rule. The tool is root-owned and takes no arguments. It
+installs the render only when the render differs from a root-owned reference
+in the color literals only. It refuses a structural change, because the
+greeter runs this QML before a user logs in. After you edit the template,
+run the install script again to refresh the reference copy.
 
 ## Boot prompt (plymouth)
 
-The LUKS passphrase prompt is a plymouth theme (`system/plymouth/theme/`)
-that looks like the SDDM greeter: the same blurred wallpaper, the same card,
-entry and colours. Above the card it shows the clock and, when a TPM secret
-is sealed, the boot-attestation code (see below).
+The LUKS passphrase prompt is a plymouth theme (`system/plymouth/theme/`).
+It looks like the SDDM greeter: the same blurred wallpaper, the same card,
+the same entry, and the same colors. Above the card it shows the clock. When
+a TPM secret is sealed, it also shows the boot-attestation code (see below).
 
 ```bash
 sudo system/plymouth/install.sh    # once, and after any change under system/plymouth/
 sudo system/tpm-totp/install.sh    # once; the code on the prompt
 ```
 
-**How colours reach the initramfs without a rebuild.** The theme script has
-no colour and renders no text. Everything the wallpaper decides — the blurred
-background, the card, the entry, every glyph of the clock and the code — is a
-PNG. matugen renders `plymouth/colors.conf` into the state dir; a post-hook
-calls `/usr/local/bin/plymouth-theme-sync` through one sudoers rule. The tool
-is root-owned, takes no arguments, validates the nine colour lines and the
-wallpaper path, renders the PNGs itself, and packs them into the early initrd
-`/boot/mango-plymouth.img`. GRUB loads that image next to the main initramfs;
-the kernel unpacks it first, so plymouth finds `themes/mango/dyn/*.png` that
-the main image never contains. The same rendered `background.png` is also
-copied to `/boot/grub/mango-bg.png`, so `system/grub/install.sh --gfx` shows
-the identical blurred wallpaper. A wallpaper switch costs one ~1 MB write.
+**How colors reach the initramfs without a rebuild.** The theme script has
+no color, and it renders no text. Each item that the wallpaper controls is a
+PNG: the blurred background, the card, the entry, and each glyph of the
+clock and the code. matugen renders `plymouth/colors.conf` into the state
+dir. A post-hook calls `/usr/local/bin/plymouth-theme-sync` through one
+sudoers rule. The tool is root-owned and takes no arguments. It validates
+the nine color lines and the wallpaper path, renders the PNGs itself, and
+packs them into the early initrd `/boot/mango-plymouth.img`.
+
+GRUB loads that image next to the main initramfs. The kernel extracts the
+early initrd first, thus plymouth finds `themes/mango/dyn/*.png`. The main
+image never contains these files. The same rendered `background.png` also
+goes to `/boot/grub/mango-bg.png`. `system/grub/install.sh --gfx` thus shows
+the identical blurred wallpaper. A wallpaper switch costs one write of
+approximately 1 MB.
 
 **Never put a `dyn/` directory into `/usr/share/plymouth/themes/mango/`.**
 The stock plymouth hook copies the whole theme directory into the main
-initramfs, and files there shadow the early initrd forever. `install.sh`
-refuses to run if it exists.
+initramfs. Files there hide the early initrd permanently. `install.sh` does
+not run if this directory exists.
 
-**Early initrds need directory entries.** The kernel unpacks them into an
-empty rootfs and creates no parent directories; a cpio holding only files is
-dropped without a message. `plymouth-theme-sync` includes the parents.
+**Early initrds need directory entries.** The kernel extracts them into an
+empty rootfs. It creates no parent directory. The kernel drops a cpio that
+contains only files, and it shows no message. `plymouth-theme-sync` includes
+the parent entries.
 
-Preview without touching `/boot`: `plymouth-theme-sync test <dir>` renders
-the assets and the cpio from the current state files with no root.
+To preview without a write to `/boot`, run `plymouth-theme-sync test <dir>`.
+The command renders the assets and the cpio from the current state files. It
+needs no root.
 
-**Handover to SDDM.** plymouth quits with a plain `plymouth quit`; an
-sddm.service drop-in (`system/plymouth/sddm-after-plymouth.conf`) makes X
-start only after `plymouth --wait` returns. There is a short gap between the
-prompt and the greeter — the i915 framebuffer holds whatever was drawn last
-before the kernel took over, which with `system/grub/install.sh --gfx` is the
-wallpaper GRUB drew, not the ASUS firmware logo. `plymouth quit
---retain-splash` was tried and hung X before it opened `/dev/dri/card1` on
-every boot: SDDM has no plymouth handover, unlike GDM, so the seamless
-transition is not available here.
+**Handover to SDDM.** plymouth quits with a plain `plymouth quit`. An
+sddm.service drop-in (`system/plymouth/sddm-after-plymouth.conf`) starts X
+only after `plymouth --wait` returns. There is a short gap between the
+prompt and the greeter. The i915 framebuffer holds the image that was drawn
+last before the kernel took control. With `system/grub/install.sh --gfx`,
+this image is the wallpaper that GRUB drew, not the ASUS firmware logo.
 
-To see which DRM device plymouth used and when, add `plymouth.debug` to the
-kernel line for one boot (`e` in the GRUB menu) and read
-`/var/log/plymouth-debug.log` afterwards.
+A test of `plymouth quit --retain-splash` hung X before it opened
+`/dev/dri/card1` at each boot. SDDM has no plymouth handover, but GDM has
+one. A transition with no gap is thus not possible here.
+
+To find which DRM device plymouth used and when, add `plymouth.debug` to the
+kernel line for one boot. Press `e` in the GRUB menu to do this. Then read
+`/var/log/plymouth-debug.log`.
 
 ### Boot attestation code (tpm2-totp)
 
-`system/tpm-totp/` shows a six-digit code in the clock's date slot. It is a
-TOTP whose secret sits in the TPM, sealed to PCRs 0, 2, 4 and 7 (firmware,
-option ROMs, boot loader, Secure Boot policy). If the firmware or GRUB were
-replaced, the TPM refuses to compute it and the prompt says
-"TPM mismatch: do not unlock". Compare the code with the phone before typing
-the passphrase.
+`system/tpm-totp/` shows a six-digit code in the date slot of the clock. The
+code is a TOTP. Its secret is in the TPM, sealed to PCRs 0, 2, 4 and 7
+(firmware, option ROMs, boot loader and kernel image, Secure Boot policy).
+If a person replaced the firmware, GRUB or the kernel, the TPM does not
+compute the code. The prompt then shows "TPM mismatch: do not unlock".
+Compare the code with the phone before you type the passphrase.
 
 ```bash
 sudo tpm2-totp -P - -p 0,2,4,7 -l nauthiz generate   # once; password on stdin
-sudo tpm2-totp -P - -p 0,2,4,7 reseal                # after a firmware update or enabling Secure Boot
+sudo tpm2-totp -P - -p 0,2,4,7 reseal                # after every kernel upgrade, firmware update or Secure Boot change
 ```
 
-`generate` prints an `otpauth://` URI and a QR code. KeePassXC verifies it
-without another app: open the entry, *TOTP → Set up TOTP*, paste the secret
-from the URI (or use *Custom settings* if the URI says anything but 30 s /
-6 digits / SHA1), and the entry shows the current code (*Show TOTP*,
-Ctrl+Shift+T). A KeePass client on the phone that syncs the same database
-shows the same code, which is the one to compare at boot — the desktop
-KeePassXC is not running yet at that point. After login,
-`sudo tpm2-totp calculate` against the KeePassXC code is a quick health
-check of the TPM state.
+A `linux` package upgrade moves PCR 4. Under Secure Boot, the firmware loads
+the kernel and measures it. The first boot on a new kernel thus always shows
+the mismatch icon until you reseal. No component reseals for you.
+
+Use `reseal`. Do not use `generate`. `reseal` keeps the secret. `generate`
+makes a new secret. The KeePassXC entry then shows a code that never agrees.
+
+`generate` prints an `otpauth://` URI and a QR code. KeePassXC verifies the
+code without another application. Open the entry and select *TOTP → Set up
+TOTP*. Paste the secret from the URI. Use *Custom settings* if the URI does
+not say 30 s, 6 digits and SHA1. The entry then shows the current code
+(*Show TOTP*, Ctrl+Shift+T).
+
+A KeePass client on the phone that syncs the same database shows the same
+code. Compare that code at boot, because the desktop KeePassXC does not run
+at that time. After login, compare `sudo tpm2-totp calculate` with the
+KeePassXC code for a quick health check of the TPM state.
 
 The code reaches the prompt as `plymouth update --status=mango:HHMM:CODE`
-when the kernel line has `splash`; the theme script parses that grammar.
-Without `splash` (the pinned GRUB entry) plymouth shows its text prompt and
-`mango-totp` rewrites one line at the top of the console in place — no
-`display-message`, which the text view would print as a new line every
-second over the passphrase input. Esc on the graphical prompt switches to
-the text view; the code is not shown there.
+when the kernel line has `splash`. The theme script parses that grammar. The
+pinned GRUB entry has no `splash`. plymouth then shows its text prompt.
+`mango-totp` writes one line again at the top of the console, in place.
 
-What it does not cover: GRUB here does not measure the kernel or the
-initrds (PCR 8/9 are not part of the seal, on purpose — the early initrds
-change on every wallpaper switch). A swapped initramfs is only caught by a
-UKI booted under Secure Boot (PCR 11), a later project.
+`mango-totp` does not use `display-message`. The text view prints such a
+message as a new line every second over the passphrase input. Esc on the
+graphical prompt changes to the text view. The text view does not show the
+code.
+
+The seal does not cover the initrds, but it covers the kernel. GRUB does not
+measure the kernel. Under Secure Boot, GRUB loads the kernel with firmware
+LoadImage, and the firmware measures that image into PCR 4. The initrds have
+no such path. PCR 8 and PCR 9 stay out of the seal on purpose, because the
+early initrds change at each wallpaper switch. Only a UKI that boots under
+Secure Boot (PCR 11) finds a replaced initramfs, and that is a later
+project.
 
 ## GRUB and the rescue entries
 
-`system/grub/install.sh --gfx` hides the menu (F4, Esc or a held Shift
-during the 2 s timeout shows it): gfxterm with `/boot/grub/mango-bg.png` as
-the background, the same blurred wallpaper plymouth and SDDM show
-(`plymouth-theme-sync` keeps it current on every wallpaper switch — run
-`~/.config/mango/scripts/switchwall.sh --noswitch` once before the first
-`install.sh --gfx` so the file exists). `grub-regen` (the shared, guarded
-`grub-mkconfig` wrapper) strips the "Loading Linux ..." echo lines. The
-plain console variant (no `--gfx`) is blank on this firmware: the EFI text
-console shows no text at all, so the menu cannot be used.
+`system/grub/install.sh --gfx` hides the menu. F4, Esc or a held Shift
+during the 2 s timeout shows the menu. The menu uses gfxterm with
+`/boot/grub/mango-bg.png` as the background. This is the same blurred
+wallpaper that plymouth and SDDM show. `plymouth-theme-sync` keeps the file
+current at each wallpaper switch. Run
+`~/.config/mango/scripts/switchwall.sh --noswitch` one time before the first
+`install.sh --gfx`, so that the file exists.
+
+`grub-regen` is the shared, guarded `grub-mkconfig` wrapper. It removes the
+"Loading Linux ..." echo lines. The plain console variant (no `--gfx`) is
+blank on this firmware. The EFI text console shows no text, thus you cannot
+use the menu.
 
 `--gfx` also pins `GRUB_FONT` to `/boot/grub/fonts/unicode.pf2`, the copy on
-the ESP. Without it, `/etc/grub.d/00_header` picks
-`/usr/share/grub/unicode.pf2` on the encrypted root, so `grub.cfg` mounts the
-LUKS volume just to read the font. The passphrase is typed once, at the
-plymouth prompt, so that `cryptomount` never prompts and fails silently:
-`loadfont` fails, `gfxterm` never starts, `background_image` never runs, and
-GRUB draws nothing — the ASUS logo survives GRUB and both handover gaps, with
-no error printed anywhere, even though `GRUB_TERMINAL_OUTPUT` and
-`GRUB_BACKGROUND` are both set correctly. `grub-regen` refuses to install a
-config that lost the `loadfont /grub/fonts/unicode.pf2` line, so this cannot
-regress silently again.
+the ESP. Without this setting, `/etc/grub.d/00_header` selects
+`/usr/share/grub/unicode.pf2` on the encrypted root. `grub.cfg` then mounts
+the LUKS volume only to read the font. You type the passphrase one time, at
+the plymouth prompt. `cryptomount` thus never prompts, and it fails without
+a message.
+
+`loadfont` fails, `gfxterm` never starts, and `background_image` never runs.
+GRUB draws nothing. The ASUS logo stays through GRUB and the two handover
+gaps, and no component prints an error. `GRUB_TERMINAL_OUTPUT` and
+`GRUB_BACKGROUND` are both correct at that time. `grub-regen` does not
+install a config that lost the `loadfont /grub/fonts/unicode.pf2` line. This
+failure thus cannot come back without a message.
 
 `system/boot-pin/pin-kernel.sh` copies the running kernel and initramfs to
-`/boot/pinned/` and adds two entries to `/etc/grub.d/40_custom` that every
-`grub-mkconfig` keeps: the pinned kernel (plymouth text prompt, quiet) and a
-verbose-console entry for the current kernel (no `quiet`, no `splash`,
-plymouth off, systemd's console prompt). The copies must stay out of `/boot`
-itself: `10_linux` globs `/boot/vmlinuz-*` and makes the pinned copy the
-default entry. Re-run it after a kernel you trust has booted.
+`/boot/pinned/`. It adds two entries to `/etc/grub.d/40_custom`, and each
+`grub-mkconfig` keeps them. The first entry is the pinned kernel (plymouth
+text prompt, quiet). The second entry is a verbose console entry for the
+current kernel (no `quiet`, no `splash`, plymouth off, the console prompt of
+systemd). The copies must stay out of `/boot` itself, because `10_linux`
+globs `/boot/vmlinuz-*` and makes the pinned copy the default entry. Run the
+script again after a kernel that you trust has booted.

@@ -15,6 +15,7 @@
 # subnets are hardcoded; override the devices with MANGO_REMOTE_WG_DEV /
 # MANGO_HS_IFACE if this machine names them differently. See README.md in
 # this directory for the trust model.
+# check: ufw:vnc via
 set -eu
 
 WG_DEV="${MANGO_REMOTE_WG_DEV:-wg_hetzner}"

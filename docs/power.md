@@ -2,169 +2,174 @@
 
 ## Power modes (`powermode.sh`)
 
-Three modes. A left click on the battery pill cycles **full ↔ eco**.
-**battery** mode is entered and left automatically with the AC cable.
+There are three modes. A left click on the battery pill changes between
+**full** and **eco**. The system enters and leaves **battery** mode
+automatically with the AC cable.
 
-- **full** — CPU EPP, turbo, and platform profile at maximum. PCI and NVMe
-  runtime power management off.
-- **battery** — the cable comes out. The CPU stays responsive
-  (`balance_power`, turbo on), and the I/O-side savings come for free: PCI
-  and NVMe runtime PM, laptop-mode writeback, Wi-Fi power save, a dimmed
-  backlight. Nothing is paused or stopped. Under `PM_BAT_ECO_PCT` (40%)
-  the mode escalates itself to eco.
-- **eco** — everything at minimum, backlight dimmed further. Docker
-  containers get one of three outcomes: a container with a live
-  `docker exec` or build keeps running, one that only hosts a
-  `PM_ECO_BUSY_PROCS` process is paused, and an idle one is stopped.
-  Before the heavy steps run, eco waits for open coding-agent sessions to
-  go quiet (measured by CPU ticks), unloads ollama models, and pauses
-  hermes. Battery drain outranks the wait: below `PM_ECO_DRAIN_FORCE_PCT`
-  it proceeds regardless.
+- **full** — The CPU EPP, the turbo, and the platform profile are at the
+  maximum. The PCI and NVMe runtime power management is off.
+- **battery** — The system uses this mode when you disconnect the cable.
+  The CPU stays responsive with `balance_power` and turbo on. The mode also
+  saves power on the I/O side: PCI and NVMe runtime PM, laptop-mode
+  writeback, Wi-Fi power save, and a dimmed backlight. The mode pauses
+  nothing and stops nothing. Below `PM_BAT_ECO_PCT` (40%), the mode changes
+  itself to eco.
+- **eco** — All the knobs are at the minimum, and the backlight is dimmer.
+  A Docker container gets one of three results. A container with a live
+  `docker exec` or build keeps running. The mode pauses a container that
+  hosts only a `PM_ECO_BUSY_PROCS` process, and it stops an idle container.
+  Before the heavy steps, eco waits for the open coding-agent sessions to go
+  quiet (measured by CPU ticks), unloads the ollama models, and pauses
+  hermes. The battery drain has priority over the wait: below
+  `PM_ECO_DRAIN_FORCE_PCT`, eco continues immediately.
 
-A manual click sets an override that survives until the cable state
-changes. `battery-guard.sh` also watches for a **weak charger** (AC online
-but the battery still drains, or a USB-C source under `PM_WEAK_MIN_W`) and
-forces eco with a critical notification until the charger recovers.
+A manual click sets an override. The override stays until the cable state
+changes. `battery-guard.sh` also looks for a **weak charger**. A weak
+charger is an AC source that is online while the battery still drains. It is
+also a USB-C source below `PM_WEAK_MIN_W`. The guard then forces eco and
+shows a critical notification until the charger recovers.
 
-Every knob lives in `mango/powermode.conf`, tracked and symlinked, with a
-comment over each key. Edits apply on the next mode switch.
+`mango/powermode.conf` holds every knob. The repo tracks this file and
+symlinks it. A comment is above each key. Your edits apply at the next mode
+switch.
 
 ```
 powermode.sh status | full | battery | eco   # status / force a mode
 powermode.sh test                            # decision-table self-check
 ```
 
-The root-owned sysfs knobs (EPP, turbo, platform profile, PCI PM, ...) are
-written only by `/usr/local/bin/mango-powermode`. Install it once:
+Only `/usr/local/bin/mango-powermode` writes the root-owned sysfs knobs
+(EPP, turbo, platform profile, PCI PM, and more). Install this helper one
+time:
 
 ```bash
 sudo system/powermode/install.sh
 ```
 
-`powermode.conf` is user-writable, so the root helper never reads it.
-`powermode.sh` resolves the config into `KEY=value` lines and pipes them in
-on stdin; the helper validates every value against a closed set before it
-touches sysfs. Before this install, mode switches still work — they only
-skip the root-owned knobs.
+The user can write to `powermode.conf`, thus the root helper never reads it.
+`powermode.sh` changes the config into `KEY=value` lines. It sends the lines
+to the helper on stdin. The helper compares each value with a closed set
+before it writes to sysfs. Mode switches also work before this install. They
+only skip the root-owned knobs.
 
 ## Low battery (`battery-guard.sh`)
 
-An `exec-once` watcher, 30 s poll. Thresholds from `MANGO_BATTERY`
-(default `20,10,5,3`):
+`battery-guard.sh` is an `exec-once` watcher. It polls every 30 s. The
+thresholds come from `MANGO_BATTERY` (default `20,10,5,3`):
 
 | Level | Action |
 |---|---|
-| 20% | notification, soft chime |
-| 10% | persistent critical notification + alarm, repeated every 5 min |
-| 5% | 60 s countdown, then `systemctl suspend` |
-| 3% | suspends even when something is mid-flight |
-| 2% | UPower's own `PercentageAction` — the last resort, normally unreachable |
+| 20% | a notification and a soft chime |
+| 10% | a persistent critical notification and an alarm, repeated every 5 min |
+| 5% | a 60 s countdown, then `systemctl suspend` |
+| 3% | suspends even when a task is in progress |
+| 2% | the `PercentageAction` of UPower. This is the last resort. It is normally unreachable |
 
-Plugging in cancels a running countdown and re-arms every tier. A tier
-re-arms two percent above where it fired, so a battery on a threshold does
-not chatter.
+The cable connection cancels a running countdown and re-arms each tier. A
+tier re-arms two percent above the level where it fired. A battery on a
+threshold thus does not chatter.
 
-At 5% the guard consults `mango/scripts/busy.sh` and defers while a pacman
-transaction or a fresh partial download is in flight. At 3% it suspends
-regardless. Critical notifications stick until dismissed (mako's
-`[urgency=critical]` sets `default-timeout=0`).
+At 5%, the guard reads `mango/scripts/busy.sh`. It waits while a pacman
+transaction or a fresh partial download is in progress. At 3%, it suspends
+in all conditions. A critical notification stays until you dismiss it. The
+`[urgency=critical]` rule of mako sets `default-timeout=0`.
 
 ## The power button
 
 | Gesture | Action |
 |---|---|
-| tap (< 1 s) | the session menu (`powermenu.sh`) |
-| hold 1–3.5 s, release | suspend |
-| hold ~4 s | the firmware cuts power (fixed in hardware) |
+| tap (< 1 s) | opens the session menu (`powermenu.sh`) |
+| hold 1–3.5 s, release | suspends |
+| hold ~4 s | the firmware cuts the power (fixed in hardware) |
 
-Shutdown is a menu button, not a hold tier: a hold near 4 s would race the
+Shutdown is a menu button. It is not a hold tier. A hold near 4 s races the
 firmware cut.
 
-`mango/scripts/powerkey.py` reads the power-button input device and times
-press to release. It is a watcher because mango has no release binds, and
-logind's long-press threshold (5 s) sits past the firmware cut. logind must
-stand down for this to work — see the checklist in
+`mango/scripts/powerkey.py` reads the power-button input device. It measures
+the time from the press to the release. It is a watcher, because mango has
+no release binds. Also, the long-press threshold of logind (5 s) is after
+the firmware cut. logind must not handle the key. See the checklist in
 [install.md](install.md) (`HandlePowerKey=ignore`).
 
 ## The session menu (`powermenu.sh`)
 
-Wraps `wlogout`. It warns first when `busy.sh` reports a package
-transaction or an unfinished download (it informs, it does not block), and
-it centers a fixed-size panel on the active monitor. The stylesheet is
-matugen output (`matugen/templates/wlogout/style.css`). The button icons
-are SVG files in `wlogout/icons/`, because wlogout renders label text at
-one fixed size.
+`powermenu.sh` is a wrapper around `wlogout`. It shows a warning first when
+`busy.sh` reports a package transaction or an unfinished download. The
+warning informs you, but it does not block you. The script centers a
+fixed-size panel on the active monitor. matugen writes the stylesheet
+(`matugen/templates/wlogout/style.css`). The button icons are SVG files in
+`wlogout/icons/`, because wlogout shows label text at one fixed size.
 
 ## Charger chime (`ac-watch.sh`)
 
-A second `exec-once` watcher. It blocks on udev power-supply events and
-raises a light notification and sound on each plug or unplug edge. The
-sound is skipped while the default sink is muted. It also hands the new
-cable state to `powermode.sh`.
+`ac-watch.sh` is a second `exec-once` watcher. It waits for udev
+power-supply events. It shows a light notification and plays a sound at each
+plug or unplug event. It does not play the sound while the default sink is
+muted. It also sends the new cable state to `powermode.sh`.
 
 ## Lock before sleep (`sleep-lock.py`)
 
-The systemd user unit `mango-sleep-lock.service` locks the screen before
-suspend and pauses the pomodoro across the sleep. It holds a logind delay
-inhibitor and releases it only when `swaylock --ready-fd` confirms the
-lock (or after a 3 s bound). It covers every suspend path, lid close
-included.
+The systemd user unit `mango-sleep-lock.service` locks the screen before a
+suspend. It also pauses the pomodoro during the sleep. It holds a logind
+delay inhibitor. It releases the inhibitor when `swaylock --ready-fd`
+confirms the lock, or after a limit of 3 s. It covers each suspend path, and
+this includes the lid close.
 
-This is deliberately not hypridle's job: on compositors without the
-Hyprland lock-notify protocol, hypridle releases its sleep inhibitor as
-soon as the lock command is spawned, before the screen is locked.
-`hypr/hypridle.conf` carries the full explanation.
+This task is not the job of hypridle. A compositor can have no Hyprland
+lock-notify protocol. On such a compositor, hypridle releases its sleep
+inhibitor immediately after it starts the lock command. The screen is not
+yet locked at that time. `hypr/hypridle.conf` gives the full explanation.
 
-The same file's `sleep-lock.py lock` subcommand extends the pause to every
-*lock*, not only suspend: `SUPER+L` and hypridle's 300s idle-timeout
-listener both call it instead of bare `swaylock`. Without this, the
-pomodoro kept running while the screen was locked, and a phase boundary in
-that window fired a full-screen rofi overlay that came back unable to take
-keyboard input after unlock — `docs/bar.md`'s Pomodoro section has the
-symptom and the rest of the fix (`focus-break.sh`'s own swaylock guard and
-timeout). `lock` checks for an already-running swaylock first and does
-nothing if it finds one, so it is safe to bind unconditionally.
+The `sleep-lock.py lock` subcommand of the same file extends the pause to
+each *lock*, not only to a suspend. `SUPER+L` and the 300 s idle-timeout
+listener of hypridle call it instead of a bare `swaylock`. Before this
+change, the pomodoro continued while the screen was locked. A phase boundary
+in that time started a full-screen rofi overlay that could not take keyboard
+input after the unlock. The Pomodoro section of `docs/bar.md` has the
+symptom and the rest of the fix (the swaylock guard and the timeout in
+`focus-break.sh`). `lock` looks for a swaylock process first and does
+nothing if it finds one, thus you can bind it in all conditions.
 
-`sleep-lock.py test` runs a self-check, including `lock`'s pause/swaylock/
-unpause call order; `SIGUSR1` on the running daemon runs a lock-and-pause
-rehearsal without a suspend.
+`sleep-lock.py test` runs a self-check. The check includes the pause,
+swaylock, and unpause call order of `lock`. `SIGUSR1` on the running daemon
+does a lock-and-pause rehearsal without a suspend.
 
 ## Keep-awake
 
-The bar's inhibit pill toggles `mango-keepawake.service`, a
-`systemd-inhibit` block on idle and lid-switch handling. logind honors the
-lid part only with `LidSwitchIgnoreInhibited=no` — see the checklist.
+The inhibit pill of the bar toggles `mango-keepawake.service`. This unit is
+a `systemd-inhibit` block on the idle handling and the lid-switch handling.
+logind obeys the lid part only with `LidSwitchIgnoreInhibited=no`. See the
+checklist.
 
 ## Display rescue (`rescue-outputs.sh`)
 
-Symptom: the desktop stops drawing and stays frozen on the last frame.
-Input still works (keybinds fire, a password typed into a lock screen still
-reaches it) — only painting stops. This is mango's `selmon == NULL` state:
-every output got disabled, and with nothing to paint to, the compositor has
-no surface to draw. It is not a hang and it is not a crash.
+The symptom is this: the desktop stops to draw and stays frozen on the last
+frame. The input still works. The keybinds fire, and a password that you
+type reaches the lock screen. Only the painting stops. This is the
+`selmon == NULL` state of mango: each output is disabled, thus the
+compositor has no surface to draw on. This is not a hang, and it is not a
+crash.
 
-Confirmed 2026-08-26 (source-level, against the exact installed
-`mangowm-git` build) that `wlopm --off '*'` (DPMS, `hypridle.conf`'s
-600 s screen-off) is **not** the cause: a DPMS-off monitor keeps its real
-geometry and stays disable-only, not layout-removed. The remaining
-suspects are anything that applies a `zwlr_output_management_v1`
-configuration with an output disabled — `wdisplays` is installed and does
-exactly this — or a `disable_monitor`/`toggle_monitor` dispatch (no keybind
-here uses either).
+A source-level check on 2026-08-26 used the exact installed `mangowm-git`
+build. The check shows that `wlopm --off '*'` is **not** the cause (DPMS,
+the 600 s screen-off in `hypridle.conf`). A DPMS-off monitor keeps its real
+geometry, stays only disabled, and stays in the layout. The remaining
+suspects apply a `zwlr_output_management_v1` configuration with an output
+disabled. `wdisplays` is installed, and it does this. A `disable_monitor` or
+`toggle_monitor` dispatch is also a suspect, but no keybind here uses one.
 
-Recovery needs no compositor restart and loses no applications: mango
-keeps a disabled output on its monitor list and re-enabling it is a plain
-IPC call. Three layers:
+The recovery needs no compositor restart, and it loses no applications.
+mango keeps a disabled output on its monitor list. To enable the output
+again is a plain IPC call. There are three layers:
 
-1. **`mango-outputs.service`** polls for the frozen state and re-enables
-   automatically, usually within ~15 s.
-2. **`SUPER+SHIFT+o`** runs the same rescue immediately — the manual
-   escape, and it works even if the watchdog itself is dead, since input
-   keeps responding during the freeze.
-3. **A TTY** (`Ctrl+Alt+F3`) as the last resort:
-   `~/.config/mango/scripts/rescue-outputs.sh`. Do this before reaching for
-   `systemctl restart sddm` — that restart is what loses every open
-   application.
+1. **`mango-outputs.service`** polls for the frozen state. It enables the
+   output again automatically, usually in approximately 15 s.
+2. **`SUPER+SHIFT+o`** runs the same rescue immediately. This is the manual
+   escape. It also works when the watchdog is dead, because the input still
+   responds during the freeze.
+3. **A TTY** (`Ctrl+Alt+F3`) is the last resort. Run
+   `~/.config/mango/scripts/rescue-outputs.sh`. Do this before you use
+   `systemctl restart sddm`. That restart loses each open application.
 
 ```
 rescue-outputs.sh        # one-shot: check, rescue if frozen
@@ -172,22 +177,23 @@ rescue-outputs.sh watch  # poll loop (what the service runs)
 rescue-outputs.sh test   # self-check, no compositor needed
 ```
 
-The two `windowrule=` fractional-size rules that used to crash mango in
-this state (`mango.c:1827-1834` dereferences the monitor with no NULL
-guard to resolve a fraction) were changed to literal pixel sizes in
-`config.conf` — a crash there would have killed every running application
-along with the compositor.
+Two `windowrule=` rules used fractional sizes. These rules crashed mango in
+this state. `mango.c:1827-1834` reads the monitor with no NULL guard to
+resolve a fraction. `config.conf` now uses literal pixel sizes for these two
+rules. A crash there kills each running application and the compositor.
 
 ## Power attribution (`system/rapl/`)
 
-`sudo system/rapl/install.sh` makes per-domain power visible to the
-battery popup:
+`sudo system/rapl/install.sh` shows the per-domain power in the battery
+popup:
 
-- A udev rule group-reads the RAPL energy counters for `wheel`. RAPL is
-  root-only by default because of the PLATYPUS side channel
-  (CVE-2020-8694); on a single-user laptop that risk does not apply.
-- A sudoers rule allows argument-less `powertop` (the battery pill's
-  right-click).
+- A udev rule gives the `wheel` group read access to the RAPL energy
+  counters. By default, only root can read RAPL. The reason is the PLATYPUS
+  side channel (CVE-2020-8694). This risk does not apply on a single-user
+  laptop.
+- A sudoers rule permits `powertop` with no arguments. A right click on the
+  battery pill starts it.
 
-powertop ranks devices only after a one-off `sudo powertop --calibrate` on
-battery. Without the install, the popup degrades to the total draw number.
+powertop ranks the devices only after you run `sudo powertop --calibrate`
+one time on battery. Without the install, the popup shows only the total
+draw number.

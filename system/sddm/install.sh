@@ -9,6 +9,8 @@
 # boots — goes last. Until that line runs, the previous login screen is still
 # what you get, and everything before it is safe to abandon.
 
+# check: /usr/share/sddm/themes/mango-sddm
+# risk: boot
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

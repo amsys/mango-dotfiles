@@ -11,6 +11,7 @@
 #
 # /etc/pam.d/swaylock is deliberately out of scope. swaylock covers the
 # whole screen, so a notification behind it is invisible.
+# check: /usr/local/bin/mango-fprint-notify
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

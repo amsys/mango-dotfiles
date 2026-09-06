@@ -13,7 +13,7 @@ log() { printf '%s\n' "$*"; }
 # Package names as they appear on Arch. Several are AUR-only — see the split at
 # the bottom, which decides per-package rather than hardcoding a list.
 CORE_PKGS=(mangowm-git ironbar kitty rofi-wayland mako wlogout swaylock hypridle
-	matugen swaybg cliphist wl-clipboard
+	matugen awww cliphist wl-clipboard
 	xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr)
 TOOL_PKGS=(grim slurp swappy hyprpicker tesseract tesseract-data-eng
 	wf-recorder wlopm

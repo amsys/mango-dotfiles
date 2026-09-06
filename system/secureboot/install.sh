@@ -43,6 +43,8 @@
 # (sbctl enroll-keys -m). Loop-booting ISOs from /boot/boot-isos through
 # supergrub will NOT work under Secure Boot; use a signed USB installer.
 
+# check: /usr/local/bin/mango-sign-boot
+# risk: boot
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -130,6 +132,9 @@ Activate, one step per boot, when ready:
      of the loader the firmware started. Resealed in an old-loader boot,
      the TOTP would fail on every GRUB-SB boot and verify the wrong
      loader instead.
+     The same reseal is due after every `linux` upgrade: GRUB loads the
+     kernel with firmware LoadImage under Secure Boot, so a new kernel
+     moves PCR 4 too. Nothing reseals for you.
   5. After burn-in, close the escape hatch — the old loader boots but does
      not verify: sudo cp /boot/EFI/GRUB-SB/grubx64.efi \
        /boot/EFI/GRUB/grubx64.efi

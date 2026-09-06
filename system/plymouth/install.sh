@@ -25,6 +25,8 @@
 # used: SDDM has no plymouth handover, and with the splash retained X hung
 # before it opened /dev/dri/card1 on every boot (i915, 2026-09-01).
 
+# check: /usr/local/bin/plymouth-theme-sync
+# risk: boot
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

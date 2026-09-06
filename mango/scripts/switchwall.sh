@@ -4,7 +4,7 @@
 #
 # Ported from end-4/dots-hyprland (illogical-impulse), GPL-3.0 — see README
 # Credits. Dropped its Hyprland/quickshell-only bits (video wallpaper, hyprctl
-# monitor queries, AI categorization); added the swaybg + mmsg glue mango needs.
+# monitor queries, AI categorization); added the awww + mmsg glue mango needs.
 set -u
 
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -42,15 +42,15 @@ set_accent_color() {
 SPAN_DIR="$STATE_DIR/generated/wallpaper"
 
 # T-span: an ultrawide panorama (e.g. 3840x1080 across two 1920x1080 outputs)
-# cover-crops identically on every output with a single swaybg -m fill (no
-# -o), showing the same ~2x-zoomed centre slice twice instead of spanning.
+# cover-crops identically on every output with one awww image (no -o),
+# showing the same ~2x-zoomed centre slice twice instead of spanning.
 # span_geometry prints per-output crop rects when the image aspect matches
 # the monitor layout's bounding-box aspect, or REJECT otherwise (fewer than
 # 2 outputs, or the aspect is off by more than 10% — the real
 # 3840x1080/5120x1440 panoramas score 0.00, a 3440x1440 ultrawide on this
 # layout scores 0.33, a near-square wallpaper scores 0.50, so 0.10 cleanly
 # separates "is a panorama for this layout" from "isn't"). Crop is computed
-# in logical (layout) coordinates then scaled into source pixels — swaybg
+# in logical (layout) coordinates then scaled into source pixels — awww
 # rescales the tile to the output's physical mode regardless of its own
 # resolution, so cropping from the source instead of downscaling first is
 # what keeps a higher-than-layout-resolution panorama (e.g. 5120x1440) sharp.
@@ -122,21 +122,30 @@ $geometry"
 # login, one SUPER+W bind) — a newly plugged monitor needs SUPER+W pressed
 # once to pick up its own tile, same as ironbar already needs for its own
 # per-monitor bars. Known limitation, not a watcher: YAGNI until it bites.
+# awww swaps the image inside one long-lived daemon. No layer surface is
+# dropped, so a switch never shows the root color, and the change can fade.
+# config.conf puts the blurred boot image up before this script runs, so the
+# first call of the session dissolves that image into the sharp wallpaper.
 apply_wallpaper() {
-	local tiles name path argv=()
+	local tiles name path
+	local fade=(--resize crop --transition-type fade
+		--transition-duration 1 --transition-fps 60)
+	# The daemon is normally already up from config.conf. Start it here too:
+	# SUPER+W must still work if it died, and this script runs standalone.
+	if ! awww query >/dev/null 2>&1; then
+		setsid awww-daemon --no-cache --quiet >/dev/null 2>&1 &
+		for _ in $(seq 60); do
+			awww query >/dev/null 2>&1 && break
+			sleep 0.05
+		done
+	fi
 	if tiles="$(span_tiles "$1")" && [[ -n "$tiles" ]]; then
 		while read -r name path; do
-			argv+=(-o "$name" -i "$path" -m fill)
+			awww img -o "$name" "$path" "${fade[@]}" >/dev/null 2>&1
 		done <<<"$tiles"
-	else
-		argv=(-i "$1" -m fill)
+		return 0
 	fi
-	# A swaybg with the same arguments already shows this wallpaper — at login
-	# config.conf starts it directly, before this script. Restarting it would
-	# drop the layer surface and show the root color for a few hundred ms.
-	pgrep -fx "swaybg ${argv[*]}" >/dev/null && return 0
-	pkill -x swaybg 2>/dev/null || true
-	setsid swaybg "${argv[@]}" >/dev/null 2>&1 &
+	awww img "$1" "${fade[@]}" >/dev/null 2>&1
 }
 
 main() {
@@ -201,7 +210,7 @@ main() {
 	fi
 
 	# Apply the wallpaper now, before matugen/python — mango shows a black root color
-	# until swaybg starts, so don't make the desktop wait on the whole color pipeline.
+	# until awww paints, so don't make the desktop wait on the whole color pipeline.
 	[[ -n "$imgpath" ]] && apply_wallpaper "$imgpath"
 
 	if [[ -z "$mode_flag" ]]; then
@@ -251,6 +260,7 @@ main() {
 	kwriteconfig6 --file kdeglobals --group General --key ColorScheme MaterialYou --notify 2>/dev/null || true
 
 	"$SCRIPT_DIR/vscode-set-color.sh" &
+	"$SCRIPT_DIR/orca-set-color.sh" &
 
 	mmsg dispatch reload_config >/dev/null 2>&1 || true
 	"$SCRIPT_DIR/keybinds-cheatsheet.py" >/dev/null 2>&1 || true

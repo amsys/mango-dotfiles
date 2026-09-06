@@ -9,6 +9,7 @@
 # needs NO reinstall when edited — only mango-powermode itself (this script)
 # needs a reinstall if changed.
 
+# check: /usr/local/bin/mango-powermode
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

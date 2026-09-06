@@ -40,6 +40,8 @@
 # own entry via /etc/grub.d/60_memtest86+-efi. Firmware boot menu
 # entries are separate: run efi-menu.sh for those.
 
+# check: /usr/local/bin/grub-regen
+# risk: boot
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

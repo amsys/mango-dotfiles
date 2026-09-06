@@ -1,47 +1,110 @@
 # Install
 
-## The two installers
+## The four steps
 
-`install.sh` runs both parts in order, then prints the manual steps.
-Each part also runs alone, and each accepts `--dry-run`.
+`install.sh` runs the four parts in order, and it asks before each one. Then
+it prints the manual steps. Each part also runs alone. Each part accepts
+`--dry-run`.
 
 | Script | Function | Writes to the system? |
 |---|---|---|
-| `install-deps.sh` | Reports missing packages, split into a `sudo pacman -S` line and a `yay -S` line | No. It is read-only. |
-| `install-config.sh` | Symlinks the repo into `~/.config`, builds `mango-bard`, links systemd user units, seeds per-machine files, runs the color pipeline once | Yes |
+| `install-deps.sh` | Reports the missing packages. It shows one `sudo pacman -S` line and one `yay -S` line | No. It is read-only. |
+| `install-config.sh` | Symlinks the repo into `~/.config`. Builds `mango-bard`. Links the systemd user units. Seeds the per-machine files. Runs the color pipeline one time | Yes |
+| `system/<name>/install.sh` | The root installers, as a menu. You choose them | Yes, as root |
+| `install-check.sh` | Verifies the result | No. It is read-only. |
 
-Rules the config installer follows:
+The exit code of `install.sh` is the exit code of the verify step. `0` means
+the install checks out.
 
-- It links each file one by one, never a whole directory. Generated files can
-  then sit next to the symlinks without appearing in `git status`.
-- It does not overwrite a file without a `<file>.bak.<timestamp>` backup.
-- A second run is safe. Files that are already linked are not touched.
-- It never touches git. Commits stay a separate, manual step.
+### Flags
 
-Beyond the symlinks, `install-config.sh` also:
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Print every action. Change nothing. |
+| `--yes` | Answer yes to each question. It runs no root installer unless `--system=` names one. |
+| `--no` | Answer no to each question. |
+| `--system=a,b` | Run those root installers. Show no menu. `--system=all` runs every one. |
+| `--check` | Run the verify step alone. |
+| `--skip` | Leave every file that already exists. It links only what is absent. |
+| `--force` | Replace an existing file with no backup. |
+
+`--skip` and `--force` change the symlink step only. `install.sh` passes them
+to `install-config.sh`. The per-machine files (`theme.json`, `local.conf`,
+`git/config.local`) hold values that belong to this machine alone, so
+`--force` never overwrites them. A root installer accepts neither flag: each
+one decides for itself, and each is safe to re-run.
+
+Without a flag, the installer backs up each file that it replaces to
+`<file>.bak.<timestamp>`.
+
+## The verify step
+
+`install-check.sh` proves an install. It writes nothing, and it needs no
+sudo. It reports `ok`, `warn` or `FAIL` for each check, and it exits `1` when
+one check fails. Add `-v` to see the checks that pass.
+
+It checks:
+
+- Every tracked file is a symlink back to this repo. A file that is not a
+  link means an edit in the repo does not reach the desktop.
+- The per-machine files exist. `git/config.local` has a name and an email.
+  `mango/local.conf` has no unexpanded `$HOME`.
+- `~/.local/bin/mango-bard` is a real binary, not a symlink, and it is newer
+  than its sources. A symlink here is the 2026-09-06 outage: the build
+  directory is temporary and is empty after a reboot.
+- The five units that mango starts at login are enabled **and** running. The
+  four on-demand units are linked and not enabled.
+- The kdeconnect autostart and D-Bus overrides are in place.
+- The matugen output exists.
+- Which root installers landed, from the `# check:` line of each one.
+- The parts of the manual checklist below that a script can see.
+
+The expectations live in `install-check.sh` itself, not in
+`install-config.sh`. A check that asks the installer what it did can only
+agree with it. When the two drift apart, the check must fail and say so.
+
+The config installer obeys these rules:
+
+- The installer links each file one by one. It never links a whole
+  directory. Generated files can then stay next to the symlinks. The files
+  do not show in `git status`.
+- The installer does not overwrite a file without a
+  `<file>.bak.<timestamp>` backup.
+- A second run is safe. The installer does not touch the files that are
+  already linked.
+- The installer never uses git. You make the commits as a separate manual
+  step.
+
+`install-config.sh` also does these tasks:
 
 - Copies `mango/theme.json.example`, `mango/local.conf.example`, and
-  `git/config.local.example` to their live names, once. It never overwrites
-  the live copies.
-- Caches DIMM data for the memory popup: it runs `sudo dmidecode -t memory`
-  once and writes `~/.cache/mango-meminfo`. Delete the file and run the
-  installer again to refresh it.
+  `git/config.local.example` to their live names one time. It never
+  overwrites a live copy.
+- Caches the DIMM data for the memory popup. It runs
+  `sudo dmidecode -t memory` one time and writes `~/.cache/mango-meminfo`.
+  To refresh the cache, delete the file. Then run the installer again.
 - Aliases the Nextcloud tray icon names into
-  `~/.local/share/icons/hicolor`. The Nextcloud client requests icon names
-  that exist only in the Breeze theme. The aliases point at the branded
-  icons the client already ships.
+  `~/.local/share/icons/hicolor`. The Nextcloud client asks for icon names
+  that exist only in the Breeze theme. The aliases point to the branded
+  icons that the client already supplies.
 - Compiles `ironbar/fast-tooltips.c` to `~/.local/lib/mango/fast-tooltips.so`.
-  This LD_PRELOAD shim shortens GTK3's fixed 500 ms tooltip delay.
-- Builds `mango-bard` with `cargo build --release` and links the binary to
-  `~/.local/bin/mango-bard`. The build is skipped when the binary is newer
-  than the sources.
-- Links the systemd user units and enables `mango-bard.service` and
-  `mango-sleep-lock.service`. The other units stay disabled; bar toggles
-  start them on demand.
-- Links a drop-in override for the `arch-update` package's own
-  `arch-update.timer` (`Persistent=true`, `OnUnitActiveSec=1h`), so a missed
-  run replays at the next boot instead of leaving the bar pill stale.
-- Runs `switchwall.sh --noswitch` to materialize the matugen output.
+  This LD_PRELOAD shim makes the fixed 500 ms GTK3 tooltip delay shorter.
+- Builds and installs `mango-bard` with `cargo install`. This puts a real
+  binary at `~/.local/bin/mango-bard`. The script does not make a symlink to
+  the build output, because that output is not permanent.
+  `ironbar/bard/target/` is in `.gitignore`, and `$CARGO_HOME/config.toml`
+  can send the build to tmpfs. A symlink to the build output dies at the
+  next reboot, and the bar does not start. The script skips the build when
+  the installed binary is newer than the sources.
+- Links the systemd user units. Enables the five that mango starts at login:
+  `mango-bard`, `ironbar`, `mango-sleep-lock`, `mango-powerkey` and
+  `mango-outputs`. The other four stay linked and disabled. The bar toggles
+  start those when necessary.
+- Links a drop-in override for the `arch-update.timer` unit of the
+  `arch-update` package. The override sets `Persistent=true` and
+  `OnUnitActiveSec=1h`. A missed run then replays at the next boot. The bar
+  pill does not stay stale.
+- Runs `switchwall.sh --noswitch` to write the matugen output.
 
 ## Packages
 
@@ -49,7 +112,7 @@ Beyond the symlinks, `install-config.sh` also:
 
 | Group | Packages |
 |---|---|
-| Core | `mangowm-git`ᴬ `ironbar kitty rofi-wayland mako` `wlogout`ᴬ `swaylock hypridle matugen swaybg cliphist wl-clipboard` |
+| Core | `mangowm-git`ᴬ `ironbar kitty rofi-wayland mako` `wlogout`ᴬ `swaylock hypridle matugen awww cliphist wl-clipboard` |
 | Tools | `grim slurp swappy hyprpicker tesseract tesseract-data-eng wf-recorder brightnessctl playerctl wireplumber networkmanager nm-connection-editor iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs btop dmidecode imagemagick python-gobject wayvnc kdeconnect` |
 | Look | `fish starship eza ttf-jetbrains-mono-nerd` `adw-gtk-theme-git`ᴬ `breeze-plus`ᴬ `kde-cli-tools ttf-ibm-plex` `ttf-material-symbols-variable-git`ᴬ |
 | Shell | `fd fzf zoxide bat yazi git-delta` |
@@ -58,83 +121,113 @@ Beyond the symlinks, `install-config.sh` also:
 
 Notes:
 
-- `adw-gtk-theme-git` provides the `adw-gtk3` themes the wallpaper switch
-  toggles between. `breeze-plus` provides the matching icon themes.
-- `btop` opens when you click the CPU or memory pill. `dmidecode` fills the
-  DIMM cache at install time. Both degrade quietly — the popup drops the
-  section it cannot fill.
+- `adw-gtk-theme-git` supplies the `adw-gtk3` themes. The wallpaper switch
+  changes between them. `breeze-plus` supplies the related icon themes.
+- `btop` opens when you click the CPU pill or the memory pill. `dmidecode`
+  fills the DIMM cache at install time. The two packages are not mandatory.
+  If one is absent, the popup removes the section that it cannot fill.
 - The UI font is IBM Plex Sans (`ttf-ibm-plex`).
 
 ## Root-level installers (`system/`)
 
-`install-config.sh` only touches `$HOME`. Everything under `system/` installs
-with its own root script and is never symlinked:
+`install-config.sh` writes only in `$HOME`. Each directory in `system/` has
+its own root script. The installer never symlinks these directories:
 
 | Directory | Installs | See |
 |---|---|---|
 | `system/sddm/` | the matugen-themed SDDM greeter and its color sync tool | [theming.md](theming.md) |
 | `system/plymouth/` | the plymouth LUKS prompt that matches the greeter, and its asset sync tool | [theming.md](theming.md) |
 | `system/tpm-totp/` | the TPM boot-attestation code on the prompt | [theming.md](theming.md) |
-| `system/grub/` | hidden GRUB menu with the firmware logo kept, and the shared guarded `grub-regen` | [theming.md](theming.md) |
-| `system/boot-pin/` | pinned-kernel and verbose-console GRUB rescue entries | [theming.md](theming.md) |
-| `system/powermode/` | the root helper that writes CPU/PCI power knobs | [power.md](power.md) |
-| `system/rapl/` | read access to RAPL power counters, plus a powertop sudo rule | [power.md](power.md) |
+| `system/grub/` | the hidden GRUB menu that keeps the firmware logo, and the shared guarded `grub-regen` | [theming.md](theming.md) |
+| `system/boot-pin/` | the pinned-kernel and verbose-console GRUB rescue entries | [theming.md](theming.md) |
+| `system/secureboot/` | the `mango-sign-boot` tool, the GPG and sbctl keys, the mkinitcpio and pacman hooks, and a staged `GRUB-SB` image. The script signs files. It enrolls no key and it enables no firmware setting | — |
+| `system/powermode/` | the root helper that writes the CPU and PCI power knobs | [power.md](power.md) |
+| `system/rapl/` | read access to the RAPL power counters, and a powertop sudo rule | [power.md](power.md) |
+| `system/fprint-notify/` | the root helper and the icon that show a notification for each fingerprint request. The script prints the two PAM lines, but it does not edit `/etc/pam.d/sudo` | [security.md](security.md) |
+| `system/vault/` | the udev rule that gives the active seat an ACL on the Power Button evdev node. `mango-powerkey` then works after you leave the `input` group | — |
 | `system/hotspot/` | the Wi-Fi hotspot helper | — |
-| `system/remote/` | remote access units (wayvnc, KDE Connect) | — |
-| `system/i915/` | GPU compute timeout udev rules | — |
-| `system/libvirt-net/` | libvirt network config | its own README |
-| `system/vpnguard/` | fail-closed egress + WireGuard failover — membership and order come from NetworkManager's own `connection.autoconnect-priority`, no config file, no VPN hardcoded | its own README |
+| `system/remote/` | the remote access units (wayvnc, KDE Connect) | — |
+| `system/i915/` | the GPU compute timeout udev rules | — |
+| `system/libvirt-net/` | the libvirt network config | its own README |
+| `system/vpnguard/` | the fail-closed egress and the WireGuard failover. The membership and the order come from the `connection.autoconnect-priority` property of NetworkManager. There is no config file and no hardcoded VPN | its own README |
 
-Run each once, and again after you change a file in its directory:
+Run each script one time. Run it again after you change a file in its
+directory. Use the menu in `install.sh`, or call one directly:
 
 ```bash
 sudo system/<name>/install.sh
 ```
 
+### What each installer declares
+
+Every `system/<name>/install.sh` carries two declarations in its own header.
+`install.sh` and `install-check.sh` read them, so a new installer joins the
+menu and the verify step with no edit to either:
+
+| Line | Meaning |
+|---|---|
+| `# check: <path>` | The file that proves the installer landed. `install-check.sh` tests it. |
+| `# check: ufw:<text>` | The same, for a ufw rule. The check greps `/etc/ufw/user.rules` for that comment, and it reports `?` when it cannot read the file. |
+| `# risk: boot` | The installer changes what boots, or how you log in. The menu marks it `!` and asks a second time. |
+
+The menu text for each installer is the first sentence of its header
+comment. Keep that first sentence short and true.
+
+Five installers carry `# risk: boot`: `grub`, `plymouth`, `sddm`,
+`secureboot` and `tpm-totp`. A bad result from one of these can leave the
+machine with no boot and no login screen.
+
 ## Manual checklist
 
-This desktop depends on system state that no tracked file covers. Complete
-these steps after the first install:
+This desktop needs system state that no tracked file contains. Do these
+steps after the first install:
 
-- [ ] `/etc/systemd/logind.conf.d/10-power.conf` — set
-      `HandlePowerKey=ignore` and `HandlePowerKeyLongPress=ignore` so
-      `powerkey.py` owns the power button. Set
-      `LidSwitchIgnoreInhibited=no` so the bar's keep-awake toggle can block
-      the lid switch. See [power.md](power.md).
-- [ ] `/etc/UPower/UPower.conf` — keep `PercentageAction=2.0` with
-      `CriticalPowerAction=Auto` as the last resort below the battery guard.
-- [ ] KeePassXC: add the attribute `application=mango` to the OpenRouter key
-      entry. The AI chat (`Alt+I`) cannot find the key without it.
-- [ ] Remove the retired KeePassXC auto-unlock: delete
-      `/usr/local/bin/keepassxc-stash-pw` and the `pam_exec.so expose_authtok`
-      line in `/etc/pam.d/sddm` that feeds `/run/keepassxc-unlock/$USER`.
+- [ ] In `/etc/systemd/logind.conf.d/10-power.conf`, set
+      `HandlePowerKey=ignore` and `HandlePowerKeyLongPress=ignore`.
+      `powerkey.py` then controls the power button. Set
+      `LidSwitchIgnoreInhibited=no`. The keep-awake toggle of the bar can
+      then block the lid switch. See [power.md](power.md).
+- [ ] In `/etc/UPower/UPower.conf`, keep `PercentageAction=2.0` and
+      `CriticalPowerAction=Auto`. These settings are the last resort below
+      the battery guard.
+- [ ] In KeePassXC, add the attribute `application=mango` to the OpenRouter
+      key entry. Without this attribute, the AI chat (`Alt+I`) cannot find
+      the key.
+- [ ] Delete `/usr/local/bin/keepassxc-stash-pw` to remove the retired
+      KeePassXC auto-unlock. Also delete the `pam_exec.so expose_authtok`
+      line in `/etc/pam.d/sddm` that fills `/run/keepassxc-unlock/$USER`.
       `keepassxc-autounlock.sh` no longer reads that stash. You now type the
-      password into the normal KeePassXC prompt at login. Set
-      `MinimizeOnStartup=false` under `[GUI]` and `MinimizeAfterUnlock=true`
-      under `[General]` in `~/.config/keepassxc/keepassxc.ini`, so the prompt
-      is visible and the window hides itself after you unlock it.
-- [ ] `/etc/pam.d/sudo` — after `system/fprint-notify/install.sh`, add
+      password into the usual KeePassXC prompt at login. In
+      `~/.config/keepassxc/keepassxc.ini`, set `MinimizeOnStartup=false`
+      under `[GUI]` and `MinimizeAfterUnlock=true` under `[General]`. The
+      prompt is then visible, and the window hides itself after you unlock
+      it.
+- [ ] After you run `system/fprint-notify/install.sh`, edit
+      `/etc/pam.d/sudo`. Add
       `auth optional pam_exec.so quiet /usr/local/bin/mango-fprint-notify`
       above the `auth sufficient pam_fprintd.so` line. The installer prints
-      it but never edits the file. See [security.md](security.md).
-- [ ] Mask the GNOME keyring user units
-      (`gnome-keyring-daemon.{service,socket}` → `/dev/null`) so KeePassXC
-      owns the Secret Service.
-- [ ] Delete `~/.gitconfig` after you install `git-delta`. Git reads the XDG
-      config first and `~/.gitconfig` second, and the later file wins — the
-      tracked config does nothing while `~/.gitconfig` exists. Install delta
-      first, or every paged git command fails.
-- [ ] Fill in `~/.config/git/config.local` (name and email). Git refuses to
-      commit without an identity.
+      this line, but it never edits the file. See
+      [security.md](security.md).
+- [ ] Mask the GNOME keyring user units. Link
+      `gnome-keyring-daemon.{service,socket}` to `/dev/null`. KeePassXC then
+      controls the Secret Service.
+- [ ] Install `git-delta` before you delete `~/.gitconfig`. If `git-delta`
+      is absent, each paged git command fails. Git reads the XDG config
+      first and `~/.gitconfig` second. The later file wins. The tracked
+      config does nothing while `~/.gitconfig` exists.
+- [ ] Put your name and your email in `~/.config/git/config.local`. Git does
+      not commit without an identity.
 - [ ] Put a wallpaper in `~/Wallpapers/`.
-- [ ] `arch-update --tray` does not start. The bar's own arch-update pill
-      shows the same data; the `arch-update` package is still needed for
-      its check binary and timer.
-- [ ] Hibernate does not work on this machine: the swapfile is smaller than
-      RAM and there is no `resume=` on the kernel command line. The wlogout
-      Hibernate button is dead, and the battery guard suspends instead. To
-      enable it: a swapfile larger than RAM, `resume=`/`resume_offset=`, and
-      the `resume` hook in `mkinitcpio.conf`.
-- [ ] Not yet tracked: `~/.config/autostart/`, `~/.config/environment.d/`,
-      `~/.config/mimeapps.list`, custom `.desktop` files, KDE app rc files,
-      `{chrome,code}-flags.conf`, `Code/User/settings.json`.
+- [ ] `arch-update --tray` does not start. The arch-update pill of the bar
+      shows the same data. The `arch-update` package is still necessary for
+      its check binary and its timer.
+- [ ] Hibernate does not work on this machine. The swapfile is smaller than
+      the RAM, and the kernel command line has no `resume=` parameter. The
+      wlogout Hibernate button does nothing, and the battery guard does a
+      suspend instead. To enable hibernate, make a swapfile larger than the
+      RAM. Then add `resume=` and `resume_offset=` to the kernel command
+      line. Add the `resume` hook to `mkinitcpio.conf`.
+- [ ] These files are not tracked yet: `~/.config/autostart/`,
+      `~/.config/environment.d/`, `~/.config/mimeapps.list`, the custom
+      `.desktop` files, the KDE app rc files, `{chrome,code}-flags.conf`,
+      and `Code/User/settings.json`.

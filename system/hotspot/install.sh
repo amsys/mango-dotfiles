@@ -5,6 +5,7 @@
 #
 #   sudo ~/src/mango-dotfiles/system/hotspot/install.sh
 
+# check: /usr/local/bin/mango-hotspot
 set -eu
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,15 +1,16 @@
 # Status Bar Layout Specification
 
-**Target:** ironbar + `mango-bard` on Hyprland (Arch Linux), bar `position: top`
-**Scope:** module ordering and layout invariants only — not styling, colours, or fonts
+**Target:** ironbar + `mango-bard` on mango (Arch Linux), bar `position: top`
+**Scope:** module ordering and layout invariants only. Not styling, colours,
+or fonts.
 **Status:** normative (MUST / SHOULD / MAY per RFC 2119)
 
-The bar is generated, never handwritten. `mango-bard gen-config` builds
-`~/.config/ironbar/config.json` from `src/ironbar/bard/src/genconfig.rs`; this
-spec constrains what that generator produces, in ironbar's own `start` /
-`center` / `end` rows (ironbar has no separate `modules-left/center/right`
-naming — see [bar.md](bar.md) for the module-to-file map and the daemon's own
-CLI).
+The generator makes the bar. Nobody writes the bar by hand.
+`mango-bard gen-config` builds `~/.config/ironbar/config.json` from
+`ironbar/bard/src/genconfig.rs`. This spec constrains what that generator
+puts in ironbar's own `start`, `center` and `end` rows. Ironbar has no
+separate `modules-left/center/right` naming. See [bar.md](bar.md) for the
+module-to-file map and the daemon's own CLI.
 
 ---
 
@@ -30,8 +31,8 @@ CLI).
 | `center` | time | `clock` → `date` → `pomo` |
 | `end` | tray → resources → tools → audio → connectivity → session | `tray` `traytoggle` `keepass` → `sysload`(`cpu`+`memory` rows) `battery` `devload`(`claude` row, `docker`+`archupdate` row) → `colorpicker` `darkmode` `snip` `inhibit` → `music` `volume` `mic` → `net-spinner` `wifi` `eth` `netsec` `hotspot` `remote` `bluetooth` → `power` |
 
-The fallback bar (no monitor matched, so no tag block — see §3.1) carries the
-same blocks minus `ws-*`.
+The fallback bar carries the same blocks, minus `ws-*`. That bar matched no
+monitor, thus it has no tag block. See §3.1.
 
 ---
 
@@ -43,123 +44,138 @@ The hard constraints. Every ordering decision in §3 follows from them.
 
 No module MAY change the on-screen X position of any other module.
 
-Variable-width modules MUST be placed at the **growth end** of their block:
+The generator MUST put a variable-width module at the **growth end** of its
+block:
 
-- `start`'s tags block has a fixed member count (§INV-4); `win` is the last
-  module in `start` because it is the one truly unbounded field (a window
-  title has no natural cap) — it grows rightward into free space, past every
-  fixed-width neighbour, and displaces nothing to its left.
-- `end` grows leftward from the screen edge → `tray` is **first** (leftmost)
-  in `end`, so a tray icon appearing or disappearing moves only the tray.
-- `music` sits mid-block (audio), not at a growth end, so it MUST be
-  fixed-width by truncation (§3.4), not by position.
+- `start`'s tags block has a fixed member count (§INV-4). `win` is the last
+  module in `start`, because it is the one field with no bound. A window
+  title has no natural cap. `win` grows rightward into free space, past
+  every fixed-width neighbour. It moves nothing on its left.
+- `end` grows leftward from the screen edge. Thus `tray` is **first**
+  (leftmost) in `end`. A tray icon that appears or disappears moves only
+  the tray.
+- `music` sits in the middle of the audio block, not at a growth end. Thus
+  `music` MUST hold a fixed width by truncation (§3.4), not by position.
 
 ### INV-2 — Corner bleed
 
 The leftmost and rightmost modules MUST occupy the physical corner pixel.
 
-- The bar's own `margin` MUST be `0` on every side (ironbar `MarginConfig`
-  defaults to 0; `genconfig.rs` MUST NOT set it).
+- The bar's own `margin` MUST be `0` on every side. Ironbar's
+  `MarginConfig` defaults to 0. `genconfig.rs` MUST NOT set it.
 - The `start` and `end` row containers MUST carry no margin or padding on
-  their outward side, and MUST NOT round their outward corner — `#bar #start`
-  squares its top-left corner, `#bar #end` its top-right. `#bar #center` keeps
-  its full rounding; it never touches a screen edge.
-- `spark` and `power` carry their own inset as `padding` (inside the
-  clickable button), never as `margin` on the row or the module — margin is
-  dead space and forfeits the corner target outright.
+  their outward side. They MUST NOT round their outward corner.
+  `#bar #start` squares its top-left corner. `#bar #end` squares its
+  top-right corner. `#bar #center` keeps its full rounding, because it
+  never touches a screen edge.
+- `spark` and `power` carry their own inset as `padding`, inside the
+  clickable button. They never carry it as `margin` on the row or on the
+  module. Margin is dead space, and it loses the corner target completely.
 
 ### INV-3 — No destructive corner action
 
-A module in a corner MUST NOT fire an irreversible action on click. Corner
-targets are hit accidentally by fast pointer movement.
+A module in a corner MUST NOT fire an irreversible action on click. Fast
+pointer movement hits corner targets by accident.
 
-- `power` is permitted in the top-right corner only because `on_click_left`
-  opens `powermenu.sh` (a menu), never a direct shutdown/logout.
+- `power` is permitted in the top-right corner for one reason only. Its
+  `on_click_left` opens the `powermenu.sh` menu. It never starts a direct
+  shutdown or logout.
 
 ### INV-4 — Tag row at constant X
 
-The 9 workspace tags plus the overview pill are muscle-memory targets. Their
-absolute X MUST be constant across all states.
+The user hits the 9 workspace tags and the overview pill from memory. Their
+absolute X MUST be constant in all states.
 
-- Only `spark` MAY precede them in `start`.
-- All 9 numbered tags MUST render at all times (`show_if: "#<slug>_tags"`
-  gates the *group*, not individual tags — see `mango.rs::var_tags`).
-- Every tag button MUST have identical fixed width (`.ws button`,
-  `.ws button label`, both `min-width: 24px`) — a single- and a double-digit
-  label MUST NOT differ, and neither MUST the overview pill's own toggle.
+- Only `spark` MAY come before them in `start`.
+- All 9 numbered tags MUST render at all times. `show_if: "#<slug>_tags"`
+  gates the *group*, not the individual tags. See `mango.rs::var_tags`.
+- Every tag button MUST have the same fixed width. `.ws button` and
+  `.ws button label` both carry `min-width: 24px`. A single-digit label
+  and a double-digit label MUST NOT differ in width. The overview pill's
+  own toggle MUST NOT differ either.
 
 ### INV-5 — Fixed-width numerics
 
-Any module rendering a changing **digit string** — `battery` (percentage),
-`sysload` (`cpu`+`memory` rows — icon and `.gauge` only since T28, no digit
-of their own, but the reserve still guards the icon/gauge envelope),
-`devload` (`claude` row's percentage + countdown, `docker`/`archupdate`
-cells — a container count with no digit cap, checked against `docker.rs`,
-not assumed from a typical dev-box count) and `clock`/`date`/`pomo`
-(fixed-format, but proportional digit widths still shimmer on substitution)
-— MUST render at constant width.
+Any module that renders a changing **digit string** MUST render at constant
+width. `battery` shows a percentage. `sysload` holds the `cpu` and `memory`
+rows. Since T28 these two rows show an icon and a `.gauge` only, with no
+digit of their own. The reserve still guards the icon and gauge envelope.
 
-- `font-feature-settings: "tnum" 1` (tabular figures) on both the module's
-  own node and its `label` descendant (the T17 GTK4 inheritance trap: a
-  direct match beats an inherited value, so a class rule on the container
-  never reaches the label's own font properties).
-- `min-width` on the module's own node **only**. This is a *reserved width*,
-  not a *centred* width (contrast INV-4's `.ws`, the one module in this file
-  that also puts `min-width` on its `button`/`label` descendants): content
-  packs at the module's natural (left) edge — GtkButton's `hexpand: false`
-  and the T19/T20 GTK4 trap below both hold here too, just used on purpose
-  instead of fought — and slack accumulates on the trailing edge. Set the
-  reserve to the *realistic* max content width plus one measured digit's
-  worth of slack (not the absolute max): a rarer, one-digit-wider string
-  then eats the slack and stays inside the box instead of reflowing. A
-  `label` min-width twin here would be wrong, not just redundant — GtkLabel
-  defaults `xalign: 0.5`, so it would centre the text in the reserve and
-  walk the icon sideways on every digit-count change (T25).
-- Format padding (e.g. `{usage:>3}%`) MAY be used in addition, never instead.
+`devload` holds the `claude` row's percentage and countdown, and the
+`docker` and `archupdate` cells. The container count has no digit cap.
+`docker.rs` gives the checked value, in place of an assumed dev-box count.
+`clock`, `date` and `pomo` use a fixed format. Their proportional digit
+widths still shimmer on substitution.
 
-`battery` and `devload` are a known exception: the user chose to shrink both
-reserves below their realistic-max width, so a future pass MUST NOT
-"restore" the old, larger `min-width` values without asking first.
+- Set `font-feature-settings: "tnum" 1` (tabular figures) on the module's
+  own node and on its `label` descendant. This is the T17 GTK4 inheritance
+  trap: a direct match beats an inherited value. Thus a class rule on the
+  container never reaches the label's own font properties.
+- Set `min-width` on the module's own node **only**. This is a *reserved
+  width*, not a *centred* width. INV-4's `.ws` is the contrast: it is the
+  one module in this file that also puts `min-width` on its `button` and
+  `label` descendants. The content packs at the module's natural (left)
+  edge, and the slack collects on the trailing edge. GtkButton's
+  `hexpand: false` and the T19/T20 GTK4 trap below both apply here too,
+  but this rule uses them on purpose.
+- Set the reserve to the *realistic* maximum content width, plus one
+  measured digit of slack. Do not use the absolute maximum. A rarer string
+  that is one digit wider then uses the slack and stays inside the box, in
+  place of a reflow. A `label` min-width twin here would be wrong, not only
+  unnecessary. GtkLabel defaults `xalign: 0.5`, so the twin would centre
+  the text in the reserve and move the icon sideways at every change of
+  digit count (T25).
+- Format padding (for example `{usage:>3}%`) MAY be used in addition. Do
+  not use it in place of the reserve.
 
-`volume` and `mic` are a different case, not this invariant: T9 reduced both
-to an icon-only, discrete-state display (no digit string at all — the
-percentage moved to the hover popup), so `tnum` is a no-op there. Their own
-reflow risk is INV-1's, not INV-5's: a two-state width jump (icon vs. empty),
-closed with a plain `min-width` and no tabular-figure feature needed.
+`battery` and `devload` are a known exception. The user shrank both reserves
+below their realistic maximum width. A future pass MUST NOT restore the old,
+larger `min-width` values without a request from the user.
 
-This is the invariant `center` depends on most directly: `clock`/`date`/`pomo`
-sit inside a group GTK centres as one block (§INV-6), so an unpadded digit
-change there does not just wobble locally, it shifts the whole block sideways
-on every screen tall enough to notice.
+`volume` and `mic` are a different case. This invariant does not apply to
+them. T9 changed both to an icon-only display with discrete states. They
+show no digit string, because the percentage moved to the hover popup. Thus
+`tnum` does nothing there.
+
+Their reflow risk belongs to INV-1, not to INV-5. The risk is a two-state
+width jump between an icon and an empty label. A plain `min-width` closes
+that jump. The tabular-figure feature is not necessary.
+
+`center` depends on this invariant most directly. GTK centres `clock`,
+`date` and `pomo` as one block (§INV-6). Thus an unpadded digit change there
+does not only wobble in place. It moves the whole block sideways on every
+screen tall enough to notice.
 
 ### INV-6 — Constant-width center
 
-`center` MUST have constant total width, or centering visibly wobbles.
+`center` MUST have a constant total width. If it does not, the centring
+wobbles visibly.
 
-- `clock`/`date` format MUST be fixed-width.
-- `pomo` MUST render a same-width placeholder when idle (`--:--`), never
-  collapse to zero.
+- The `clock` and `date` format MUST be fixed-width.
+- `pomo` MUST render a placeholder of the same width when idle (`--:--`).
+  It MUST NOT collapse to zero width.
 
 ### Two GTK4 traps that make INV-4/INV-5 actually hold
 
-Paid for once already in this repo (IRONBAR.md T19/T20/T21/T25); restated
-here because a future edit to this bar will hit them again if it doesn't
-know:
+This repo already had these two failures. The `IRONBAR.md` ledger in the
+parent superrepository records them as T19, T20, T21 and T25. This section
+repeats them, because a future edit to this bar hits them again without this
+knowledge:
 
-- **Sizing a `button`'s container alone does not size its child `label`** —
-  the button packs the label at natural width, start-aligned regardless of
-  the container's own `min-width`, and `justify: center` only aligns Pango
-  lines against each other, not the layout inside the widget. INV-4's `.ws`
-  wants this *fixed*: both `.ws button` and `.ws button label` carry the
-  same `min-width`, so the label fills the reserve and its own `xalign: 0.5`
-  centres the text. INV-5's pills want the opposite — content packed at one
-  edge, slack at the other — so they deliberately give `min-width` to the
-  module's own node only and stop there; adding the `label` twin here would
-  re-introduce the centring this list exists to warn against.
-- **A bare class beats `#bar #end > *` in this engine.** Live-verified
-  (T21): the opposite of the W3C specificity model. Any per-pill override
-  (padding, width) MUST be written as a bare class rule, never assumed to
-  win by qualifying it under `#bar #end`.
+- **A size on a `button`'s container alone does not size its child
+  `label`.** The button packs the label at its natural width, aligned to
+  the start, whatever the container's own `min-width` is. `justify: center`
+  only aligns Pango lines against each other, not the layout inside the
+  widget. INV-4's `.ws` fixes this: `.ws button` and `.ws button label`
+  carry the same `min-width`. The label then fills the reserve, and its own
+  `xalign: 0.5` centres the text. INV-5's pills want the opposite result,
+  with the content packed at one edge and the slack at the other. They give
+  `min-width` to the module's own node only. A `label` twin here would
+  bring back the centring that this list warns against.
+- **A bare class beats `#bar #end > *` in this engine.** T21 verified this
+  on the live bar. It is the opposite of the W3C specificity model. Any
+  per-pill override of padding or width MUST be a bare class rule. A rule
+  qualified under `#bar #end` does not win.
 
 ---
 
@@ -169,251 +185,281 @@ know:
 
 | # | Module | Interaction | Width | Rationale |
 | - | --- | --- | --- | --- |
-| 1 | `spark` | click → `rofi -show drun` | fixed | Highest-frequency click in the bar; occupies the top-left magic corner (INV-2). |
-| 2 | `ws-1…9`, `ws-ov` | click / scroll / right-click popup | fixed | Second-highest click frequency, shortest travel from the corner, constant X (INV-4). |
-| 3 | `win` | none (scroll: brightness) | variable | Highest-variance width in the bar; last in `start` so it displaces nothing (INV-1). Truncated at 32 chars (`truncate.max_length`), never a click target beyond its own scroll. |
+| 1 | `spark` | click → `rofi -show drun` | fixed | The most frequent click in the bar. It occupies the top-left magic corner (INV-2). |
+| 2 | `ws-1…9`, `ws-ov` | click / scroll / right-click popup | fixed | The second most frequent click. The travel from the corner is the shortest. The X stays constant (INV-4). |
+| 3 | `win` | none (scroll: brightness) | variable | The width changes most in the bar. `win` is last in `start`, thus it moves nothing (INV-1). `truncate.max_length` cuts the title at 32 characters. `win` is not a click target, apart from its own scroll. |
 
-kitty windows arrive with their title already prefixed `"<repo> · <title>"` by
-`kitty/repo-title.py` (a kitty watcher, not a bar module). `window_text()`
-(`mango.rs`) splits on `" · "` for `appid=="kitty"` and shows the repo as the
-dim first line in place of the appid — a Firefox tab title containing the
-same separator is left alone, since the split is gated on the kitty appid.
+`kitty/repo-title.py` sets the title of a kitty window to
+`"<repo> · <title>"`. That script is a kitty watcher, not a bar module.
+`window_text()` in `mango.rs` splits the title on `" · "` when
+`appid=="kitty"`. It then shows the repo as the dim first line, in place of
+the appid. The split applies to the kitty appid only. Thus a Firefox tab
+title with the same separator stays unchanged.
 
-**Semantic reading order:** left to right, *identity → location → focus*
-("what can I launch / where am I / what am I doing").
+**Semantic reading order:** left to right, *identity → location → focus*.
+This reads as "what can I launch / where am I / what am I doing".
 
-The fallback bar (no monitor name to build tag vars from) renders `spark` and
-`win` with no tag block — see `build()`'s own doc comment for why an unlisted
-output still gets a bar rather than none.
+The fallback bar has no monitor name, thus it cannot build the tag
+variables. It renders `spark` and `win` with no tag block. See `build()`'s
+own doc comment for the reason an unlisted output still gets a bar.
 
 ### 3.2 `center` — time
 
 | # | Module | Interaction | Width | Rationale |
 | - | --- | --- | --- | --- |
-| 4 | `clock` | none (hover popup: world clocks) | fixed | Highest glance frequency, weakest click need — center is the shortest saccade from screen-centre gaze. |
-| 5 | `date` | click → calendar app; hover popup: month | fixed | Same semantic domain as clock. |
-| 6 | `pomo` | left: start/pause; right: mute; hover popup | fixed | Click frequency is a handful per day; the weak click target this placement costs is acceptable at that frequency. |
+| 4 | `clock` | none (hover popup: world clocks) | fixed | The most frequent glance, and the weakest need for a click. The centre is the shortest eye movement from a screen-centre gaze. |
+| 5 | `date` | click → calendar app; hover popup: month | fixed | The same semantic domain as the clock. |
+| 6 | `pomo` | left: start/pause; right: mute; hover popup | fixed | The user clicks it a few times each day. The weak click target of this position is acceptable at that frequency. |
 
-Center placement, not the right edge, because glance-only content minimises
-eye travel — this matters more the wider the monitor, and costs nothing since
-none of the three needs a corner-quality click target.
+The three modules sit in the centre, not at the right edge. Glance-only
+content in the centre keeps the eye travel short. A wider monitor makes this
+more important. The position costs nothing, because none of the three needs
+a click target of corner quality.
 
 ### 3.3 `end`, block 1 — tray
 
 | # | Module | Interaction | Width | Rationale |
 | - | --- | --- | --- | --- |
-| 7 | `tray` | click → app window or menu | variable | Leads `end` so its own growth is absorbed by itself alone (INV-1) — the only variable-width member of `end`. Always visible (T29 follow-up: `TRAY_DRAWER_ENABLED = false`) — see below. |
-| 7c | `keepass` | click → show/hide KeePassXC | fixed | Promoted out of the drawer — lock state is glance-worthy. |
+| 7 | `tray` | click → app window or menu | variable | It leads `end`, thus it takes its own growth alone (INV-1). It is the only member of `end` with a variable width. It is always visible, because the T29 follow-up sets `TRAY_DRAWER_ENABLED = false`. See below. |
+| 7c | `keepass` | click → show/hide KeePassXC | fixed | Moved out of the drawer, because the lock state is worth a glance. |
 
 **T28 — the tray drawer.** Ironbar's native `tray` module has no per-item
-filter (only `icon_size`/`direction`/`prefer_theme_icons` plus the common
-options — every item gets the same `.item` class, none gets a name), so
-"important vs. hidden" cannot be expressed inside the tray itself. The item
-worth a permanent glance on this machine (KeePassXC) is rebuilt as its own
-pill instead of being kept out of the drawer. `tray`'s own `on_click_left` is
-also overridden (`tray-click.sh {address}`) — it jumps to an already-open
-window before falling back to SNI `Activate`, so a tray click can no longer
-hide a window that lives on another tag. The one accepted regression:
-NordVPN is the only tray item with `ItemIsMenu: true` (confirmed live via
-`busctl --user get-property`), so its left-click menu moves to right-click.
+filter. It has `icon_size`, `direction` and `prefer_theme_icons` only, plus
+the common options. Every item gets the same `.item` class, and no item gets
+a name. Thus the tray itself cannot express "important against hidden".
+KeePassXC is the one item on this machine that is worth a permanent glance.
+It is rebuilt as its own pill, in place of an item kept out of the drawer.
 
-**T29 follow-up — drawer disabled by default.** User preference: the tray
-icon list should always be visible, no hide-behind-toggle. `genconfig.rs`'s
-`TRAY_DRAWER_ENABLED` constant (default `false`) turns off both `tray`'s own
-`show_if: "#tray_open"` gate and the `traytoggle` module entirely when
-disabled — the drawer mechanism itself (`tray_toggle_module()`,
-`tray-drawer.sh`, the `.traytoggle` CSS) is untouched and still works the
-moment the constant flips back to `true`.
+`tray-click.sh {address}` also overrides `tray`'s own `on_click_left`. The
+script jumps to an already-open window before it falls back to SNI
+`Activate`. Thus a tray click can no longer hide a window that lives on
+another tag. NordVPN is the only tray item with `ItemIsMenu: true`. A live
+check with `busctl --user get-property` confirmed this. Its left-click menu
+moves to right-click, and this spec accepts that one regression.
 
-**T29 — Arch-Update leaves this block.** It was promoted here at T28 for
-the same "glance-worthy pending count" reason `keepass` still is, but folds
-into the `devload` stack's docker row instead now — see §3.4's own T29
-entry for why.
+**T29 follow-up — drawer disabled by default.** The user prefers a tray icon
+list that is always visible, with no toggle to hide it. The
+`TRAY_DRAWER_ENABLED` constant in `genconfig.rs` defaults to `false`. With
+that value it removes `tray`'s own `show_if: "#tray_open"` gate, and it
+removes the `traytoggle` module. The drawer mechanism itself stays in place:
+`tray_toggle_module()`, `tray-drawer.sh` and the `.traytoggle` CSS. It works
+again as soon as the constant returns to `true`.
+
+**T29 — Arch-Update leaves this block.** T28 moved it here for the same
+reason `keepass` stays: a pending count is worth a glance. It now folds into
+the docker row of the `devload` stack. See §3.4's own T29 entry for the
+reason.
 
 ### 3.4 `end`, block 2 — resources
 
-`cpu`, `memory`, `docker`, `battery`, `claudebar`, `archupdate` — one
-glance-only ambient group, hover popup per pill/stack, click launches an
-external tool (`btop`, `powermode.sh`, `powertop`, `arch-update`) or, for
-docker, a right-click menu.
+`cpu`, `memory`, `docker`, `battery`, `claudebar` and `archupdate` make one
+ambient group for glances only. Each pill or stack has a hover popup. A
+click starts an external tool: `btop`, `powermode.sh`, `powertop` or
+`arch-update`. A right-click on docker opens a menu.
 
-Grouped by **proximity/common region**: these answer one question — "is
-this machine healthy" — read in one saccade rather than several separate
-stops. Order within the block is itself a reading of load, from general to
-specific: cpu → memory → docker (processes) → battery (power) → claude (an
-external budget, least tied to the machine itself) → archupdate (routine
-maintenance, not health).
+The group uses **proximity and common region**. These modules answer one
+question: "is this machine healthy". The user reads them in one eye
+movement, not in several separate stops. The order in the block reads the
+load from general to specific: cpu → memory → docker (processes) → battery
+(power) → claude → archupdate. `claude` is an external budget, with the
+least relation to the machine itself. `archupdate` is routine maintenance,
+not health.
 
-**T28 — gauges replace the percentage.** `cpu`/`memory` drop their digit
-entirely (icon + a horizontal `.gauge` box only — the gauge now carries the
-magnitude on the bar; the exact number stays in the popup). `battery` keeps
-its icon+digit+`%` text and gains a `.gauge` alongside it. `docker` is
-unchanged. The gauge itself is a nested empty `box.gauge` widget
-(`ButtonWidget`'s `label` and `widgets` fields are mutually exclusive —
-`widgets` wins — confirmed against the vendored ironbar source), filled by a
-CSS `linear-gradient` hard stop selected by a `pNN` (5%-step) class the
-daemon pushes on an **independent** class slot (`@class/<module>#level`, the
-same `#`-suffix convention netsec's own `eco` class already established) —
-so it never evicts the pill's own `warning`/`critical` state class. The fill
-and border both use `currentColor`, so a warning/critical pill's gauge turns
-`@urgent` automatically, with no separate per-state gauge rule needed.
-Ironbar's `progress` widget was rejected for this: its `value` is a
-`ScriptInput` (a polling subprocess), exactly the shape `mango-bard` exists
-to replace.
+**T28 — gauges replace the percentage.** `cpu` and `memory` drop their digit
+completely. They show an icon and a horizontal `.gauge` box only. The gauge
+carries the magnitude on the bar, and the popup keeps the exact number.
+`battery` keeps its icon, digit and `%` text, and gains a `.gauge` next to
+them. `docker` stays unchanged.
+
+The gauge itself is a nested empty `box.gauge` widget. `ButtonWidget`'s
+`label` and `widgets` fields are mutually exclusive, and `widgets` wins, as
+a check against the vendored ironbar source confirmed. A CSS
+`linear-gradient` hard stop fills the gauge, and a `pNN` class in 5% steps
+selects that stop. The daemon pushes the `pNN` class on an **independent**
+class slot (`@class/<module>#level`). netsec's own `eco` class already
+established this `#`-suffix convention. Thus the level class never removes
+the pill's own `warning` or `critical` state class.
+
+The fill and the border both use `currentColor`. Thus the gauge of a warning
+or critical pill turns `@urgent` by itself, and it needs no separate
+per-state gauge rule. Ironbar's `progress` widget was rejected for this
+task. Its `value` is a `ScriptInput`, which is a polling subprocess.
+`mango-bard` exists to replace exactly that shape.
 
 **T29 — two-row stacks, battery gets a terminal nub, the countdown comes
-back.** `cpu`+`memory` merge into one `sysload` module (two rows, one on
-top of the other); `claudebar`+`docker`+`archupdate` merge into one
-`devload` module (a claude row, then a docker+updates row). A nested
-`custom` *module* cannot work here: ironbar's `style add_class`/
-`remove_class` resolve a target only by walking the bar's own top-level
-`start`/`center`/`end` arrays (`bar.rs::add_modules`), and a nested
-module's own `ModuleRef` is discarded on the way in
-(`modules/custom/mod.rs::add_to`, vendored source) — so a nested `cpu`
-module would answer "Module not found" for every class push: every gauge
-level, every warning colour, dead. Each stack is instead one top-level
-module whose `bar` is a `box, orientation: "vertical"` holding plain
-`button`/`box` rows — a nested plain widget keeps its own `on_click_left`/
-`show_if` as a real field (T23, confirmed live for popup hold/release), so
-nothing about a row's own behavior is lost, only its ability to register
-its own IPC-addressable class or popup. That is the one real cost: **one
-popup per stack**, covering every row (`popup_multi`), and every row's
-state/level class lands on the stack's single shared node instead of a
-node of its own — which forces a `<slot>-<value>` naming convention
-(`cpu-warning`/`mem-warning`, `cl45`/`ml45`, `claude-critical`,
-`dok-warning`, `au-pending`) so one row's state transition (remove old
-value, add new) can never delete a sibling row's still-current class off
-that same node. `battery` gains a small `.gauge-cap` square right of its
-existing gauge, filled with `currentColor` like the gauge itself, so the
-pair reads as a battery (rectangle + terminal nub) rather than a plain
-rounded bar; its own `NN%` digit is dropped the same way cpu/memory's was
-at T28, since the gauge now carries the level. `claudebar`'s countdown,
-dropped at T28 to shrink a pill that used to stand alone, comes back now
-that it shares a row with nothing else demanding the width.
+back.** `cpu` and `memory` merge into one `sysload` module, with two rows
+one above the other. `claudebar`, `docker` and `archupdate` merge into one
+`devload` module, with a claude row and then a docker and updates row.
+
+A nested `custom` *module* cannot work here. Ironbar's `style add_class` and
+`remove_class` find a target only in the bar's own top-level `start`,
+`center` and `end` arrays (`bar.rs::add_modules`). A nested module's own
+`ModuleRef` is discarded on the way in (`modules/custom/mod.rs::add_to`, in
+the vendored source). Thus a nested `cpu` module answers "Module not found"
+for every class push. Every gauge level and every warning colour then stops
+working.
+
+Each stack is instead one top-level module. Its `bar` is a
+`box, orientation: "vertical"` that holds plain `button` and `box` rows. A
+nested plain widget keeps its own `on_click_left` and `show_if` as a real
+field (T23, confirmed live for popup hold and release). Thus a row loses
+nothing of its own behavior. It loses only the ability to register its own
+IPC-addressable class or popup.
+
+That loss is the one real cost. Each stack has **one popup** that covers
+every row (`popup_multi`). Every row's state class and level class lands on
+the stack's single shared node, not on a node of its own. This forces a
+`<slot>-<value>` naming convention: `cpu-warning`, `mem-warning`, `cl45`,
+`ml45`, `claude-critical`, `dok-warning` and `au-pending`. A row's state
+transition removes the old value and adds the new one. The convention stops
+that transition from deleting a sibling row's current class off the shared
+node.
+
+`battery` gains a small `.gauge-cap` square right of its existing gauge.
+`currentColor` fills that square, as it fills the gauge itself. The pair
+then reads as a battery, a rectangle with a terminal nub, in place of a
+plain rounded bar. `battery` drops its own `NN%` digit, as `cpu` and
+`memory` did at T28, because the gauge now carries the level. `claudebar`'s
+countdown comes back. T28 dropped that countdown to shrink a pill that stood
+alone, and the claude row now shares its space with nothing else that needs
+the width.
 
 ### 3.5 `end`, block 3 — tools
 
-T31 removed the T23 tools drawer: the permanent "…" trigger cost the same
-scan attention Hick's Law charged the icons for, while adding a hover
-step to reach them — the user prefers the tools always visible.
-`colorpicker`, `darkmode` and `snip` are standalone pills again in the
-T23 reading order (each a `custom` module with a static tooltip and its
-T20/T23 clicks unchanged), and **`inhibit`** follows unchanged: keep-awake
-is a state you glance at. It renders at constant width in both states
-(same-size `nf-md-coffee`/`nf-md-coffee_outline` glyphs).
+T31 removed the T23 tools drawer. The permanent "…" trigger cost the same
+scan attention that Hick's Law charges for the icons. It also added a hover
+step to reach them. The user prefers tools that are always visible.
+
+`colorpicker`, `darkmode` and `snip` are standalone pills again, in the T23
+reading order. Each one is a `custom` module with a static tooltip, and its
+T20 and T23 clicks stay unchanged. **`inhibit`** follows them, also
+unchanged, because keep-awake is a state the user glances at. It renders at
+constant width in both states, because the `nf-md-coffee` and
+`nf-md-coffee_outline` glyphs have the same size.
 
 ### 3.6 `end`, block 4 — audio
 
-`music`, `volume`, `mic` — one domain by proximity/common region: what's
-playing, and what the machine is doing with sound.
+`music`, `volume` and `mic` make one domain by proximity and common region.
+They show what plays, and what the machine does with sound.
 
-- **`music`** — MPRIS via `playerctl --follow` (music.rs), truncated to 24
-  chars so it cannot grow past its slot; it sits mid-block, not at a growth
-  end, so INV-1 requires this fixed cap rather than open-ended width.
+- **`music`** — `music.rs` reads MPRIS with `playerctl --follow`. The text
+  truncates at 24 characters, thus it cannot grow past its slot. `music`
+  sits in the middle of the block, not at a growth end. INV-1 therefore
+  requires this fixed cap in place of an open-ended width.
   - **T26 deviation:** the CSS carried a `min-width: 220px` reserve against
-    that cap. Live measurement found real track titles never approach 30
-    chars, so the reserve sat empty behind whatever short title (or
-    nothing) was actually showing — the largest gap on the bar. The
-    reserve is removed; `volume`/`mic` now shift when a track starts or
-    ends. That is a discrete, user-caused event, not the per-tick reflow
-    INV-1 guards against, so it is accepted rather than reserved against.
+    that cap. A live measurement showed that real track titles never come
+    near 30 characters. The reserve then stayed empty behind a short title
+    or behind nothing, and it was the largest gap on the bar. The reserve
+    is removed, so `volume` and `mic` now shift when a track starts or
+    stops. That shift is a discrete event caused by the user. It is not
+    the per-tick reflow that INV-1 guards against, thus this spec accepts
+    it.
   - **T28: native `music` module replaced with a `custom` one.** The native
-    module renders through GTK4's `set_label_escaped` (confirmed against
-    the vendored source, `modules/music/mod.rs`) — real text only, never
-    markup — so it could never carry the two-line dim-app/plain-title
-    markup the window pill (§3.1) uses. `music.rs` now feeds `music_text`
-    directly, in that same two-line shape. `show_if: "#music_on"` replaces
-    T26's truncation-only emptiness handling: the pill disappears entirely
-    with nothing loaded (or paused with no track) instead of reserving
-    space for an empty string — T26's own "discrete, user-caused event"
-    reasoning applies unchanged.
-- **`volume`** — icon only on the bar (percentage moved to the popup, T9);
-  left click opens a 5s mixer, right the full mixer, scroll adjusts.
-- **`mic`** — mute-state icon, renders empty when unmuted. T29: it used to
-  share `.volume`'s `min-width: 20px` reserve, which kept reserving a full
-  icon's width even while empty — the actual cause of a visible gap
+    module renders through GTK4's `set_label_escaped`, as a check against
+    the vendored source `modules/music/mod.rs` confirmed. That function
+    renders real text only, never markup. Thus the native module could not
+    carry the two-line markup of a dim app name and a plain title that the
+    window pill (§3.1) uses. `music.rs` now feeds `music_text` directly,
+    in that same two-line shape. `show_if: "#music_on"` replaces T26's
+    handling of emptiness by truncation alone. The pill now disappears
+    completely when nothing is loaded, or when a player is paused with no
+    track, in place of a reserve for an empty string. T26's own reasoning
+    about a discrete event caused by the user applies unchanged.
+- **`volume`** — an icon only on the bar. T9 moved the percentage to the
+  popup. A left click opens a 5s mixer. A right click opens the full
+  mixer. A scroll adjusts the volume.
+- **`mic`** — an icon for the mute state. It renders empty when the
+  microphone is not muted. Before T29 it shared `.volume`'s
+  `min-width: 20px` reserve. That reserve held a full icon's width even
+  while the module was empty, and it was the real cause of a visible gap
   between `volume` and `wifi`. `mic` now has no reserve of its own, so the
-  common (unmuted) case really does contribute no width; muting shifts
-  `wifi` by one icon width, the same trade already accepted for `music`.
+  common unmuted case adds no width. A mute moves `wifi` by one icon
+  width, which is the same trade this spec already accepts for `music`.
 
 ### 3.7 `end`, block 5 — connectivity
 
-`net-spinner`, `wifi`, `eth`, `netsec`, `hotspot`, `remote`, `bluetooth` — one
-block by proximity/common region: "how am I connected, and is it safe" is a
-single question with seven possible answers, not seven separate questions.
-This is the layout's largest single consolidation, so the internal order is
-itself part of the spec, general to specific:
+`net-spinner`, `wifi`, `eth`, `netsec`, `hotspot`, `remote` and `bluetooth`
+make one block by proximity and common region. "How am I connected, and is
+it safe" is one question with seven possible answers. It is not seven
+separate questions. This block is the largest single consolidation in the
+layout. Thus the internal order is part of the spec. It runs from general to
+specific:
 
-1. `net-spinner` — busy indicator, replaces `wifi` in place while a link
-   transitions (`show_if: "#net_busy"`, logical inverse of `wifi`'s own
-   `show_if`).
+1. `net-spinner` — a busy indicator. It replaces `wifi` in place while a
+   link changes state. Its `show_if: "#net_busy"` is the logical inverse of
+   `wifi`'s own `show_if`.
 2. `wifi` — link state and signal.
 3. `eth` — wired link state.
-4. `netsec` — the security verdict *for* the link `wifi`/`eth` just
-   described (DNS leak, route conflict, captive portal, open network) —
-   immediately after the links it grades, not detached from them.
-5. `hotspot` — a *mode* of the same wifi radio `wifi` already covers;
-   `show_if`-hidden until active, so it costs nothing when unused.
-6. `remote` — inbound reachability (wayvnc/KDE Connect), the same
-   "who can reach this machine" question the security pill just answered,
-   read outward from it rather than lumped into `netsec` itself (different
-   protocol family, own click target).
-7. `bluetooth` — nearest remaining connectivity radio; last in the block
-   because it is the one native module with click-to-toggle-popup that must
-   sit next to `power`'s own corner treatment (T9: its popup does not
-   respect `popup_autohide`, closed instead via unconditional
-   `hover_exit`/`hide_popup` — see `bluetooth_module()`'s own doc comment).
+4. `netsec` — the security verdict *for* the link that `wifi` or `eth` just
+   described. It reports a DNS leak, a route conflict, a captive portal or
+   an open network. It comes immediately after the links it grades.
+5. `hotspot` — a *mode* of the same wifi radio that `wifi` covers.
+   `show_if` hides it until it is active, thus it costs nothing when
+   unused.
+6. `remote` — inbound reachability through wayvnc or KDE Connect. It
+   answers the same "who can reach this machine" question as the security
+   pill. It sits outward from `netsec`, not inside it, because it is a
+   different protocol family with its own click target.
+7. `bluetooth` — the nearest remaining connectivity radio. It is last in
+   the block, because it is the one native module with a click-to-toggle
+   popup that must sit next to `power`'s own corner treatment. T9 found
+   that its popup does not obey `popup_autohide`. An unconditional
+   `hover_exit` and `hide_popup` close it instead. See
+   `bluetooth_module()`'s own doc comment.
 
 ### 3.8 `end`, block 6 — session
 
 | # | Module | Interaction | Width | Rationale |
 | - | --- | --- | --- | --- |
-| 18 | `power` | click → **menu** (`powermenu.sh`) | fixed | Top-right magic corner; menu-only per INV-3. |
+| 18 | `power` | click → **menu** (`powermenu.sh`) | fixed | The top-right magic corner. It opens a menu only, per INV-3. |
 
 ---
 
 ## 4. Permitted variant
 
-Not currently taken. If the power menu is used rarely and volume is adjusted
-by scrolling on the bar, `volume` and `power` MAY be swapped so `volume`
-occupies the top-right corner — a scroll target in a magic corner is the
-fastest possible volume control (fling, scroll, done, no click, no precision),
-and strengthens INV-3 further since scroll-to-adjust is non-destructive.
+This repo does not take this variant now. `volume` and `power` MAY be
+swapped, so that `volume` occupies the top-right corner. Take that swap only
+if the user opens the power menu rarely, and adjusts the volume by a scroll
+on the bar. A scroll target in a magic corner is the fastest volume control:
+move, scroll, done, with no click and no precision. The swap also
+strengthens INV-3, because a scroll adjustment is not destructive.
 
-No other reordering is specified. Moving the clock off `center` is explicitly
+This spec specifies no other reordering. A move of the clock off `center` is
 **out of scope**.
 
 ### 4.1 `HEADLESS-*` bars — a deliberate exception
 
-This whole document describes a bar sat in front of by its own monitor.
-The bar ironbar builds for a `HEADLESS-*` output (wayvnc's capture surface,
-see `system/remote/README.md`) is not that — nobody looks at that output's
-own tags, they look at whichever physical tag they pulled onto it. It is
-exempt from §3 by design (`genconfig.rs::build()`'s `HEADLESS` branch):
+This document describes a bar with a user in front of its own monitor. The
+bar that ironbar builds for a `HEADLESS-*` output is different. That output
+is wayvnc's capture surface (see `system/remote/README.md`). Nobody looks at
+that output's own tags. The user looks at the physical tag pulled onto it.
+The `HEADLESS` branch in `genconfig.rs::build()` exempts this bar from §3 by
+design:
 
-- No `center`/`end` — omitted outright, not empty. §3.2-3.8 don't apply.
-- `start` is a remote-control strip, not launcher→tags→focus: one private
-  pill, then per physical monitor a name label and nine pull pills
-  (`remote_pills()`). INV-4's "constant X" still holds (fixed member
-  count per monitor, `ws.empty` dims instead of hiding), but INV-2's magic
-  corner doesn't apply — there is no `spark`/`power` on this bar to bleed
-  into it.
-- The remote pills deliberately drop the `show_if` gate INV-1 would
-  otherwise want (see `remote_pills()`'s own doc comment): gating a
-  monitor's block on *that monitor's* overview state would reflow this
-  bar for a screen the viewer isn't looking at, which is worse than the
-  small, bounded width this document's INV-1 exists to prevent elsewhere.
+- The bar has no `center` and no `end`. The generator omits them, and does
+  not build them empty. §3.2-3.8 do not apply.
+- `start` is a remote-control strip, not launcher→tags→focus. It holds one
+  private pill. It then holds a name label and nine pull pills for each
+  physical monitor (`remote_pills()`). INV-4's "constant X" still applies,
+  because the member count per monitor is fixed and `ws.empty` dims a pill
+  in place of hiding it. INV-2's magic corner does not apply, because this
+  bar has no `spark` and no `power` to bleed into it.
+- The remote pills drop the `show_if` gate that INV-1 wants elsewhere. See
+  `remote_pills()`'s own doc comment. A gate on *that monitor's* overview
+  state would reflow this bar for a screen the viewer does not look at.
+  That reflow is worse than the small, bounded width change that INV-1
+  prevents elsewhere.
 
-A future pass should not "fix" this bar to match §3 — it is intentionally a
-different kind of bar, not an incomplete one.
+A future pass should not change this bar to match §3. It is a different kind
+of bar by design. It is not an incomplete bar.
 
 ---
 
 ## 5. Reference implementation (ironbar / `mango-bard`)
 
-Config is generated, not handwritten — see `src/ironbar/bard/src/genconfig.rs`.
-Shape (module bodies omitted; see the file itself for the full JSON each
-builder returns):
+The generator makes the config. Nobody writes it by hand. See
+`ironbar/bard/src/genconfig.rs`. This is the shape, with the module bodies
+omitted. Read the file itself for the full JSON that each builder returns:
 
 ```rust
 // genconfig.rs::build(), per real monitor bar
@@ -475,8 +521,8 @@ fn tools_modules(bar_name: &str) -> Vec<Value> {
 }
 ```
 
-CSS (`src/matugen/templates/ironbar/style.css`; selectors are classes set by
-`genconfig.rs`, not waybar-style `#custom-*` ids):
+The CSS is in `matugen/templates/ironbar/style.css`. The selectors are
+classes that `genconfig.rs` sets. They are not waybar-style `#custom-*` ids:
 
 ```css
 /* INV-2 — corner bleed: the outward corner squared and flush, inset moved
@@ -530,39 +576,48 @@ CSS (`src/matugen/templates/ironbar/style.css`; selectors are classes set by
 
 ## 6. Verification checklist
 
-Width/position claims are verified by **pixel-column analysis of a `grim`
-crop, never by eye** (T19 measured "pixel-perfect" by eye and was 7.5px out).
-Always pass `grim -o <output>` — a bare `grim` captures every monitor and
-whatever else is on screen.
+Verify a width claim or a position claim by **pixel-column analysis of a
+`grim` crop, never by eye**. T19 measured "pixel-perfect" by eye and was
+7.5px out. Always pass `grim -o <output>`. A bare `grim` captures every
+monitor, and everything else on screen.
 
-- [ ] Fling pointer to top-left at full speed → `spark` activates on click (no dead pixel).
-- [ ] Fling pointer to top-right at full speed → `power` **menu** opens; no action fires, no state changes.
-- [ ] Start/quit a tray application → no module other than the tray changes position.
-- [ ] Focus a window with a 100-character title → tags and `spark` do not move.
-- [ ] `sysload`/`battery`/`devload` each transition realistic max → rare
-      overflow (either gauge row at 99%→100%, docker 9→99, 100%→100%+eco
-      leaf, with/without the stale-cache marker) → `tray` (leftmost in
-      `end`) does not shift by a single pixel. `center` is the wrong
-      subject for these three: they moved from `start` to `end` at T23,
-      and `end` is right-anchored, so growth pushes `end`'s own leftmost
-      member, `tray` (T25). T29's own reserve numbers for `.sysload`/
-      `.battery`/`.devload` are estimates, not yet live-measured — this is
-      the check that corrects them.
-- [ ] `pomo` idle → running → idle: `center` width unchanged.
-- [ ] All 9 tags visible with every tag empty; `ws-ov` toggled on and off with no shift in `wifi`'s position.
-- [ ] Tag 9 → overview → tag 1 transition: no button width change.
-- [ ] Click `darkmode` → colour scheme flips; the pill's icon follows (T31: drawer removed, darkmode standalone).
-- [ ] `hotspot` toggled active → inactive: neighbouring `remote`/`bluetooth` do not shift.
-- [ ] A long MPRIS track title playing → `music` truncates at 30 chars, `volume` does not move.
+- [ ] Move the pointer to the top-left at full speed. `spark` activates on
+      click, with no dead pixel.
+- [ ] Move the pointer to the top-right at full speed. The `power` **menu**
+      opens. No action fires, and no state changes.
+- [ ] Start a tray application, then quit it. No module but the tray
+      changes position.
+- [ ] Focus a window with a 100-character title. The tags and `spark` do
+      not move.
+- [ ] Move `sysload`, `battery` and `devload` each from the realistic
+      maximum to the rare overflow: either gauge row at 99%→100%, docker
+      9→99, 100%→100%+eco leaf, with and without the stale-cache marker.
+      `tray`, the leftmost module in `end`, does not shift by a single
+      pixel. `center` is the wrong subject for these three modules. They
+      moved from `start` to `end` at T23, and `end` is right-anchored, so
+      growth pushes `end`'s own leftmost member, `tray` (T25). T29's own
+      reserve numbers for `.sysload`, `.battery` and `.devload` are
+      estimates. Nobody has measured them live. This check corrects them.
+- [ ] Move `pomo` from idle to running to idle. The `center` width does not
+      change.
+- [ ] All 9 tags stay visible with every tag empty. Toggle `ws-ov` on and
+      off. `wifi` does not shift.
+- [ ] Move from tag 9 to overview to tag 1. No button changes width.
+- [ ] Click `darkmode`. The colour scheme flips, and the pill's icon
+      follows (T31: drawer removed, darkmode standalone).
+- [ ] Toggle `hotspot` from active to inactive. The neighbouring `remote`
+      and `bluetooth` do not shift.
+- [ ] Play a long MPRIS track title. `music` truncates at 30 chars, and
+      `volume` does not move.
 
 ---
 
 ## Sources
 
-Layout derived from the following. No controlled A/B testing exists for
-status-bar module ordering specifically; the empirical basis is Fitts's law
-and corner/edge target research for the outer anchors, and Gestalt grouping
-plus Hick's Law for the interior blocks §3 introduces.
+The layout comes from the following sources. No controlled A/B test exists
+for status-bar module ordering. The outer anchors use Fitts's law and the
+research on corner and edge targets. The interior blocks that §3 introduces
+use Gestalt grouping and Hick's Law.
 
 - Fitts's law, "rule of the infinite edges" and magic corners — https://en.wikipedia.org/wiki/Fitts%27s_law
 - Tognazzini / Atwood on corner pinning action and infinite width — https://blog.codinghorror.com/fitts-law-and-infinite-width/
@@ -576,9 +631,12 @@ plus Hick's Law for the interior blocks §3 introduces.
 - Waybar module groups, `modules-left/center/right` semantics (prior bar, superseded) — https://wiki.hypr.land/Useful-Utilities/Status-Bars/
 - Polybar tray-as-module positioning (cross-check on tray growth behaviour) — https://polybar.readthedocs.io/en/stable/user/modules/tray.html
 - ironbar's own module/config reference — https://github.com/JakeStanger/ironbar
-- `IRONBAR.md` T19–T22 — the two GTK4 traps (§2) and the T22 `center`-emptying decision this spec's §1/§3.1 deliberately reverses (see IRONBAR.md's T23 entry for why the reversal is safe).
+- The `IRONBAR.md` ledger in the parent superrepository, T19–T22 — the two
+  GTK4 traps (§2) and the T22 decision to empty `center`. This spec's §1
+  and §3.1 reverse that decision by design. The ledger's T23 entry gives
+  the reason the reversal is safe.
 
-Generated assets embedded in this document: the ASCII bar diagram (§1), the
-Rust/CSS reference implementation excerpts (§5) are authored inline in this
-file — no external generator or build step, no separate source artifact
-exists.
+This document holds two embedded assets: the ASCII bar diagram (§1) and the
+Rust and CSS reference implementation excerpts (§5). The author writes both
+inline in this file. No external generator, no build step and no separate
+source artifact exists for them.
