@@ -200,10 +200,7 @@ mod tests {
         // Hold/release take only a bar — a third token is the enter/exit
         // shape, not a malformed hold/release, so it must not silently
         // parse as either.
-        assert!(matches!(
-            parse("hover hold bar-eDP-1 cpu"),
-            Line::Unknown
-        ));
+        assert!(matches!(parse("hover hold bar-eDP-1 cpu"), Line::Unknown));
     }
 
     #[test]

@@ -92,7 +92,11 @@ impl Music {
             set_titled(vars, "music_tip", "Now Playing", String::new());
             return;
         }
-        let head = if s.artist.is_empty() { &s.player } else { &s.artist };
+        let head = if s.artist.is_empty() {
+            &s.player
+        } else {
+            &s.artist
+        };
         let shown = truncate_ellipsis(&s.title, TITLE_MAX);
         let text = format!(
             "<span size=\"small\" alpha=\"70%\">{}</span>\n{}",
@@ -135,7 +139,10 @@ mod tests {
         m.ingest_line("Paused\u{1f}\u{1f}\u{1f}kdeconnect");
         let mut vars = Vars::new();
         m.apply(&mut vars);
-        while let Some((k, _)) = vars.peek_dirty().map(|(k, v)| (k.to_string(), v.to_string())) {
+        while let Some((k, _)) = vars
+            .peek_dirty()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        {
             vars.ack(&k);
         }
         assert_eq!(vars.live_value("music_on"), Some("false"));
@@ -149,14 +156,20 @@ mod tests {
         let mut vars = Vars::new();
         m.apply(&mut vars);
         let mut text = None;
-        while let Some((k, v)) = vars.peek_dirty().map(|(k, v)| (k.to_string(), v.to_string())) {
+        while let Some((k, v)) = vars
+            .peek_dirty()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        {
             if k == "music_text" {
                 text = Some(v.clone());
             }
             vars.ack(&k);
         }
         let text = text.expect("music_text must be set");
-        assert!(text.contains("mpv"), "expected player-name fallback: {text}");
+        assert!(
+            text.contains("mpv"),
+            "expected player-name fallback: {text}"
+        );
         assert!(text.contains("Some Track"));
     }
 
@@ -167,7 +180,10 @@ mod tests {
         m.ingest_line(&format!("Playing\u{1f}Artist\u{1f}{long}\u{1f}spotify"));
         let mut vars = Vars::new();
         m.apply(&mut vars);
-        while let Some((k, v)) = vars.peek_dirty().map(|(k, v)| (k.to_string(), v.to_string())) {
+        while let Some((k, v)) = vars
+            .peek_dirty()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        {
             if k == "music_text" {
                 assert!(v.contains('\u{2026}'), "expected an ellipsis in: {v}");
                 assert!(!v.contains(&long), "title must be cut, not shown whole");

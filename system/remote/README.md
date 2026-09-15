@@ -169,6 +169,31 @@ automatically. `/usr/share/applications/org.kde.kdeconnect.daemon.desktop`
 still runs the binary directly, but it is `NoDisplay=true`, so only a
 deliberate manual launch reaches it.
 
+## Remote commands
+
+The phone's "Run command" plugin holds two entries. They are **not** in this
+repo: kdeconnectd writes them to
+`~/.config/kdeconnect/<device-id>/kdeconnect_runcommand/config`, a path keyed
+by the paired device's id. Same treatment as `keepassxc.ini` — the content is
+recorded here, not linked:
+
+- **Toggle Remote Access** — `/bin/bash ~/.config/ironbar/scripts/remote.sh
+  --toggle-vnc`. The same thing the bar pill's left click does, from the
+  phone, so VNC can be armed before you are at the machine.
+- **Sleep** — `systemctl --user stop mango-keepawake.service; mango-bard
+  refresh keepawake; systemctl suspend`. Stops the keep-awake inhibitor
+  first. Suspend does not need that (`mango-keepawake` blocks
+  `idle:handle-lid-switch`, never `sleep`), but a keep-awake left on would
+  keep blocking idle suspend after the wake, so the command clears it. The
+  `mango-bard refresh` call is what stops the bar's coffee-cup pill from
+  showing a stale ON state — that pill has no poll, it refreshes only on the
+  edge (`ironbar/scripts/keepawake.sh`).
+
+The plugin runs each command through `/bin/sh -c`, so `~`, `;` and `$VAR`
+all expand. The daemon owns the file, so edit it while
+`kdeconnectd.service` is stopped — whether a running daemon overwrites an
+outside edit is untested here.
+
 ## KDE Connect pairing over the tunnel
 
 Discovery is UDP broadcast on 1716, which does not cross a WireGuard `/32`

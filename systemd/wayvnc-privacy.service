@@ -15,6 +15,11 @@ After=wayvnc.service
 
 [Service]
 Type=simple
+# wayvncctl does not exit on SIGTERM while it streams events. The shell
+# exits and ExecStopPost runs, but wayvncctl stays in the cgroup, so
+# systemd waits the default 90 s in final-sigterm before it sends SIGKILL.
+# That made a poweroff with VNC on take 91 s. Keep the wait short.
+TimeoutStopSec=5s
 ExecStart=%h/.config/ironbar/scripts/remote.sh --privacy-watch
 ExecStopPost=%h/.config/ironbar/scripts/remote.sh --privacy-restore
 Restart=on-failure

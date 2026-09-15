@@ -317,7 +317,12 @@ impl Docker {
             "docker_text",
             format!("{} {running}", barico_label(IC_DOCKER)),
         );
-        set_titled(vars, "docker_tip", "Docker", build_tip(&rows, stopped, projects));
+        set_titled(
+            vars,
+            "docker_tip",
+            "Docker",
+            build_tip(&rows, stopped, projects),
+        );
         // T29: prefixed so a real "warning"/"normal" collision with
         // `claude`'s or `archupdate`'s own value on the same shared node
         // can never happen — see cpu.rs's set_vars for the cross-talk

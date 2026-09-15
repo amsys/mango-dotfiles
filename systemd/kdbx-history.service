@@ -1,0 +1,8 @@
+[Unit]
+Description=Copy Consolidated.kdbx into the local history and check it
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=%h/work/mango-dotfiles/src/systemd/kdbx-history.sh

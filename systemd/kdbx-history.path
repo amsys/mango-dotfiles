@@ -1,0 +1,17 @@
+[Unit]
+Description=Watch Consolidated.kdbx for any change
+# The Nextcloud Android app has overwritten this database with an older copy
+# since at least May 2024. The laptop then downloads that copy over the good
+# one. KeePassXC's own backup option does not help, because it runs only when
+# KeePassXC saves. This watch sees every change, whoever made it.
+# See ~/brain/Areas/infra/hosts/arrakis.madmin.net/nextcloud.md, 2026-09-10.
+
+[Path]
+# systemd watches the parent directory for the last path component, so this
+# also fires when the file is replaced by a rename. Both KeePassXC (atomic
+# save) and the Nextcloud client (download, then rename) replace it that way.
+PathChanged=%h/Nextcloud/Database/Consolidated.kdbx
+Unit=kdbx-history.service
+
+[Install]
+WantedBy=default.target

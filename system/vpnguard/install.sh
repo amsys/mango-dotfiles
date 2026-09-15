@@ -18,18 +18,43 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_USER="${SUDO_USER:-}"
 [ -n "$TARGET_USER" ] || { echo "run with 'sudo', not as root directly — need \$SUDO_USER to verify the fix as" >&2; exit 1; }
 
-for b in ufw nmcli wg ip iptables; do
+for b in nft nmcli wg ip iptables; do
 	command -v "$b" >/dev/null 2>&1 || { echo "missing dependency: $b — install it first" >&2; exit 1; }
 done
+
+echo "==> ruleset -> /usr/local/share/mango-vpnguard/vpn.nft"
+nft -c -f "$SRC_DIR/vpn.nft" || { echo "vpn.nft does not parse — refusing to install a broken guard" >&2; exit 1; }
+install -d -m 0755 -o root -g root /usr/local/share/mango-vpnguard
+install -m 0644 -o root -g root "$SRC_DIR/vpn.nft" /usr/local/share/mango-vpnguard/vpn.nft
+
+echo "==> route-table name -> /etc/iproute2/rt_tables.d/mango-vpnguard.conf"
+install -d -m 0755 -o root -g root /etc/iproute2/rt_tables.d
+install -m 0644 -o root -g root "$SRC_DIR/rt_tables.d-mango-vpnguard" \
+	/etc/iproute2/rt_tables.d/mango-vpnguard.conf
+
+echo "==> dnsmasq example -> /usr/local/share/mango-vpnguard/"
+# Reference copy only. Nothing is placed in NetworkManager's dnsmasq.d: the
+# domain-driven bypass is opt-in, and switching the machine's resolver is a
+# decision, not an install step. README.md has the two commands.
+install -m 0644 -o root -g root "$SRC_DIR/dnsmasq.d-mango-vpnguard.conf.example" \
+	/usr/local/share/mango-vpnguard/dnsmasq.d-mango-vpnguard.conf.example
 
 echo "==> helper -> /usr/local/bin/mango-vpnguard"
 install -m 0755 -o root -g root "$SRC_DIR/mango-vpnguard" /usr/local/bin/mango-vpnguard
 
 echo "==> self-check"
-/usr/local/bin/mango-vpnguard test || { echo "mango-vpnguard test failed — stopping before touching ufw/sudoers" >&2; exit 1; }
+/usr/local/bin/mango-vpnguard test || { echo "mango-vpnguard test failed — stopping before touching the guard or sudoers" >&2; exit 1; }
+
+echo "==> loader unit -> /etc/systemd/system/mango-vpnguard-nft.service"
+install -m 0644 -o root -g root "$SRC_DIR/mango-vpnguard-nft.service" \
+	/etc/systemd/system/mango-vpnguard-nft.service
+systemctl daemon-reload
+systemctl enable --now mango-vpnguard-nft.service
+nft list table inet vpn >/dev/null 2>&1 || { echo "table inet vpn did not load" >&2; exit 1; }
+echo "    table inet vpn loaded, every set empty (inert)"
 
 echo "==> the escape hatch, before anything is armed:"
-echo "      sudo mango-vpnguard disarm   # always restores ufw to pre-guard state"
+echo "      sudo mango-vpnguard disarm   # empties every set; nothing is denied"
 
 echo "==> sudoers rule -> /etc/sudoers.d/mango-vpnguard"
 visudo -c -q -f "$SRC_DIR/sudoers.d-mango-vpnguard"
@@ -54,7 +79,8 @@ cat <<EOF
 Installed. Nothing is armed yet — every WireGuard profile still has
 autoconnect-priority=0, so the dispatcher's next link event writes state
 'unconfigured' and leaves networking alone (mango-vpnguard never blocks
-outgoing traffic until you pick something).
+outgoing traffic until you pick something). The nftables table is loaded but
+every set in it is empty, which is the same as not being there at all.
 
 Choose the default-route chain and any always-on companion with plain nmcli
 — no root, no config file, no re-running this script:
@@ -82,8 +108,17 @@ Check state or the managed VPNs any time (no root needed, world-readable):
 Rollback:
 
   sudo mango-vpnguard disarm
-  sudo rm /usr/local/bin/mango-vpnguard /etc/sudoers.d/mango-vpnguard \\
+  sudo systemctl disable --now mango-vpnguard-nft.service
+  sudo rm -r /usr/local/bin/mango-vpnguard /etc/sudoers.d/mango-vpnguard \\
+          /etc/systemd/system/mango-vpnguard-nft.service \\
+          /usr/local/share/mango-vpnguard \\
+          /etc/iproute2/rt_tables.d/mango-vpnguard.conf \\
           /etc/NetworkManager/dispatcher.d/90-mango-vpnguard
+
+'arm' also builds the 'direct' route table, which is what a bypass leaves
+by. It stays inert until something fills the 'bypass4' set — see "Bypassing
+the tunnel by domain" in README.md, which is opt-in and switches the
+machine's resolver to dnsmasq.
 
 See vpnguard/README.md for the state table and the portal exposure window.
 EOF

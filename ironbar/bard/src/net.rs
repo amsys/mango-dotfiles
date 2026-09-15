@@ -860,7 +860,9 @@ impl Net {
         let mfp = match sec {
             "open" | "wep" | "wpa" => {
                 let dump = run("iw", &["dev", &self.wifi_dev, "station", "dump"]).await;
-                dump_field(&dump, "MFP:", 2).unwrap_or("unknown").to_string()
+                dump_field(&dump, "MFP:", 2)
+                    .unwrap_or("unknown")
+                    .to_string()
             }
             _ => String::new(),
         };
@@ -1067,7 +1069,12 @@ impl Net {
         }
 
         vars.set(&class_key("wifi"), css_class);
-        set_titled(vars, "wifi_tip", &title_text, tip.trim_end_matches('\n').to_string());
+        set_titled(
+            vars,
+            "wifi_tip",
+            &title_text,
+            tip.trim_end_matches('\n').to_string(),
+        );
     }
 
     /// Detail popup for the `eth` pill — full port of net.sh's `eth_emit()`
@@ -1146,7 +1153,12 @@ impl Net {
             }
         }
 
-        set_titled(vars, "eth_tip", &title_text, tip.trim_end_matches('\n').to_string());
+        set_titled(
+            vars,
+            "eth_tip",
+            &title_text,
+            tip.trim_end_matches('\n').to_string(),
+        );
     }
 }
 
@@ -1404,13 +1416,21 @@ fn sec_tip_body(f: &SecFacts) -> String {
         tip.push_str(&row(&format!("{}  no default route", col(&off, "IPv4"))));
     } else {
         let m = if f.tuns.contains(&f.v4) { &ok } else { &no };
-        let gws = f.gw4.as_ref().map(|g| format!(" → {g}")).unwrap_or_default();
+        let gws = f
+            .gw4
+            .as_ref()
+            .map(|g| format!(" → {g}"))
+            .unwrap_or_default();
         tip.push_str(&row(&format!("{}  {}{gws}", col(m, "IPv4"), f.v4)));
     }
     tip.push('\n');
     if !f.v6.is_empty() {
         let m = if f.tuns.contains(&f.v6) { &ok } else { &no };
-        let gws = f.gw6.as_ref().map(|g| format!(" → {g}")).unwrap_or_default();
+        let gws = f
+            .gw6
+            .as_ref()
+            .map(|g| format!(" → {g}"))
+            .unwrap_or_default();
         tip.push_str(&row(&format!("{}  {}{gws}", col(m, "IPv6"), f.v6)));
     } else if f.v6_addrs > 0 {
         // ✓, not ·: an address with no default route cannot leak. That is
@@ -1496,11 +1516,7 @@ fn sec_tip_body(f: &SecFacts) -> String {
                 &off
             };
             let label = if nm.is_empty() { "unmanaged" } else { nm };
-            tip.push_str(&row(&format!(
-                "{}  {} · {dev} · {ty}",
-                mono(m),
-                esc(label)
-            )));
+            tip.push_str(&row(&format!("{}  {} · {dev} · {ty}", mono(m), esc(label))));
             tip.push('\n');
         }
         let carry = [&f.v4, &f.v6]
@@ -1528,10 +1544,7 @@ fn sec_tip_body(f: &SecFacts) -> String {
                 &no
             };
             let tail = if d == "local" { "local stub" } else { d };
-            tip.push_str(&row(&format!(
-                "{}  {tail}",
-                col(m, &format!("{ns:<20}"))
-            )));
+            tip.push_str(&row(&format!("{}  {tail}", col(m, &format!("{ns:<20}")))));
             tip.push('\n');
         }
         // Stated once for the section, not appended to every ✗ row.

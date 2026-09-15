@@ -55,7 +55,12 @@ impl Keepass {
             // --object-path <resolved>` once even that parsing shows up.
             mon: MonitorChild::new(
                 "busctl",
-                &["--user", "monitor", "--json=short", "org.freedesktop.secrets"],
+                &[
+                    "--user",
+                    "monitor",
+                    "--json=short",
+                    "org.freedesktop.secrets",
+                ],
             ),
         }
     }

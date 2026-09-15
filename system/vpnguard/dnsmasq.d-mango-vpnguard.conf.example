@@ -1,0 +1,29 @@
+# Domain-driven bypass for mango-vpnguard's `direct` policy route.
+#
+#   sudo install -m 0644 /usr/local/share/mango-vpnguard/dnsmasq.d-mango-vpnguard.conf.example \
+#        /etc/NetworkManager/dnsmasq.d/mango-vpnguard.conf
+#
+# then put your own domains in the copy. Nothing here ships filled in: a
+# domain list is a site value, and this repo holds none.
+#
+# What it does. Every answer for a listed domain puts its A record into the
+# `bypass4` set in the ruleset's `inet vpn` table. The `marks` chain then
+# stamps 0x1 on packets to that address, and the `direct` rule sends them out
+# the physical uplink instead of the tunnel. Entries inherit the set's own 1h
+# timeout, so they expire with the answer that created them rather than
+# collecting for ever.
+#
+# Why per answer, and not a script that resolves the list on a timer: a site
+# behind a CDN rotates its addresses faster than any refresh interval, so a
+# list resolved on a timer is a list that is wrong most of the time.
+#
+# Syntax is dnsmasq's own:  /<domain>/<domain>/.../4#<family>#<table>#<set>
+# The leading `4#` keeps AAAA answers out — `bypass4` holds IPv4, and without
+# it every AAAA answer logs an error.
+
+#nftset=/example.com/example.net/4#inet#vpn#bypass4
+
+# After editing, restart NetworkManager's dnsmasq so it re-reads this file.
+# This does not drop the Wi-Fi association:
+#
+#   sudo nmcli general reload dns-full

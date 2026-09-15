@@ -895,14 +895,13 @@ mod tests {
 
         // kitty/repo-title.py prefixes kitty windows with "<repo> · title" —
         // split back into two dim/title lines instead of showing raw appid.
-        let c: Value = serde_json::from_str(
-            r#"{"appid":"kitty","title":"mango-dotfiles/ironbar · task"}"#,
-        )
-        .unwrap();
+        let c: Value =
+            serde_json::from_str(r#"{"appid":"kitty","title":"mango-dotfiles/ironbar · task"}"#)
+                .unwrap();
         let text = window_text(Some(&c));
-        assert!(text.starts_with(
-            "<span size=\"small\" alpha=\"70%\">mango-dotfiles/ironbar</span>"
-        ));
+        assert!(
+            text.starts_with("<span size=\"small\" alpha=\"70%\">mango-dotfiles/ironbar</span>")
+        );
         assert!(text.ends_with("task"));
 
         // Non-kitty apps keep their raw appid even if the title happens to

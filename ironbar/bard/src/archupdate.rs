@@ -61,11 +61,7 @@ impl AsRawFd for Archupdate {
 impl Archupdate {
     pub fn new() -> std::io::Result<Self> {
         let dir = state_dir();
-        let watch = FileWatch::new(
-            dir.join("tray_icon")
-                .to_str()
-                .expect("path is valid UTF-8"),
-        )?;
+        let watch = FileWatch::new(dir.join("tray_icon").to_str().expect("path is valid UTF-8"))?;
         Ok(Self { watch, dir })
     }
 
@@ -78,8 +74,8 @@ impl Archupdate {
     /// startup alike (T6a's `refresh()` convention: pure state reads never
     /// need a `_due` debounce).
     pub fn refresh(&self, vars: &mut Vars) {
-        let total =
-            count_lines(&self.dir.join("last_updates_check_packages")) + count_lines(&self.dir.join("last_updates_check_aur"));
+        let total = count_lines(&self.dir.join("last_updates_check_packages"))
+            + count_lines(&self.dir.join("last_updates_check_aur"));
         if total == 0 {
             vars.set("au_show", "false");
             vars.set("au_text", "");
@@ -90,8 +86,7 @@ impl Archupdate {
             vars.set(&class_key("devload#au"), "");
             return;
         }
-        let list = std::fs::read_to_string(self.dir.join("last_updates_check"))
-            .unwrap_or_default();
+        let list = std::fs::read_to_string(self.dir.join("last_updates_check")).unwrap_or_default();
         let body = list
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -124,6 +119,9 @@ mod tests {
 
     #[test]
     fn count_lines_is_zero_for_a_missing_file() {
-        assert_eq!(count_lines(std::path::Path::new("/nonexistent/does-not-exist")), 0);
+        assert_eq!(
+            count_lines(std::path::Path::new("/nonexistent/does-not-exist")),
+            0
+        );
     }
 }

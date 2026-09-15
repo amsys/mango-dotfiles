@@ -96,7 +96,8 @@ impl Vars {
     /// Records a send failure for `key` so `peek_dirty` skips it until
     /// `RETRY_COOLDOWN` elapses, instead of handing it back every flush.
     pub fn back_off(&mut self, key: &str) {
-        self.cooldown.insert(key.into(), Instant::now() + RETRY_COOLDOWN);
+        self.cooldown
+            .insert(key.into(), Instant::now() + RETRY_COOLDOWN);
     }
 
     /// Called when the ironbar socket's inode changes (restart detected) —

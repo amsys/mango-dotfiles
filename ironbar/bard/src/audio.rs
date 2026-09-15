@@ -13,7 +13,9 @@
 use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
 use crate::net::MonitorChild;
-use crate::tooltip::{bad, bar, barico, dim, esc, good, grade, row, sect, set_titled, C_EMPTY, C_GOOD};
+use crate::tooltip::{
+    bad, bar, barico, dim, esc, good, grade, row, sect, set_titled, C_EMPTY, C_GOOD,
+};
 use crate::vars::Vars;
 use serde_json::Value;
 

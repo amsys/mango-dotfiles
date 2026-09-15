@@ -703,4 +703,3 @@ mod tests {
         assert!(tip.contains("Hardware"), "DIMM section must render");
     }
 }
-

@@ -72,7 +72,10 @@ impl Keepawake {
             tip.trim_end_matches('\n').to_string(),
         );
 
-        vars.set(&class_key("inhibit"), if self.active { "active" } else { "" });
+        vars.set(
+            &class_key("inhibit"),
+            if self.active { "active" } else { "" },
+        );
     }
 }
 

@@ -1,0 +1,127 @@
+#!/usr/bin/nft -f
+#
+# vpnguard's egress guard. This file holds no address, no interface name and
+# no site value. Everything is a named set that `mango-vpnguard` fills at
+# run time. Load it once at boot; after that the guard only adds and removes
+# set elements, and never reloads the ruleset.
+#
+# The `uplinks` set is the arm switch. Both base chains accept at once when
+# the packet does not use an armed uplink, so an empty `uplinks` set is a
+# fully open machine. `arm` adds the current uplink device. `disarm` flushes
+# the set. No rule is ever added or deleted to change state.
+#
+# Both base chains use `policy drop`. A partial load therefore blocks, and
+# never opens. The loader unit runs before `network-pre.target`, so no
+# interface comes up until this table exists.
+#
+# This table is its own. It does not read or write ufw's tables, and ufw
+# does not read or write this one. Netfilter runs every base chain on a
+# hook, and one drop is final, so a packet must pass both.
+
+table inet vpn {
+	# Armed uplink devices. Empty means the guard is off.
+	set uplinks {
+		type ifname
+	}
+
+	# Armed uplinks that are also in portal mode. A subset of `uplinks`.
+	# Portal mode opens DNS and HTTP to anywhere. It is real exposure and
+	# it is timed.
+	set portal {
+		type ifname
+	}
+
+	# Tunnel dial endpoints, as literal addresses. A hostname must never
+	# reach this set: an endpoint name can resolve to many addresses, and
+	# only one of them answers.
+	set endpoints4 {
+		type ipv4_addr . inet_service
+	}
+
+	# Connectivity probe hosts. TCP 80 and 443 only.
+	set probes4 {
+		type ipv4_addr
+	}
+
+	# The on-link subnet of the current uplink. `lan` mode fills it.
+	set lan4 {
+		type ipv4_addr
+		flags interval
+	}
+
+	# Destinations that leave in the clear. dnsmasq fills this set from a
+	# domain list, so entries carry a timeout and expire with the DNS
+	# answer that created them.
+	set bypass4 {
+		type ipv4_addr
+		flags interval, timeout
+		timeout 1h
+	}
+
+	# Policy-routing marks. The mark has to be on the packet BEFORE the route
+	# is chosen, and a filter chain is too late: by the time `hook output` runs
+	# at filter priority the kernel has already picked the route. A `route`
+	# chain is the one hook that re-runs the route lookup when the mark
+	# changes, which is what moves a packet off the tunnel's default route and
+	# into the `direct` table.
+	#
+	# `mango-vpnguard arm` installs the matching `ip rule`. Without that rule
+	# the mark is inert and the packet keeps the route it already had — the
+	# tunnel. That is the safe direction to fail: a bypass that silently does
+	# not bypass leaves the traffic protected, never exposed.
+	chain marks {
+		type route hook output priority mangle; policy accept;
+
+		# Destinations that leave in the clear. dnsmasq fills `bypass4` from a
+		# domain list, one answer at a time.
+		ip daddr @bypass4 meta mark set 0x1
+	}
+
+	chain output {
+		type filter hook output priority filter; policy drop;
+
+		# Not an armed uplink: loopback, every tunnel device, and every
+		# uplink while the guard is off.
+		oifname != @uplinks accept
+
+		# Marked by the bypass cgroup. Policy routing already sent it to
+		# the uplink on purpose.
+		meta mark 0x1 accept
+
+		# Bring a tunnel up.
+		udp dport 68 udp sport 67 accept
+		udp dport 67 accept
+		ip daddr . udp dport @endpoints4 accept
+
+		# Portal detection needs one plain HTTP host before any tunnel
+		# exists.
+		ip daddr @probes4 tcp dport { 80, 443 } accept
+
+		# Timed openings.
+		ip daddr @lan4 accept
+		ip daddr @bypass4 accept
+
+		oifname @portal udp dport 53 accept
+		oifname @portal tcp dport 53 accept
+		oifname @portal tcp dport { 80, 443 } accept
+
+		# IPv6 never leaves an uplink. The tunnels carry it.
+		meta nfproto ipv6 drop
+
+		counter comment "egress blocked by vpnguard"
+	}
+
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		iifname != @uplinks accept
+
+		ct state established,related accept
+		udp sport 67 udp dport 68 accept
+		ip saddr @lan4 accept
+
+		meta nfproto ipv6 drop
+
+		counter comment "ingress blocked by vpnguard"
+	}
+}

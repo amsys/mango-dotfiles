@@ -69,6 +69,20 @@ if status is-interactive
         rm -f -- "$tmp"
     end
 
+    # Run a copied bash snippet without fish parsing it. fish has no heredoc,
+    # no `export` and no `for/do/done`, so a multi-line snippet from a README
+    # fails at the prompt. Copy it, then run `bp`. The clipboard goes to bash.
+    # `bp` prints the script and asks first: the clipboard is not a trusted
+    # source, because any page you open can put a command in it.
+    function bp --description 'run the clipboard as a bash script'
+        set -l tmp (mktemp -t "bp.XXXXXX")
+        wl-paste >"$tmp"
+        cat "$tmp"
+        read -l -P 'run in bash? [y/N] ' reply
+        test "$reply" = y; and bash "$tmp"
+        rm -f -- "$tmp"
+    end
+
     # Orchestein tooling
     fish_add_path "$HOME/.local/bin"
     fish_add_path "$HOME/src/maestro"
@@ -121,4 +135,15 @@ if status is-interactive
     abbr --add tf tail -f
     abbr --add duh du -sh \* \| sort -h
     abbr --add psg ps aux \| grep -v grep \| grep
+
+    # claude, one per type of task. The cursor stops at %, inside the quotes:
+    # type the task there. docs/shell.md lists what each one is for. The model
+    # and effort come from ~/brain/Resources/model-tiers-guide.md section 7.
+    # `opus` is the 200k window on purpose: the 1M window is the expensive one.
+    abbr --add cs --set-cursor 'claude --model sonnet --permission-mode acceptEdits "%"'
+    abbr --add cw --set-cursor 'claude --model opus --effort high --permission-mode acceptEdits "/workflow-design %"'
+    abbr --add ct --set-cursor 'claude --model fable --effort xhigh --permission-mode acceptEdits "/tierplan %"'
+    abbr --add cpl --set-cursor 'claude --model opus --effort high --permission-mode plan "%"'
+    abbr --add cf --set-cursor 'claude --model fable --effort xhigh --permission-mode plan "%"'
+    abbr --add ch 'claude --model opus --effort high /handoff'
 end

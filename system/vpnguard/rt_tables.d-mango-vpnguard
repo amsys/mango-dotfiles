@@ -1,0 +1,15 @@
+# A readable name for the route table mango-vpnguard builds.
+#
+# Cosmetic only. The helper always addresses the table by its number, so a
+# missing or ignored name can never break the guard — it only makes
+# `ip route show table direct` easier to read at 3am than
+# `ip route show table 1001`.
+#
+# `ip` merges every *.conf in this directory with the packaged
+# /usr/share/iproute2/rt_tables, so this adds a name without editing a file
+# pacman owns.
+#
+# 1001  direct   a default route via the physical uplink's own gateway.
+#                Packets the ruleset's `marks` chain stamps 0x1 are sent
+#                here instead of down the tunnel's default route.
+1001	direct

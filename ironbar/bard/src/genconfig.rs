@@ -1893,7 +1893,9 @@ mod tests {
             );
         }
         let fallback = build(&[]);
-        assert!(!serde_json::to_string(&fallback).unwrap().contains("remote.sh --pull"));
+        assert!(!serde_json::to_string(&fallback)
+            .unwrap()
+            .contains("remote.sh --pull"));
 
         let edp_start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let edp_names: Vec<&str> = edp_start
@@ -1934,24 +1936,39 @@ mod tests {
         assert_eq!(names, expected);
 
         let home = &start[0];
-        assert_eq!(home["on_click_left"], json!("~/.config/ironbar/scripts/remote.sh --restore"));
+        assert_eq!(
+            home["on_click_left"],
+            json!("~/.config/ironbar/scripts/remote.sh --restore")
+        );
 
         for pill in start.iter().filter(|m| {
             let n = m["name"].as_str().unwrap();
-            n.starts_with("ws-eDP-1-") && n != "ws-eDP-1-name" || n.starts_with("ws-DP-1-") && n != "ws-DP-1-name"
+            n.starts_with("ws-eDP-1-") && n != "ws-eDP-1-name"
+                || n.starts_with("ws-DP-1-") && n != "ws-DP-1-name"
         }) {
             let name = pill["name"].as_str().unwrap();
             let (mon, tag) = name.strip_prefix("ws-").unwrap().rsplit_once('-').unwrap();
             assert_eq!(
                 pill["on_click_left"],
-                json!(format!("~/.config/ironbar/scripts/remote.sh --pull {mon} {tag}"))
+                json!(format!(
+                    "~/.config/ironbar/scripts/remote.sh --pull {mon} {tag}"
+                ))
             );
-            assert!(pill.get("show_if").is_none(), "{name} must not be show_if-gated — see genconfig.rs's remote_pills doc comment");
-            assert!(pill.get("on_scroll_up").is_none(), "{name} must not scroll the viewer's own headless view");
+            assert!(
+                pill.get("show_if").is_none(),
+                "{name} must not be show_if-gated — see genconfig.rs's remote_pills doc comment"
+            );
+            assert!(
+                pill.get("on_scroll_up").is_none(),
+                "{name} must not scroll the viewer's own headless view"
+            );
             assert!(pill.get("on_scroll_down").is_none());
         }
 
-        assert!(!names.iter().any(|n| n.ends_with("-ov")), "no overview pill on the remote strip");
+        assert!(
+            !names.iter().any(|n| n.ends_with("-ov")),
+            "no overview pill on the remote strip"
+        );
     }
 
     #[test]
@@ -1985,10 +2002,7 @@ mod tests {
         assert_eq!(names.first(), Some(&"spark"));
         assert_eq!(names.last(), Some(&"win"));
         for name in ["sysload", "devload", "battery", "music"] {
-            assert!(
-                !names.contains(&name),
-                "{name} must not still be in start"
-            );
+            assert!(!names.contains(&name), "{name} must not still be in start");
         }
     }
 
@@ -2026,11 +2040,34 @@ mod tests {
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let mut names = HashSet::new();
-        collect_module_names(&json!({"start": start, "center": center, "end": end}), &mut names);
+        collect_module_names(
+            &json!({"start": start, "center": center, "end": end}),
+            &mut names,
+        );
         let expected = [
-            "spark", "win", "clock", "date", "pomo", "tray", "sysload", "battery", "devload",
-            "colorpicker", "darkmode", "snip", "inhibit", "music", "volume",
-            "mic", "net-spinner", "wifi", "eth", "netsec", "hotspot", "remote", "bluetooth",
+            "spark",
+            "win",
+            "clock",
+            "date",
+            "pomo",
+            "tray",
+            "sysload",
+            "battery",
+            "devload",
+            "colorpicker",
+            "darkmode",
+            "snip",
+            "inhibit",
+            "music",
+            "volume",
+            "mic",
+            "net-spinner",
+            "wifi",
+            "eth",
+            "netsec",
+            "hotspot",
+            "remote",
+            "bluetooth",
             "power",
             // T28: the pill promoted out of the tray drawer it gates
             // (T29: `archupdate` is no longer one of these — it folded
@@ -2112,7 +2149,10 @@ mod tests {
             assert_eq!(button["on_mouse_enter"], devload["on_mouse_enter"]);
             assert_eq!(button["on_mouse_exit"], devload["on_mouse_exit"]);
         }
-        let docker_cell = svc_cells.iter().find(|c| c["class"] == "cell-docker").unwrap();
+        let docker_cell = svc_cells
+            .iter()
+            .find(|c| c["class"] == "cell-docker")
+            .unwrap();
         assert_eq!(
             docker_cell["on_click_right"],
             json!("~/.config/ironbar/scripts/docker-menu.sh")
@@ -2810,7 +2850,9 @@ mod tests {
         }
         {
             let devload = end.iter().find(|m| m["name"] == "devload").unwrap();
-            let svc_cells = devload["bar"][0]["widgets"][1]["widgets"].as_array().unwrap();
+            let svc_cells = devload["bar"][0]["widgets"][1]["widgets"]
+                .as_array()
+                .unwrap();
             for cell in svc_cells {
                 if let Some(click) = cell.get("on_click_left").and_then(|v| v.as_str()) {
                     assert!(
@@ -2854,7 +2896,10 @@ mod tests {
             let claude_row = rows.iter().find(|r| r["class"] == "row-claude").unwrap();
             assert!(claude_row.get("on_click_left").is_none());
             let svc_cells = rows[1]["widgets"].as_array().unwrap();
-            let docker_cell = svc_cells.iter().find(|c| c["class"] == "cell-docker").unwrap();
+            let docker_cell = svc_cells
+                .iter()
+                .find(|c| c["class"] == "cell-docker")
+                .unwrap();
             assert!(docker_cell.get("on_click_left").is_none());
         }
         let clock = center.iter().find(|m| m["name"] == "clock").unwrap();

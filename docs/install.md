@@ -93,8 +93,9 @@ The config installer obeys these rules:
   binary at `~/.local/bin/mango-bard`. The script does not make a symlink to
   the build output, because that output is not permanent.
   `ironbar/bard/target/` is in `.gitignore`, and `$CARGO_HOME/config.toml`
-  can send the build to tmpfs. A symlink to the build output dies at the
-  next reboot, and the bar does not start. The script skips the build when
+  sends the build to tmpfs. A symlink to the build output dies at the
+  next reboot, and the bar does not start. See [shell.md](shell.md) for that
+  file and for the debug-info settings. The script skips the build when
   the installed binary is newer than the sources.
 - Links the systemd user units. Enables the five that mango starts at login:
   `mango-bard`, `ironbar`, `mango-sleep-lock`, `mango-powerkey` and
@@ -144,10 +145,11 @@ its own root script. The installer never symlinks these directories:
 | `system/powermode/` | the root helper that writes the CPU and PCI power knobs | [power.md](power.md) |
 | `system/rapl/` | read access to the RAPL power counters, and a powertop sudo rule | [power.md](power.md) |
 | `system/fprint-notify/` | the root helper and the icon that show a notification for each fingerprint request. The script prints the two PAM lines, but it does not edit `/etc/pam.d/sudo` | [security.md](security.md) |
-| `system/vault/` | the udev rule that gives the active seat an ACL on the Power Button evdev node. `mango-powerkey` then works after you leave the `input` group | — |
+| `system/vault/` | the udev rule that gives the active seat an ACL on the Power Button evdev node. `mango-powerkey` then works after you leave the `input` group. Also holds `vault-session`, the wallet sandbox launcher, which `install-config.sh` links to `~/.local/bin/` | — |
 | `system/hotspot/` | the Wi-Fi hotspot helper | — |
 | `system/remote/` | the remote access units (wayvnc, KDE Connect) | — |
 | `system/i915/` | the GPU compute timeout udev rules | — |
+| `system/memtune/` | the zram size, the swap readahead, the dirty-page caps, and the sysfs write that turns zswap off. zswap runs in front of zram by default and compresses each page before zram sees it | — |
 | `system/libvirt-net/` | the libvirt network config | its own README |
 | `system/vpnguard/` | the fail-closed egress and the WireGuard failover. The membership and the order come from the `connection.autoconnect-priority` property of NetworkManager. There is no config file and no hardcoded VPN | its own README |
 
@@ -227,7 +229,18 @@ steps after the first install:
       suspend instead. To enable hibernate, make a swapfile larger than the
       RAM. Then add `resume=` and `resume_offset=` to the kernel command
       line. Add the `resume` hook to `mkinitcpio.conf`.
-- [ ] These files are not tracked yet: `~/.config/autostart/`,
+- [ ] Two OOM daemons run on this machine: `systemd-oomd` and `nohang`. Keep
+      `nohang` and stop the other one. `systemd-oomd` kills a full cgroup.
+      Under `user.slice` that cgroup is the graphical session. `nohang` kills
+      one process, which is the correct result here. Run
+      `sudo systemctl disable --now systemd-oomd.service`. Then set
+      `zram_checking_enabled = True` in `/etc/nohang/nohang.conf` and restart
+      `nohang`. The stock file sets `False`, so `nohang` does not look at
+      zram. Almost all swap on this machine is zram. The
+      `soft_threshold_max_zram` and `hard_threshold_max_zram` limits in that
+      same file stay unused while the flag is `False`.
+- [ ] These files are not tracked yet: `$CARGO_HOME/config.toml` (see
+      [shell.md](shell.md)), `~/.config/autostart/`,
       `~/.config/environment.d/`, `~/.config/mimeapps.list`, the custom
       `.desktop` files, the KDE app rc files, `{chrome,code}-flags.conf`,
       and `Code/User/settings.json`.

@@ -1,0 +1,28 @@
+# Loads vpnguard's nftables table at boot, before any interface comes up.
+#
+# The table loads inert: every set is empty, and both base chains accept a
+# packet at once when its interface is not in the `uplinks` set. So a machine
+# that boots with this unit and never arms behaves exactly like a machine
+# without it.
+#
+# The unit does not gate the network. If the load fails, NetworkManager still
+# starts and the machine is open — the same as disarmed. Fail-closed lives in
+# `mango-vpnguard arm`, which calls the same loader and refuses to arm if the
+# table cannot be loaded. A boot-time hard gate would trade a firewall bug for
+# an unreachable laptop, which is the worse failure.
+
+[Unit]
+Description=vpnguard nftables egress guard
+Documentation=file:/usr/local/share/mango-vpnguard/vpn.nft
+Wants=network-pre.target
+Before=network-pre.target
+ConditionPathExists=/usr/local/share/mango-vpnguard/vpn.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nft -f /usr/local/share/mango-vpnguard/vpn.nft
+ExecStop=/usr/bin/nft delete table inet vpn
+
+[Install]
+WantedBy=network-pre.target

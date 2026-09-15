@@ -68,6 +68,143 @@ ordinary profiles instead of a second concept.
   checked with `wg show <dev> latest-handshakes` — NM reports "activated"
   for a link that has never handshaked, so its exit code is not trusted.
 
+## Enforcement is one nftables table
+
+The guard is `table inet vpn`, loaded from
+`/usr/local/share/mango-vpnguard/vpn.nft` by
+`mango-vpnguard-nft.service` before any interface comes up. The file holds
+no address, no interface name and no site value: every value is a named set
+that this helper fills at run time.
+
+`uplinks` is the arm switch. Both base chains accept a packet at once when
+its interface is not in that set, so an empty `uplinks` is an open machine
+and a filled one is a closed machine. Arming, portal mode and every timed
+opening add or remove set elements — the ruleset itself is never reloaded
+after boot.
+
+Both base chains use `policy drop`, so a partial load blocks rather than
+opens. `arm` calls the loader itself and refuses to arm when the table
+cannot be loaded; the boot unit deliberately does not gate the network,
+because trading a firewall bug for an unreachable laptop is the worse
+failure.
+
+The table is its own. It never reads or writes another firewall's rules and
+no other firewall reads or writes it. Netfilter runs every base chain on a
+hook and one drop is final, so a packet must pass both. `ufw` is therefore
+irrelevant to the guard, whether it is enabled or not.
+
+Order matters inside `arm`: every hole is punched first and `uplinks` is
+written last. Arming first would close the machine for as long as it takes
+to write the endpoint holes, and that window kills the tunnel being dialled.
+
+## Policy routing: the `direct` lane
+
+Some traffic has to leave in the clear even while the guard is closed — a
+speed test, a video-call SFU that a VPN address gets throttled on. That is a
+routing decision, not a firewall decision, so it takes two halves.
+
+The ruleset's `marks` chain sets mark `0x1` on packets to any address in
+`bypass4`. It is a `route` chain, not a filter chain, and that is the whole
+point: at filter priority the kernel has already chosen the route, while a
+`route` chain re-runs the route lookup when the mark changes.
+
+`arm` supplies the other half — route table `direct`, holding one default via
+the physical uplink's own gateway, and the `ip rule` that sends marked packets
+to it. `disarm` removes both.
+
+Two consequences worth knowing:
+
+- `arm` reads that gateway **while the uplink's own default route is still the
+  machine's default route**, before any tunnel is dialled. It re-reads it on
+  every uplink change, so the table can never hold a gateway from the last
+  network.
+- If the uplink has no gateway to fall back to, `arm` says so and installs no
+  rule at all. A marked packet then keeps the route it already had — the
+  tunnel. The bypass silently stops working, and nothing leaks. That is the
+  right way round to fail, and it is the way it fails whenever anything in
+  this lane goes wrong.
+
+The table id and rule priority are fixed numbers with no site meaning.
+`rt_tables.d-mango-vpnguard` only gives the id a readable name; the helper
+addresses the table by number, so a missing name cannot break anything.
+
+## Bypassing the tunnel by domain
+
+`bypass4` starts empty and nothing in this repo fills it. Filling it by hand
+works (`nft add element inet vpn bypass4 { 203.0.113.5 }`), but the case that
+matters is a domain, not an address: a site behind a CDN rotates its addresses
+faster than any refresh interval, so a list resolved on a timer is a list that
+is wrong most of the time. The set has to be filled per DNS answer.
+
+dnsmasq does that natively with `nftset=`. systemd-resolved has no equivalent,
+so this is opt-in and it switches the machine's resolver:
+
+```
+# 1. Point NetworkManager at dnsmasq. Change the `dns=` line that is already
+#    there. Do NOT add a new drop-in: conf.d files merge in alphabetical
+#    order and the LAST one wins, so a new file whose name sorts earlier than
+#    the existing one is read and then silently overridden. Find the file:
+grep -rn '^dns=' /etc/NetworkManager/
+#    set that line to `dns=dnsmasq`, then confirm NM's merged view agrees:
+NetworkManager --print-config | sed -n '/^\[main\]/,/^\[/p' | grep '^dns='
+
+# 2. systemd-resolved has to stop owning /etc/resolv.conf first. NM then
+#    writes its own (rc-manager=symlink) — but only if nothing is in the way.
+sudo systemctl disable --now systemd-resolved
+sudo rm /etc/resolv.conf
+
+# 3. Your domains.
+sudo install -m 0644 /usr/local/share/mango-vpnguard/dnsmasq.d-mango-vpnguard.conf.example \
+     /etc/NetworkManager/dnsmasq.d/mango-vpnguard.conf
+sudoedit /etc/NetworkManager/dnsmasq.d/mango-vpnguard.conf
+
+# 4. Swap the plugin in place. This does NOT restart NetworkManager and does
+#    NOT drop the Wi-Fi association, which matters on someone else's network.
+sudo nmcli general reload conf
+sudo nmcli general reload dns-full
+```
+
+Steps 1, 3 and 4 change nothing about the system resolver: dnsmasq comes up
+on 127.0.0.1 while whatever owns `/etc/resolv.conf` keeps owning it. So the
+whole chain can be proved before committing to anything —
+`dig @127.0.0.1 <a listed domain>`, then
+`sudo nft list set inet vpn bypass4` to see the answer land in the set. Do
+step 2 only once that works.
+
+NetworkManager keeps generating per-connection DNS under `dns=dnsmasq`,
+including split DNS for a gateway's private domains, so that stays NM's job
+and stays out of this repo.
+
+Three things to check afterwards, because each fails quietly in its own way:
+
+- `ps -o user,args -C dnsmasq` — NetworkManager starts dnsmasq as root and it
+  drops to `nobody`, keeping only `CAP_NET_ADMIN`, which is what writing an
+  nftables set needs. dnsmasq asks for that capability only when a `nftset=`
+  line is present, and refuses to start without it rather than failing
+  silently: `process is missing required capability CAP_NET_ADMIN`.
+- The table must exist before dnsmasq starts, or every answer logs an error.
+  `mango-vpnguard-nft.service` runs before `network-pre.target`, so it is
+  already ordered ahead of NetworkManager.
+- Split DNS moves with the plugin, but NM pushes it over D-Bus rather than
+  writing it to a file, so there is nothing to read in `dnsmasq.d`. Confirm
+  it in the journal instead — `journalctl -u NetworkManager | grep "using
+  nameserver"` prints one unambiguous line per routed domain.
+- `resolvectl` is gone with resolved. Read DNS state with
+  `nmcli device show <dev> | grep IP4.DNS` instead.
+
+Rollback, in this order:
+
+```
+sudo sed -i 's/^dns=dnsmasq/dns=systemd-resolved/' <the file from step 1>
+sudo systemctl enable --now systemd-resolved
+sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+sudo systemctl restart NetworkManager
+```
+
+The symlink has to go back by hand. systemd ships it as `L!` in
+`tmpfiles.d/systemd-resolve.conf`, and `!` means boot-only — a runtime
+`systemd-tmpfiles --create` will not recreate it.
+
 ## States
 
 Written to `/run/mango-vpnguard/state` (world-readable, no root needed to
@@ -79,7 +216,7 @@ read it — `net.sh` and `mango-bard` poll this file directly):
 | `blocked` | LAN + DHCP + every managed profile's dial endpoint | none | blocked — nothing can leave until a tunnel connects |
 | `portal` | `blocked` plus DNS and tcp/80,443 to anywhere | uplink (temporary) | sign-in needed — captive portal on this network |
 | `vpn:<name>` | out the winning connection's device, scoped to its `allowed-ips`; any always-on companion up too | that device | protected — `<name>` |
-| `unsecured` | ufw restored to whatever it was before the first `arm` | uplink | not protected — traffic is leaving in the clear |
+| `unsecured` | guard open — every set empty, nothing denied | uplink | not protected — traffic is leaving in the clear |
 
 `unsecure` and `disarm` both land on `unsecured` — one remembers the network
 so a later `auto` on it stays out of the way, the other does not. Either way,
@@ -88,9 +225,9 @@ network, without waiting for a network change.
 
 ## Docker containers are covered too
 
-`ufw`'s deny-outgoing only governs the host's own traffic. A running
+The guard's output chain only governs the host's own traffic. A running
 container's egress is *forwarded*, and Docker inserts its own rules ahead of
-ufw's in the kernel's forward chain — `blocked` would otherwise mean nothing
+the guard's in the kernel's forward chain — `blocked` would otherwise mean nothing
 to `docker run`. `arm` adds a private `MANGO-VPNGUARD` chain jumped from
 `DOCKER-USER` (both `iptables` and `ip6tables`), dropping container egress
 out the physical uplink; once a tunnel wins, a `RETURN` rule for that
@@ -118,6 +255,46 @@ outside the watchdog entirely. `MANGO_VG_BUDGET` (default 90s) is a backstop
 inside `mango-vpnguard auto` itself, not the primary mechanism — it stops a
 pathological chain (far more entries than anyone would configure) from
 dialling forever.
+
+## HTTPS captive portals
+
+A portal cannot intercept HTTPS: TLS interception fails certificate
+validation. An "HTTPS portal" intercepts over plain HTTP or DNS and serves
+only its *login page* over HTTPS, on its own hostname.
+
+Two rules follow. Detection must use plain HTTP — an HTTPS probe against a
+portal returns a TLS error, which cannot be told apart from network-down,
+DPI-blocking or server-down, while an HTTP probe returns an unambiguous 302
+against 204. Login must have 443 open as well as 80, plus DNS, because the
+portal's own hostname usually resolves only through the portal's resolver.
+`portal` state opens exactly those three.
+
+A portal that hijacks DNS and does not redirect HTTP shows up as
+connectivity `limited` or `none`, not `portal`. That case cannot be
+detected; it needs `portal` by hand.
+
+NetworkManager requests the RFC 8910 captive-portal URI (DHCP option 114)
+and hands it to the dispatcher as `DHCP4_CAPTIVE_PORTAL` when the network
+sends it. Most networks do not.
+
+### The probe needs a hole, and the hole follows NM
+
+A closed guard blocks NM's own connectivity check too, and NM can then never
+report `portal`. So `arm` opens tcp/80 and tcp/443 to the probe host, and it
+reads that host from NM itself — `NetworkManager --print-config`, the merged
+view of every `conf.d` drop-in, section `[connectivity]`, key `uri`. No probe
+address is written in this repo: whichever host you configure is the host
+that gets the hole.
+
+Point that URI at a host you own. A third-party probe host is a hole in the
+guard to a machine you do not control, and it tells that machine every
+network you join.
+
+The hole is resolved at arm time, while the guard is still open, because a
+closed guard has no DNS left to resolve it with. `arm` says so and continues
+when there is no usable probe: the URI is unset, its host does not resolve to
+IPv4, it is an IPv6 literal, or it carries a port other than 80 or 443. The
+guard still protects the machine; only portal detection is lost.
 
 ## The portal window is real exposure
 
@@ -180,5 +357,4 @@ sudo rm /usr/local/bin/mango-vpnguard /etc/sudoers.d/mango-vpnguard \
 ```
 
 Every WireGuard profile stays exactly as it was — vpnguard never created,
-cloned or modified one (beyond `apply_routes`' scoped `ufw` rules, which
-`disarm` already tears down), so there is nothing further to remove.
+cloned or modified one, so there is nothing further to remove.

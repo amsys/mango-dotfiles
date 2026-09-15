@@ -95,8 +95,7 @@ pub fn reload_palette() {
     let state_home = std::env::var("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".local/state")
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state")
         });
     let path = state_home.join("mango/generated/colors.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -351,7 +350,10 @@ pub(crate) const TITLED: &[&str] = &[
 /// a body line other lines get joined under.
 pub fn set_titled(vars: &mut Vars, key: &str, title_text: &str, body: String) {
     let title_key = format!("{key}_title");
-    vars.set(&title_key, title(title_text).trim_end_matches('\n').to_string());
+    vars.set(
+        &title_key,
+        title(title_text).trim_end_matches('\n').to_string(),
+    );
     vars.set(key, body);
 }
 

@@ -44,9 +44,11 @@
 #   --vnc-exec         wayvnc.service ExecStart — exec wayvnc, capturing
 #                      the virtual output when one is recorded
 #   --privacy-watch    wayvnc-privacy.service ExecStart — blanks every
-#                      output for as long as a VNC client is connected
+#                      output for as long as a VNC client is connected,
+#                      and pauses a running pomodoro block for that time
 #   --privacy-restore  wayvnc-privacy.service ExecStopPost — undoes a
-#                      blank left over by a crashed/killed watcher
+#                      blank left over by a crashed/killed watcher, and
+#                      releases the pomodoro pause if this script holds it
 #   --idle-wake        hypridle's 600s on-resume — skips turning the
 #                       panels back on while privacy blanking is active
 set -u
@@ -54,6 +56,12 @@ set -u
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mango-remote"
 WLOPM_STATE="$RUNTIME_DIR/wlopm-state"
 KEEPAWAKE_MARK="$RUNTIME_DIR/keepawake-ours"
+# Exists only while *this* script holds the pomodoro pause. `mango-bard pomo
+# pause` answers "ok" when it paused a running block and "noop" when there was
+# nothing to pause, so only "ok" is ours to undo on disconnect — the same
+# ownership rule sleep-lock.py applies across a suspend. A file, not a shell
+# variable: the connect branch runs in a `while read` subshell.
+POMO_PAUSED="$RUNTIME_DIR/pomo-paused"
 # Name of the virtual output (HEADLESS-<n>). wlroots increments <n> on every
 # create in one compositor run and never reuses a name, so the name must be
 # discovered after each create, never hardcoded.
@@ -296,6 +304,12 @@ case "${1:-}" in
 				[ -e "$WLOPM_STATE" ] && continue
 				wlopm -j >"$WLOPM_STATE.tmp" 2>/dev/null && mv "$WLOPM_STATE.tmp" "$WLOPM_STATE"
 				wlopm --off '*'
+				# The panels are dark and the user is remote, so a work
+				# block's bell would ring in an empty room. A daemon that
+				# is down answers nothing: no marker, nothing resumed.
+				if [ "$(mango-bard pomo pause 2>/dev/null)" = ok ]; then
+					: >"$POMO_PAUSED"
+				fi
 				;;
 			*client-disconnected*)
 				[ -n "$(wayvncctl -j client-list 2>/dev/null | jq -c '.[]' 2>/dev/null)" ] && continue
@@ -308,6 +322,14 @@ case "${1:-}" in
 	done
 	;;
 --privacy-restore)
+	# Before the blank check: the pomodoro release must not depend on
+	# whether the panels are still recorded as blanked. This runs on
+	# ExecStopPost too, so a killed watcher does not strand a paused
+	# block the way it would strand a dark panel.
+	if [ -e "$POMO_PAUSED" ]; then
+		mango-bard pomo unpause -q 2>/dev/null || true
+		rm -f "$POMO_PAUSED"
+	fi
 	[ -e "$WLOPM_STATE" ] || exit 0
 	jq -r '.[] | select(."power-mode" == "on") | .output' "$WLOPM_STATE" 2>/dev/null |
 		while IFS= read -r output; do wlopm --on "$output"; done

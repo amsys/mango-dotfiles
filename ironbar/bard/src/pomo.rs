@@ -22,6 +22,7 @@
 use crate::clock::format_epoch;
 use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
+use crate::remote;
 use crate::sys::ClockTimer;
 use crate::tooltip;
 use crate::vars::Vars;
@@ -575,9 +576,13 @@ impl Pomo {
             // clock.sh's version: it fires only after an idle-timeout lock,
             // not a manual SUPER+L lock, since only the idle listener has an
             // on-resume hook to wire this to. Only starts while idle, same
-            // guard clock.sh's autostart() had.
+            // guard clock.sh's autostart() had, and never while a VNC client
+            // is connected: remote input resets that same idle listener, so
+            // the autostart would fire for a user who is not at the desk and
+            // ring the work bell in an empty room. An explicit `start` or a
+            // pill click from the remote session still works.
             "unlock" => {
-                if self.state == Run::Idle {
+                if autostart_allowed(self.state, remote::vnc_client_connected()) {
                     self.begin_work(n, None, vars).await;
                     self.notify(
                         "low",
@@ -890,6 +895,13 @@ impl Pomo {
     }
 }
 
+/// The `unlock` autostart rule, split out of `control()` so it can be tested
+/// without a filesystem: only from `Idle`, and never while a VNC client holds
+/// the session (see `remote::vnc_client_connected`).
+fn autostart_allowed(state: Run, vnc: bool) -> bool {
+    state == Run::Idle && !vnc
+}
+
 /// Fires a helper script in `mango/scripts/` detached from the daemon —
 /// same shape as `claude::spawn_fetch`'s doc comment: must never be awaited
 /// inline, since `focus-break.sh`'s rofi overlay and `focus-resume.sh`'s
@@ -944,6 +956,16 @@ mod tests {
         let c = cfg();
         assert_eq!(c.next_phase(Phase::Short, 3), Phase::Work);
         assert_eq!(c.next_phase(Phase::Long, 4), Phase::Work);
+    }
+
+    // The VNC guard: hypridle's on-resume fires for remote input too, so an
+    // autostart while a client is connected would ring in an empty room.
+    #[test]
+    fn unlock_autostarts_only_when_idle_and_no_vnc_client() {
+        assert!(autostart_allowed(Run::Idle, false));
+        assert!(!autostart_allowed(Run::Idle, true));
+        assert!(!autostart_allowed(Run::Running, false));
+        assert!(!autostart_allowed(Run::Pause, false));
     }
 
     fn pomo() -> Pomo {

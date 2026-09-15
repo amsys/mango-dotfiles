@@ -118,10 +118,9 @@ $geometry"
 	printf '%s' "$key" >"$SPAN_DIR/span.key"
 }
 
-# Nothing re-runs this script on monitor hotplug today (one exec-once at
-# login, one SUPER+W bind) — a newly plugged monitor needs SUPER+W pressed
-# once to pick up its own tile, same as ironbar already needs for its own
-# per-monitor bars. Known limitation, not a watcher: YAGNI until it bites.
+# watch_outputs() below re-runs this on every output change, so a plugged
+# monitor picks up its own tile without a keypress (ironbar still needs one
+# for its own per-monitor bars).
 # awww swaps the image inside one long-lived daemon. No layer surface is
 # dropped, so a switch never shows the root color, and the change can fade.
 # config.conf puts the blurred boot image up before this script runs, so the
@@ -266,4 +265,51 @@ main() {
 	"$SCRIPT_DIR/keybinds-cheatsheet.py" >/dev/null 2>&1 || true
 }
 
-main "$@"
+# ------------------------------------------------------------ output hotplug
+
+# awww-daemon runs with --no-cache, so an output plugged in after login gets
+# no image at all and paints black — measured 2026-09-07 with the external
+# screen plugged mid-session: `awww query` answered "DP-1: color: 000000"
+# while eDP-1 held the wallpaper. Unplugging is wrong in the other
+# direction: the output that stays keeps the half-panorama tile span_tiles
+# cut for the two-monitor layout. One apply_wallpaper corrects both.
+#
+# The key counts sized outputs only. mango announces a monitor before it has
+# geometry, and applying at that moment makes span_geometry reject the
+# layout (a zero-size monitor is dropped) and fill both screens with the
+# same zoomed centre slice.
+OUTPUTS_KEY='[.monitors[] | select(.width > 0) | .name] | sort | join(",")'
+
+watch_outputs() {
+	local key prev=""
+	while :; do
+		# mmsg streams the whole monitor snapshot on tag and client changes
+		# too, hence the compare: only an output set change may re-apply.
+		while IFS= read -r key; do
+			[[ $key == "$prev" ]] && continue
+			[[ -n $prev ]] && apply_wallpaper "$(cfg '.background.wallpaperPath')"
+			prev="$key"
+		done < <(mmsg watch all-monitors 2>/dev/null | jq --unbuffered -r "$OUTPUTS_KEY")
+		# The stream ends when mango's IPC socket goes away. Reconnect here:
+		# this runs from exec-once, which has no supervisor to do it.
+		sleep 2
+	done
+}
+
+watch_outputs_test() {
+	local one two unsized
+	one='{"monitors":[{"name":"eDP-1","width":1920,"height":1080}]}'
+	two='{"monitors":[{"name":"DP-1","width":1920,"height":1080},{"name":"eDP-1","width":1920,"height":1080}]}'
+	unsized='{"monitors":[{"name":"DP-1","width":0,"height":0},{"name":"eDP-1","width":1920,"height":1080}]}'
+
+	[[ $(jq -r "$OUTPUTS_KEY" <<<"$one") == "eDP-1" ]] || { echo "FAIL: one output"; exit 1; }
+	[[ $(jq -r "$OUTPUTS_KEY" <<<"$two") == "DP-1,eDP-1" ]] || { echo "FAIL: two outputs"; exit 1; }
+	[[ $(jq -r "$OUTPUTS_KEY" <<<"$unsized") == "eDP-1" ]] || { echo "FAIL: unsized output changed the key"; exit 1; }
+	echo "ok"
+}
+
+case "${1:-}" in
+--watch-outputs) watch_outputs ;;
+--watch-outputs-test) watch_outputs_test ;;
+*) main "$@" ;;
+esac

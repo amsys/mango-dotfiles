@@ -28,6 +28,7 @@ switchwall.sh --noswitch             # re-theme, keep the wallpaper
 switchwall.sh --mode light|dark
 switchwall.sh --type scheme-tonal-spot   # or scheme-expressive, ...
 switchwall.sh --color RRGGBB         # theme from a color, no wallpaper
+switchwall.sh --watch-outputs        # started by config.conf, see below
 ```
 
 The picker (`rofi/wallpaper.sh`) shows the images in `~/Wallpapers` as a
@@ -55,8 +56,17 @@ layout within 10%, for example a 3840x1080 panorama across two 1080p
 outputs. The script then cuts one tile for each output with imagemagick, and
 it sends one `awww img -o` for each monitor. The tiles cache in
 `~/.local/state/mango/generated/wallpaper/`. A different aspect fills each
-output with the whole image. No component runs this again at a monitor
-hotplug. Press `SUPER+W` again after you connect the monitor again.
+output with the whole image.
+
+**Monitor hotplug.** `config.conf` starts `switchwall.sh --watch-outputs` at
+login. It reads the `mmsg watch all-monitors` stream, and it applies the
+wallpaper again when the set of outputs changes. Both directions need this.
+`awww-daemon` runs with `--no-cache`, thus an output which you connect after
+login has no image and shows black (`awww query` answers `color: 000000` for
+it). An output which stays after you disconnect the other one keeps a tile
+with the wrong crop. The watch counts only the outputs which have a size,
+because mango announces a monitor before it gives geometry to it. The mode
+applies the wallpaper only. It does not run matugen.
 
 After matugen, the script changes the theme *names* that matugen cannot
 recolor. These are `adw-gtk3`/`adw-gtk3-dark` for GTK and `breeze-plus`/
@@ -188,6 +198,46 @@ one. A transition with no gap is thus not possible here.
 To find which DRM device plymouth used and when, add `plymouth.debug` to the
 kernel line for one boot. Press `e` in the GRUB menu to do this. Then read
 `/var/log/plymouth-debug.log`.
+
+The 2026-09-07 debug boot shows the device and the times. plymouthd starts
+at 2.39 s. It finds `card0` (simpledrm) first and ignores it, because
+plymouth uses a simpledrm device only after the 8 s `DeviceTimeout`. udev
+adds `/dev/dri/card1` (i915) at 3.39 s. plymouth then takes that device,
+finds connector 508 (eDP-1) already lit, and paints 1920x1080 at 3.44 s.
+The screen keeps the GRUB image until that moment. plymouth drops DRM
+master at 14.69 s. Two messages in the log are normal: `label-pango.so`
+is not in the initramfs, and `fc-match` is not there either. plymouth uses
+the freetype label plugin and the bundled `Plymouth.ttf` font instead.
+
+### Reboot watchdog message
+
+At each reboot the kernel prints one line:
+
+```
+watchdog: watchdog0: watchdog did not stop!
+```
+
+This is not an error. systemd arms the hardware watchdog (`iTCO_wdt`) for
+the reboot, because `RebootWatchdogSec` is 10 min by default. It then closes
+the device without the magic character, thus the watchdog stays armed
+through the switch to `systemd-shutdown`. The kernel prints the line to tell
+you that the watchdog still runs. `systemd-shutdown` opens the device again
+and prints `Using hardware watchdog /dev/watchdog0`.
+
+The watchdog resets the machine if the reboot stops and does not complete.
+This is a laptop with a power button, thus the protection is not necessary.
+To remove the message, disable the reboot watchdog:
+
+```bash
+sudo mkdir -p /etc/systemd/system.conf.d
+printf '[Manager]\nRebootWatchdogSec=off\n' |
+	sudo tee /etc/systemd/system.conf.d/10-no-reboot-watchdog.conf
+sudo systemctl daemon-reexec   # or the message shows once more
+```
+
+PID 1 reads `system.conf` at boot. Without the `daemon-reexec`, the running
+PID 1 keeps the old value and prints the message at the next reboot. The
+setting is then correct from the boot after that.
 
 ### Boot attestation code (tpm2-totp)
 

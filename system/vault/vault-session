@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+# vault-session <command...> — run a wallet in its own Wayland compositor.
+#
+#   vault-session electrum
+#   vault-session --self-test      # check the theme sanitizers, launch nothing
+#
+# Two nested layers, each closing a different leak (VAULT.md section 4):
+#
+#   cage   is a normal Wayland client of mango, and the wallet is a client of
+#          CAGE. cage has no data-control protocol, so the wallet gets its own
+#          clipboard, separate from mango's. Measured on cage 0.3.1 on
+#          2026-09-10: cage advertises 26 globals, and
+#          zwlr_data_control_manager_v1 and ext_data_control_manager_v1 are NOT
+#          among them. cage DOES still advertise zwlr_screencopy_manager_v1,
+#          zwlr_virtual_pointer_manager_v1 and zwp_virtual_keyboard_manager_v1.
+#          Read VAULT.md section 4 for what that does and does not close.
+#   bwrap  gives the wallet a private XDG_RUNTIME_DIR, so it cannot find
+#          mango's socket by name and connect to it directly instead.
+#
+# The wallet keeps its data in ~/.vault, which is bound over $HOME. The real
+# home directory is not in the sandbox at all.
+#
+# This is anti-scraper isolation for the wallet WINDOW. It does NOT protect the
+# private keys from an attacker who already runs code as `martin`. Only a
+# hardware wallet does that — see VAULT.md section 0.
+#
+# check: vault-session --self-test
+# check: vault-session wayland-info | grep -c data_control   -> 0
+
+set -eu
+
+VAULT_HOME="$HOME/.vault"
+SANDBOX_RUNTIME="/run/vault"
+
+die() { printf 'vault-session: %s\n' "$*" >&2; exit 1; }
+
+# --- theme sanitizers -------------------------------------------------------
+#
+# Everything copied into the sandbox passes one of these. Both are whitelists:
+# a line is dropped unless it matches a shape named here. A blacklist would be
+# wrong, because the file is written by matugen today and by whoever can write
+# ~/.config tomorrow.
+#
+# This is not theoretical for kdeglobals. The real file holds
+# `TerminalApplication=kitty -1`, a command line, and `widgetStyle=Darkly`, a
+# plugin name. Colours are all the wallet needs, so a command line never
+# crosses the boundary.
+
+# Keep the appearance groups. Inside them keep a colour, a number, a boolean or
+# a plain name. Drop shell metacharacters, path separators, `..`, and the
+# KConfig `[$e]` marker, which makes KConfig expand $VARS inside a value.
+sanitize_kdeglobals() {
+	awk '
+	/^\[/ {
+		keep = ($0 ~ /^\[Colors:/) || ($0 ~ /^\[ColorEffects:/) ||
+		       ($0 == "[General]") || ($0 == "[Icons]") || ($0 == "[WM]")
+		if (keep) print
+		next
+	}
+	!keep { next }
+	!/^[A-Za-z][A-Za-z0-9_]*(\[\$e\])?=/ { next }
+	{
+		eq = index($0, "=")
+		k = substr($0, 1, eq - 1)
+		v = substr($0, eq + 1)
+		if (k == "TerminalApplication") next
+		if (index(k, "[") > 0) next
+		if (length(v) > 128) next
+		if (v ~ /[$`;|&<>()\/\\]/) next
+		if (index(v, "..") > 0) next
+		if (v ~ /^#[0-9a-fA-F]+$/ && length(v) == 7) { print; next }
+		if (v ~ /^[0-9]+$/ || v ~ /^[0-9]+\.[0-9]+$/) { print; next }
+		if (v == "true" || v == "false") { print; next }
+		if (v ~ /^[A-Za-z0-9][A-Za-z0-9 ,._+-]*$/) { print; next }
+	}' "$1"
+}
+
+# Keep colour definitions and the two prefers-color-scheme blocks that carry
+# the light and dark palettes. Everything else goes, which is how `@import`
+# and `url(...)` are refused: neither shape is on the list.
+sanitize_gtk_css() {
+	awk '
+	/^[[:space:]]*@define-color [A-Za-z0-9_-]+ (#[0-9a-fA-F]+|@[A-Za-z0-9_-]+);[[:space:]]*$/ { print; next }
+	/^[[:space:]]*@media \(prefers-color-scheme: (light|dark)\)[[:space:]]*\{[[:space:]]*$/ { print; next }
+	/^[[:space:]]*\}[[:space:]]*$/ { print; next }
+	' "$1"
+}
+
+# --- wallet program outside /usr --------------------------------------------
+#
+# An AUR -bin package often puts the program in /opt/<app> and only a symlink
+# in /usr/bin. The sandbox binds /usr but not /opt, so that link points at
+# nothing inside it, and bwrap stops with "execvp: No such file or directory".
+# feather-wallet-bin did this on 2026-09-16.
+#
+# The fix binds that one app folder read-only, never all of /opt: /opt also
+# holds unrelated programs. A program outside /usr and /opt is refused. A file
+# that this user can write is a file that an attacker who runs as this user can
+# replace, and the wallet would then start the attacker's program.
+
+# app_dir_for <resolved path> — prints nothing for a program under /usr,
+# prints /opt/<app> for a program inside /opt/<app>/, and fails otherwise.
+app_dir_for() {
+	case "$1" in
+	*..*) return 1 ;;
+	/usr/*) return 0 ;;
+	/opt/?*/?*)
+		rest=${1#/opt/}
+		printf '/opt/%s\n' "${rest%%/*}"
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# app_dir_trusted <dir> — root owns /opt, the folder and every entry in it, and
+# no group or other user can write to any of them. Symlinks are skipped,
+# because their mode bits mean nothing; a link that points outside the folder
+# is not in the sandbox anyway.
+app_dir_trusted() {
+	[ -z "$(find /opt -maxdepth 0 \( ! -user root -o -perm /022 \) -print)" ] &&
+		[ -z "$(find "$1" ! -type l \( ! -user root -o -perm /022 \) -print -quit)" ]
+}
+
+# resolve_app_dir <command> — prints the folder to bind, or nothing. Dies on a
+# program that is not a file, or that lives in a place this script refuses.
+resolve_app_dir() {
+	cmd=$(command -v -- "$1") || die "command not found: $1"
+	case "$cmd" in /*) ;; *) die "refusing '$1': it is not a program file" ;; esac
+	real=$(readlink -f -- "$cmd") || die "cannot resolve $cmd"
+	dir=$(app_dir_for "$real") || die "refusing '$1': $real is outside /usr and /opt"
+	if [ -n "$dir" ] && ! app_dir_trusted "$dir"; then
+		die "refusing '$1': root must own $dir and every file in it, with no group or other write"
+	fi
+	printf '%s' "$dir"
+}
+
+self_test() {
+	tmp=$(mktemp -d)
+	trap 'rm -rf "$tmp"' EXIT
+	fail=0
+	# check <name> <needle> <yes|no> — yes: the needle must survive.
+	check() {
+		case "$out" in
+		*"$2"*) [ "$3" = yes ] || { printf 'FAIL leaked: %s\n' "$1"; fail=1; } ;;
+		*) [ "$3" = no ] || { printf 'FAIL dropped: %s\n' "$1"; fail=1; } ;;
+		esac
+	}
+
+	cat >"$tmp/kdeglobals" <<'FIXTURE'
+[Colors:Window]
+BackgroundNormal=#131318
+BackgroundAlternate=#2a292f
+Evil=#131318; touch /tmp/pwned
+[General]
+ColorScheme=MaterialYou
+TerminalApplication=kitty -1
+fixed=JetBrainsMono Nerd Font,11,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+Sneaky[$e]=$(id)
+Traverse=../../etc/passwd
+Pipeline=x | id
+Backslash=a\b
+[Sounds]
+Theme=ocean
+[KDE]
+widgetStyle=Darkly
+FIXTURE
+	out=$(sanitize_kdeglobals "$tmp/kdeglobals")
+	check "colour value"          'BackgroundNormal=#131318' yes
+	check "font value"            'fixed=JetBrainsMono'      yes
+	check "scheme name"           'ColorScheme=MaterialYou'  yes
+	check "command line"          'TerminalApplication'      no
+	check "shell metacharacters"  'touch /tmp/pwned'         no
+	check "KConfig expansion"     'Sneaky'                   no
+	check "path traversal"        'Traverse'                 no
+	check "pipeline"              'Pipeline'                 no
+	check "backslash"             'Backslash'                no
+	check "non-appearance group"  '[Sounds]'                 no
+	check "plugin group"          '[KDE]'                    no
+
+	cat >"$tmp/gtk.css" <<'FIXTURE'
+/* comment */
+@import url("file:///home/martin/.config/keepassxc/keepassxc.ini");
+@define-color accent_color #c2c1ff;
+@define-color window_bg_color @accent_color;
+@media (prefers-color-scheme: dark) {
+@define-color view_bg_color #0e0e13;
+}
+* { background-image: url("/etc/shadow"); }
+FIXTURE
+	out=$(sanitize_gtk_css "$tmp/gtk.css")
+	check "colour define" '@define-color accent_color #c2c1ff;'          yes
+	check "colour alias"  '@define-color window_bg_color @accent_color;' yes
+	check "media block"   '@media (prefers-color-scheme: dark)'          yes
+	check "css import"    '@import'                                      no
+	check "css url"       'url('                                         no
+
+	# app_dir_for: which folder a resolved program path binds.
+	[ -z "$(app_dir_for /usr/bin/electrum)" ] || { echo "FAIL app dir: /usr program binds a folder"; fail=1; }
+	[ "$(app_dir_for /opt/feather/feather)" = /opt/feather ] || { echo "FAIL app dir: /opt program"; fail=1; }
+	[ "$(app_dir_for /opt/app/bin/run)" = /opt/app ] || { echo "FAIL app dir: nested /opt program"; fail=1; }
+	app_dir_for /home/martin/.local/bin/wallet >/dev/null && { echo "FAIL app dir: home program accepted"; fail=1; }
+	app_dir_for /opt/feather >/dev/null && { echo "FAIL app dir: bare /opt entry accepted"; fail=1; }
+	app_dir_for /opt/x/../../home/y >/dev/null && { echo "FAIL app dir: .. accepted"; fail=1; }
+	# A folder this user owns must fail the ownership check.
+	app_dir_trusted "$tmp" && { echo "FAIL app dir: user-owned folder trusted"; fail=1; }
+
+	[ "$fail" -eq 0 ] || { echo "self-test FAIL"; return 1; }
+	echo "self-test PASS"
+}
+
+[ "${1:-}" = "--self-test" ] && { self_test; exit $?; }
+
+# --clip: read one secret from stdin and put it on the SANDBOX clipboard, so
+# you paste it into the wallet with Ctrl+V instead of typing it.
+#
+#   keepassxc-cli show -sa Password ~/secrets.kdbx 'Electrum' |
+#       vault-session --clip electrum
+#
+# The secret goes from the pipe to wl-copy inside cage. It never reaches
+# mango's clipboard, so cliphist and every data-control reader on the desktop
+# never see it. It is never an argument, never an environment variable, and
+# never a file. It dies with the sandbox.
+#
+# This is only safe because cage's socket is now inside a private mount
+# namespace. Do not seed this clipboard again if that ever changes.
+CLIP="${VAULT_CLIP:-0}"
+if [ "${1:-}" = "--clip" ]; then
+	CLIP=1
+	shift
+	if [ -t 0 ]; then
+		die "--clip needs the secret on stdin, not a terminal"
+	fi
+fi
+[ $# -gt 0 ] || die "usage: ${0##*/} [--clip] <command> [args...]"
+
+# --- environment: validate every value this script interpolates -------------
+case "${HOME:-}" in /*) ;; *) die "HOME is not an absolute path" ;; esac
+[ -d "$HOME" ] || die "HOME is not a directory"
+
+if [ "${VAULT_SESSION_INNER:-}" != 1 ]; then
+	CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+	case "$CONFIG_HOME" in
+	/*) ;;
+	*) die "XDG_CONFIG_HOME is not an absolute path: $CONFIG_HOME" ;;
+	esac
+	case "$CONFIG_HOME" in
+	*..*) die "XDG_CONFIG_HOME contains ..: $CONFIG_HOME" ;;
+	esac
+
+	mkdir -p "$VAULT_HOME"
+	chmod 700 "$VAULT_HOME"
+
+	# Theme. matugen writes the wallpaper palette into ~/.config/kdeglobals
+	# and the two gtk.css files, and the desktop reads them through
+	# QT_QPA_PLATFORMTHEME=kde (mango/config.conf). Copy those files into the
+	# vault home at each start, so the wallet follows the light/dark switch.
+	#
+	# Feather links Qt statically, so it cannot load plasma-integration. It
+	# uses the QKdeTheme class inside its own QtGui instead. That class reads
+	# kdeglobals only when KDE_SESSION_VERSION is 5 or more (qtbase 6.9.0,
+	# qgenericunixthemes.cpp, createKdeTheme). The bwrap call below sets it.
+	#
+	# A copy, not a bind mount, for two reasons. A bind of a single file pins
+	# that inode, so the sandbox keeps the OLD colours after matugen replaces
+	# the file. And a copy keeps the real ~/.config out of the sandbox: only
+	# these files go in, never the directory that holds them.
+	#
+	# The desktop portal route (org.freedesktop.portal.Settings,
+	# org.freedesktop.appearance color-scheme) is refused on purpose. It needs
+	# the session bus, and that same bus carries the Secret Service. Section
+	# 5b item 3 of VAULT.md shows those reads are silent and unprompted, so
+	# the bus must stay out of the sandbox.
+	for rel in kdeglobals gtk-3.0/gtk.css gtk-4.0/gtk.css; do
+		src="$CONFIG_HOME/$rel"
+		# A symlink points wherever its owner wants. Copy real files only,
+		# and only files this user owns.
+		[ -L "$src" ] && { printf 'vault-session: skip %s: it is a symlink\n' "$rel" >&2; continue; }
+		[ -f "$src" ] || continue
+		[ -O "$src" ] || { printf 'vault-session: skip %s: not owned by you\n' "$rel" >&2; continue; }
+		dst="$VAULT_HOME/.config/$rel"
+		# dirname, not ${rel%/*}: for a name with no slash that expansion
+		# returns the name itself, and mkdir then makes a DIRECTORY called
+		# kdeglobals for the file to hide under.
+		mkdir -p "$(dirname "$dst")"
+		case "$rel" in
+		kdeglobals) sanitize_kdeglobals "$src" >"$dst.new" ;;
+		*.css) sanitize_gtk_css "$src" >"$dst.new" ;;
+		*) die "no sanitizer for $rel" ;;
+		esac
+		mv -f "$dst.new" "$dst"
+	done
+
+	# Outer layer, still a client of mango. cage picks its Wayland backend
+	# because WAYLAND_DISPLAY is set, so it draws into ONE mango window
+	# instead of taking a VT. It needs no seatd and no /dev/input for that —
+	# ignore the seatd and polkit advice in the cage post-install message.
+	command -v cage >/dev/null || die "cage is not installed"
+	# Check the program here, before cage opens a window, and only here. The
+	# inner layer runs inside the bwrap below, which is a user namespace: root's
+	# files show uid 65534 (nobody) there, so every file would fail the
+	# ownership check. Measured 2026-09-16 on /opt/feather: uid 0 outside,
+	# 65534 inside.
+	APP_DIR=$(resolve_app_dir "$1")
+
+	# cage runs in a mount namespace of its own, and this is load bearing.
+	# cage puts its socket in XDG_RUNTIME_DIR. Left in /run/user/1000, that
+	# socket is connectable by every process of this user, and a client that
+	# connects there READS THE WALLET'S CLIPBOARD. Measured 2026-09-10: an
+	# outside `wl-paste` against cage's socket returned the text copied inside
+	# the sandbox, three times out of three. The wallet's own clipboard is
+	# where a seed phrase or an address lands, so that socket must not be
+	# reachable.
+	#
+	# The tmpfs below replaces that directory for cage and its children only,
+	# so cage creates its socket inside a mount no other process can see. The
+	# directory on the host stays empty.
+	#
+	# mango's own socket is bound in under the name `mango`, not under its
+	# real name: cage must still reach mango, and a different name stops cage
+	# from finding the name taken when it creates its own socket.
+	case "${WAYLAND_DISPLAY:-}" in
+	wayland-[0-9] | wayland-[0-9][0-9]) ;;
+	*) die "refusing WAYLAND_DISPLAY '${WAYLAND_DISPLAY:-}': expected wayland-N" ;;
+	esac
+	case "${XDG_RUNTIME_DIR:-}" in /*) ;; *) die "XDG_RUNTIME_DIR is not an absolute path" ;; esac
+	[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] || die "no mango socket at $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+	CAGE_RUNTIME="$XDG_RUNTIME_DIR/vault-cage"
+	mkdir -p "$CAGE_RUNTIME"
+	chmod 700 "$CAGE_RUNTIME"
+
+	VAULT_SESSION_INNER=1 VAULT_CLIP="$CLIP" VAULT_APP_DIR="$APP_DIR" exec bwrap \
+		--dev-bind / / \
+		--die-with-parent \
+		--perms 0700 --tmpfs "$CAGE_RUNTIME" \
+		--ro-bind "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$CAGE_RUNTIME/mango" \
+		--setenv XDG_RUNTIME_DIR "$CAGE_RUNTIME" \
+		--setenv WAYLAND_DISPLAY mango \
+		-- cage -- "$0" "$@"
+fi
+
+# Inner layer, a client of cage. WAYLAND_DISPLAY now names CAGE's socket.
+case "${XDG_RUNTIME_DIR:-}" in /*) ;; *) die "XDG_RUNTIME_DIR is not an absolute path" ;; esac
+[ -d "$XDG_RUNTIME_DIR" ] || die "XDG_RUNTIME_DIR is not a directory"
+# WAYLAND_DISPLAY is interpolated into two bind paths below. cage always names
+# its socket wayland-N. Refuse any other shape rather than bind an unknown
+# path: the variable may legally hold an absolute path, and that is not a shape
+# this script is willing to mount.
+case "${WAYLAND_DISPLAY:-}" in
+wayland-[0-9] | wayland-[0-9][0-9]) ;;
+*) die "refusing WAYLAND_DISPLAY '${WAYLAND_DISPLAY:-}': expected wayland-N" ;;
+esac
+[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] || die "no socket at $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+
+# The program's own folder, when it lives in /opt. Empty for a /usr program.
+# The outer layer checked who owns it. This layer cannot, see there. Here the
+# folder must still be the one that the program's path gives, so a changed
+# VAULT_APP_DIR binds nothing.
+cmd=$(command -v -- "$1") || die "command not found: $1"
+real=$(readlink -f -- "$cmd") || die "cannot resolve $cmd"
+APP_DIR=$(app_dir_for "$real") || die "refusing '$1': $real is outside /usr and /opt"
+[ "$APP_DIR" = "${VAULT_APP_DIR:-}" ] || die "refusing '$1': its app folder is not the one the outer layer checked"
+APP_BIND=()
+[ -z "$APP_DIR" ] || APP_BIND=(--ro-bind "$APP_DIR" "$APP_DIR")
+
+# Seed the sandbox clipboard, before the wallet starts and before stdin is
+# closed. wl-copy runs here, in cage's session but OUTSIDE the wallet's own
+# sandbox: it forks a daemon that holds the selection, so the wallet needs no
+# clipboard tool of its own, and the secret is never inside the wallet's
+# filesystem view.
+if [ "$CLIP" = 1 ]; then
+	command -v wl-copy >/dev/null || die "--clip needs wl-clipboard"
+	wl-copy --trim-newline || die "wl-copy failed to take the secret"
+fi
+
+# --ro-bind of the socket is enough: connect() needs write permission on the
+# inode, but the kernel exempts sockets from the read-only-mount check, so a
+# read-only mount still connects. The mount stays read-only so the wallet
+# cannot create anything next to the socket.
+#
+# --perms 0700 on the runtime tmpfs is required, not cosmetic: Qt refuses an
+# XDG_RUNTIME_DIR with looser permissions, and a bare --tmpfs is 0755.
+exec bwrap \
+	--unshare-all --share-net --die-with-parent --new-session \
+	--ro-bind /usr /usr \
+	--ro-bind /etc /etc \
+	--ro-bind /sys /sys \
+	"${APP_BIND[@]}" \
+	--symlink usr/lib /lib \
+	--symlink usr/lib /lib64 \
+	--symlink usr/bin /bin \
+	--symlink usr/bin /sbin \
+	--proc /proc \
+	--dev /dev \
+	--dev-bind /dev/dri /dev/dri \
+	--tmpfs /tmp \
+	--perms 0700 --tmpfs "$SANDBOX_RUNTIME" \
+	--ro-bind "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$SANDBOX_RUNTIME/$WAYLAND_DISPLAY" \
+	--setenv XDG_RUNTIME_DIR "$SANDBOX_RUNTIME" \
+	--bind "$VAULT_HOME" "$HOME" \
+	--unsetenv DBUS_SESSION_BUS_ADDRESS \
+	--unsetenv SSH_AUTH_SOCK \
+	--setenv QT_QPA_PLATFORM wayland \
+	--setenv QT_QPA_PLATFORMTHEME kde \
+	--setenv KDE_SESSION_VERSION 6 \
+	-- "$@" </dev/null

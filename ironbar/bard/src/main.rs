@@ -48,9 +48,9 @@ use memory::Memory;
 use music::Music;
 use net::Net;
 use pomo::Pomo;
-use remote::Remote;
 use power::Power;
 use powermode::PowermodeWatch;
+use remote::Remote;
 use std::time::{Duration, Instant};
 use tokio::io::unix::AsyncFd;
 use vars::Vars;
@@ -660,7 +660,11 @@ fn hover_exit(
 /// popup box carries no widget name of its own (see `HoverEvent`'s doc
 /// comment), so this is the only cross-check available against acting on a
 /// stale event for a bar that isn't the one currently shown.
-fn hover_hold(bar: &str, hover_open: &Option<(String, String)>, hover_hide_due: &mut Option<Instant>) {
+fn hover_hold(
+    bar: &str,
+    hover_open: &Option<(String, String)>,
+    hover_hide_due: &mut Option<Instant>,
+) {
     if hover_open.as_ref().is_some_and(|(b, _)| b == bar) {
         *hover_hide_due = None;
     }
@@ -671,7 +675,11 @@ fn hover_hold(bar: &str, hover_open: &Option<(String, String)>, hover_hide_due: 
 /// grace-hide deadline `hover_exit` arms for a pill leave, so leaving the
 /// popup behaves exactly like leaving the pill it came from: one more short
 /// window to come back before the popup actually closes.
-fn hover_release(bar: &str, hover_open: &Option<(String, String)>, hover_hide_due: &mut Option<Instant>) {
+fn hover_release(
+    bar: &str,
+    hover_open: &Option<(String, String)>,
+    hover_hide_due: &mut Option<Instant>,
+) {
     if hover_open.as_ref().is_some_and(|(b, _)| b == bar) {
         *hover_hide_due = Some(Instant::now() + HOVER_HIDE_GRACE);
     }
@@ -1585,7 +1593,7 @@ mod tests {
         assert_eq!(hover_refresh_topics("volume"), ["volume"]);
         assert_eq!(hover_refresh_topics("hotspot"), ["hotspot"]); // T15
         assert_eq!(hover_refresh_topics("remote"), ["remote"]);
-                                                                   // T19
+        // T19
         assert_eq!(hover_refresh_topics("wifi"), ["wifi-detail"]);
         assert_eq!(hover_refresh_topics("eth"), ["eth-detail"]);
         assert_eq!(hover_refresh_topics("netsec"), ["sec-detail"]);
@@ -1601,7 +1609,7 @@ mod tests {
         assert!(hover_refresh_topics("bluetooth").is_empty());
         assert!(hover_refresh_topics("ws-eDP-1-1").is_empty());
         assert!(hover_refresh_topics("pomo").is_empty()); // handled separately
-        // T28: music is already kept live off its own event stream.
+                                                          // T28: music is already kept live off its own event stream.
         assert!(hover_refresh_topics("music").is_empty());
     }
 }

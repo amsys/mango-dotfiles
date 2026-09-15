@@ -20,4 +20,5 @@
 %wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard unsecure
 %wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard protect
 %wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard auto
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard go
 %wheel ALL=(root) NOPASSWD: /usr/local/bin/mango-vpnguard up

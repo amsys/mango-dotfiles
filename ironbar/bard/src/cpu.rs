@@ -847,4 +847,3 @@ mod tests {
         assert!(!tip.contains("blocked2"), "3rd stuck row must be dropped");
     }
 }
-

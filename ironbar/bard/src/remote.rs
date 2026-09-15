@@ -43,6 +43,14 @@ fn privacy_state_path() -> std::path::PathBuf {
     runtime_dir().join("wlopm-state")
 }
 
+/// True while a VNC client is connected and the local panels are blanked.
+/// `pomo.rs` uses it to refuse the idle-unlock autostart: remote input resets
+/// hypridle the same as local input, so without this a remote session starts
+/// a work block nobody asked for.
+pub(crate) fn vnc_client_connected() -> bool {
+    privacy_state_path().exists()
+}
+
 /// `<monitor> tag <n>`, read from `remote.sh`'s own `pulled-origin` file (its
 /// header names the format: `"<monitor>\t<tag>\n"`), or `None` if nothing is
 /// pulled. wayvnc is pinned to the virtual output now (`--vnc-exec`), so the
