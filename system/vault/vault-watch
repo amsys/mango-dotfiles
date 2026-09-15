@@ -1,0 +1,131 @@
+#!/bin/sh
+# vault-watch — detect accidental hooks or injected processes in the vault sandbox.
+#
+#   vault-watch [--self-test]
+#
+# Snapshots and diffs against baseline:
+# - listening sockets            ss -tulpnH | sort
+# - loaded kernel modules        lsmod | sort
+# - /etc/ld.so.preload content
+# - clients of the mango Wayland socket
+#
+# Baselines live in ${XDG_STATE_HOME:-$HOME/.local/state}/vault-watch.
+# VAULT_WATCH_DIR overrides the directory.
+#
+# On a change, calls notify-send.
+#
+# check: vault-watch --self-test
+
+set -eu
+
+XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+VAULT_WATCH_DIR="${VAULT_WATCH_DIR:-$XDG_STATE_HOME/vault-watch}"
+
+die() { printf 'vault-watch: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'vault-watch: %s\n' "$*" >&2; }
+
+take_snapshot() {
+	dir="$1"
+	mkdir -p "$dir"
+
+	# Listening sockets
+	ss -tulpnH 2>/dev/null | sort >"$dir/sockets" || true
+
+	# Loaded kernel modules
+	lsmod 2>/dev/null | sort >"$dir/modules" || true
+
+	# ld.so.preload
+	if [ -f /etc/ld.so.preload ]; then
+		cat /etc/ld.so.preload >"$dir/preload"
+	else
+		: >"$dir/preload"
+	fi
+
+	# Mango Wayland socket clients
+	uid=$(id -u)
+	wayland_socket="/run/user/$uid/wayland-1"
+	if [ -S "$wayland_socket" ]; then
+		if command -v lsof >/dev/null 2>&1; then
+			lsof "$wayland_socket" 2>/dev/null | sort >"$dir/wayland-clients" || : >"$dir/wayland-clients"
+		else
+			: >"$dir/wayland-clients"
+		fi
+	else
+		: >"$dir/wayland-clients"
+	fi
+}
+
+compare_snapshots() {
+	baseline_dir="$1"
+	current_dir="$2"
+	changed=0
+
+	for file in sockets modules preload wayland-clients; do
+		baseline="$baseline_dir/$file"
+		current="$current_dir/$file"
+
+		if [ ! -f "$baseline" ]; then
+			continue
+		fi
+
+		if ! diff -q "$baseline" "$current" >/dev/null 2>&1; then
+			warn "$file changed"
+			changed=1
+		fi
+	done
+
+	return $changed
+}
+
+self_test() {
+	tmpdir=$(mktemp -d)
+	trap 'rm -rf "$tmpdir"' EXIT
+
+	baseline="$tmpdir/baseline"
+	current="$tmpdir/current"
+
+	# Take first snapshot
+	take_snapshot "$baseline"
+
+	# Inject a change: modify the modules file to simulate a new module loading
+	printf '%s\n' "injected_module 1024 0" >>"$baseline/modules"
+
+	# Take second snapshot
+	take_snapshot "$current"
+
+	# Should detect a change (compare_snapshots returns 1 when there is a change)
+	if compare_snapshots "$baseline" "$current" 2>/dev/null; then
+		printf '%s\n' "FAIL"
+		return 1
+	else
+		printf '%s\n' "PASS"
+		return 0
+	fi
+}
+
+main() {
+	[ "${1:-}" = "--self-test" ] && { self_test; exit $?; }
+
+	# Create baseline if it does not exist
+	if [ ! -d "$VAULT_WATCH_DIR" ]; then
+		mkdir -p "$VAULT_WATCH_DIR"
+		take_snapshot "$VAULT_WATCH_DIR"
+		return 0
+	fi
+
+	# Take current snapshot
+	tmpdir=$(mktemp -d)
+	trap 'rm -rf "$tmpdir"' EXIT
+	take_snapshot "$tmpdir"
+
+	# Compare and notify on change
+	if ! compare_snapshots "$VAULT_WATCH_DIR" "$tmpdir" 2>/dev/null; then
+		notify-send -u critical "vault-watch" "System state changed"
+	fi
+
+	# Update baseline for next run
+	rm -rf "$VAULT_WATCH_DIR"
+	mv "$tmpdir" "$VAULT_WATCH_DIR"
+}
+
+main "$@"

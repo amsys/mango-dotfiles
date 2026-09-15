@@ -110,6 +110,20 @@ log "starship.toml"
 link "$REPO/starship.toml" "$XDG_CONFIG_HOME/starship.toml"
 log
 
+# vault-session: the wallet sandbox launcher (VAULT.md section 4). It sits in
+# system/vault/ with the rest of the vault component, but it is a USER command
+# and not a root installer, so it is linked from here and not from
+# system/vault/install.sh. ~/.local/bin keeps the name short enough to type.
+log "vault-session"
+link "$REPO/system/vault/vault-session" "$HOME/.local/bin/vault-session"
+# vault-watch: monitor for accidental hooks or injected processes (VAULT.md
+# section 6). Link the script and its systemd timer/service units.
+log "vault-watch"
+link "$REPO/system/vault/vault-watch" "$HOME/.local/bin/vault-watch"
+link "$REPO/system/vault/vault-watch.service" "$XDG_CONFIG_HOME/systemd/user/vault-watch.service"
+link "$REPO/system/vault/vault-watch.timer" "$XDG_CONFIG_HOME/systemd/user/vault-watch.timer"
+log
+
 # ironbar/scripts, not the whole ironbar/ dir — that would also symlink the
 # mango-bard crate's Rust sources into ~/.config/ironbar/, which the
 # generated config.json (built fresh by start.sh on every login, never
@@ -259,6 +273,7 @@ UNITS=(
 	"systemd/mango-sleep-lock.service:mango-sleep-lock.service"
 	"systemd/mango-powerkey.service:mango-powerkey.service"
 	"systemd/mango-outputs.service:mango-outputs.service"
+	"system/vault/vault-watch.timer:vault-watch.timer"
 )
 # Linked but never enabled: started/stopped only from a bar toggle, never
 # at login — wayvnc/kdeconnectd from the remote-access toggle
