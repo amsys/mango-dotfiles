@@ -1,0 +1,16 @@
+# Installed to /etc/audit/rules.d/vault.rules by system/vault/install.sh.
+#
+# Audit rules for the wallet-isolation threat model in VAULT.md section 6.
+# Watch four things: input-tap attempts, preload injection, wallet data
+# access, and ptrace of any process. Keep this list short; audit noise kills
+# audit projects.
+
+# input tap attempts
+-w /dev/uinput -p rw -k vault_input
+-w /dev/input -p rw -k vault_input
+# preload / injection surfaces
+-w /etc/ld.so.preload -p wa -k vault_preload
+# wallet data touched by anything
+-w /home/martin/.vault -p rwxa -k vault_data
+# ptrace of any process (should be near-zero with scope=1)
+-a always,exit -F arch=b64 -S ptrace -k vault_ptrace

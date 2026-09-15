@@ -52,6 +52,25 @@ else
 	exit 1
 fi
 
+echo "==> audit rules -> /etc/audit/rules.d/vault.rules"
+install -m 0640 -o root -g root "$SRC_DIR/vault.rules" \
+	/etc/audit/rules.d/vault.rules
+
+echo "==> enabling auditd"
+systemctl enable --now auditd
+
+echo "==> loading audit rules"
+augenrules --load
+
+echo "==> verifying vault_ audit keys"
+VAULT_KEYS="$(auditctl -l | grep -c 'vault_' || true)"
+if [ "$VAULT_KEYS" -ge 5 ]; then
+	echo "    $VAULT_KEYS vault_ keys active"
+else
+	echo "    only $VAULT_KEYS vault_ keys active, expected at least 5" >&2
+	exit 1
+fi
+
 cat <<TXT
 
 Installed. This grants back ONLY the power button; while $TARGET_USER is still
@@ -70,4 +89,6 @@ Rollback:
   sudo rm /etc/udev/rules.d/72-vault-powerbtn.rules
   sudo udevadm control --reload-rules
   sudo gpasswd -a $TARGET_USER input     # if you had dropped it; relogin to apply
+  sudo rm /etc/audit/rules.d/vault.rules
+  sudo augenrules --load
 TXT
