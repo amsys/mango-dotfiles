@@ -34,7 +34,7 @@ if sudo -n -u "$TARGET_USER" sudo -n /usr/local/bin/mango-hotspot down </dev/nul
 else
 	echo "    still prompting for $TARGET_USER. Check:" >&2
 	echo "      getent group wheel                     # is $TARGET_USER a member?" >&2
-	echo "      sudo -l -U $TARGET_USER                 # should list mango-hotspot up/down" >&2
+	echo "      sudo -l -U $TARGET_USER                 # should list mango-hotspot up/down/protect/unprotect" >&2
 	exit 1
 fi
 

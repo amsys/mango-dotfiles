@@ -86,7 +86,8 @@ the gsettings color scheme and runs `switchwall.sh --noswitch` again.
 | `kitty/theme.conf` | `~/.config/kitty/theme.conf` | `pkill -USR1 kitty` |
 | `mango/colors.conf` | `~/.config/mango/colors.conf` | mango reads it live |
 | `ironbar/style.css` | `~/.config/ironbar/style.css` | the bar start script restarts ironbar |
-| `swaylock/config` | `~/.config/swaylock/config` | read again at each lock |
+| `swaylock/config` | `~/.config/swaylock/config` | read again at each lock (fallback locker) |
+| `hyprlock/hyprlock.conf` | `~/.config/hypr/hyprlock.conf` | read again at each lock (primary locker) |
 | `mako/config` | `~/.config/mako/config` | `makoctl reload` |
 | `rofi/colors.rasi` | `~/.config/rofi/colors.rasi` | read again at each start |
 | `gtk-3.0/gtk.css`, `gtk-4.0/gtk.css` | `~/.config/gtk-{3,4}.0/gtk.css` | — |
@@ -108,14 +109,32 @@ the wallpaper. It does not stay fixed.
 **Template trap:** Do not put matugen slot syntax in a comment. Tera expands
 the whole template. One bad slot makes the full matugen run fail.
 
-## Lock screen (swaylock)
+## Lock screen (hyprlock, swaylock fallback)
 
-matugen generates the full swaylock config from
-`matugen/templates/swaylock/config`. The config contains the current
-wallpaper path, thus the lock screen agrees with the desktop. It also maps
-the ring color and the text color onto the palette. `SUPER+L` locks the
-screen. A `pgrep` guard prevents a duplicate instance.
-`indicator-caps-lock` is on, thus the ring shows the caps-lock state.
+hyprlock is the primary lock screen. matugen generates the full
+`~/.config/hypr/hyprlock.conf` from `matugen/templates/hyprlock/hyprlock.conf`.
+It copies the mango-sddm greeter's look (`system/sddm/theme/Main.qml`): the
+blurred wallpaper, a rounded card (a `shape` widget behind the password
+field, since hyprlock has no QML container), and the same Material 3 role
+names — `surface_container` for the card fill, `outline_variant` for its
+border, `on_surface` for the password text. Like the boot screen, it puts the
+76 px clock and a date line above the card, and the date line shows the TPM
+TOTP (`power.md`, "Lock screen login"). The notice rows go under the card,
+not in it, so a long notice cannot overflow it: the fingerprint prompt,
+"Caps Lock is on" (`tertiary`), and "Keep-awake is on. This computer will
+not sleep." while `mango-keepawake.service` is active. The keep-awake row
+checks once, when hyprlock starts, not on a poll (see the comment in the
+template for why).
+
+swaylock is the fallback: `sleep-lock.py` starts it if hyprlock does not
+confirm a lock in time (see `power.md`). matugen generates its config from
+`matugen/templates/swaylock/config`, the same way as before — it has no
+card to theme, only a ring and a fill, so it keeps its own, simpler
+palette. `indicator-caps-lock` is on, thus the ring shows the caps-lock
+state.
+
+`SUPER+L` locks the screen. `sleep-lock.py`'s own locker checks (not a bare
+`pgrep`) prevent a duplicate instance under either binary.
 
 ## Login screen (SDDM)
 

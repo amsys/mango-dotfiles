@@ -8,7 +8,7 @@
 # See ~/brain/Areas/infra/hosts/arrakis.madmin.net/nextcloud.md, 2026-09-10.
 set -uo pipefail
 
-DB="$HOME/Nextcloud/Database/Consolidated.kdbx"
+DB="$HOME/nextcloud/Database/Consolidated.kdbx"
 DIR="$HOME/.local/state/kdbx-history"
 SYNCLOG="$HOME/.local/share/Nextcloud/Nextcloud_sync.log"
 KPXC="$HOME/.config/keepassxc/keepassxc.ini"

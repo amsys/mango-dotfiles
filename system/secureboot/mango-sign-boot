@@ -27,6 +27,9 @@ ETC=/etc/mango-secureboot
 export GNUPGHOME=$ETC/gnupg
 PUBKEY=$ETC/grub-pubkey.gpg
 STAGED=/boot/EFI/GRUB-SB/grubx64.efi
+# memtest86+-efi 8.x name; 7.x shipped /boot/memtest86+/memtest.efi.
+MEMTEST=/boot/memtest86+/memtest86x64.efi
+SBCTL_DB=/var/lib/sbctl/files.json
 
 die() { printf 'mango-sign-boot: %s\n' "$1" >&2; exit 1; }
 
@@ -61,11 +64,19 @@ if [ "$stage" = yes ]; then
 	# memtest86+-efi, when installed: GRUB chainloads it, so it needs both
 	# signatures — sbctl for the firmware's LoadImage check, and the GPG
 	# .sig (below) for GRUB's own file verification.
-	MEMTEST=/boot/memtest86+/memtest.efi
 	if [ -f "$MEMTEST" ]; then
 		sbctl list-files | grep -qF "$MEMTEST" &&
 			sbctl sign "$MEMTEST" || sbctl sign -s "$MEMTEST"
 	fi
+fi
+
+# Drop sbctl entries whose file is gone (a package renamed or removed
+# it). Otherwise "sbctl sign-all", which the sbctl pacman hook runs after
+# this one, fails the whole transaction on the missing file.
+if [ -f "$SBCTL_DB" ]; then
+	jq -r 'keys[]' "$SBCTL_DB" | while read -r f; do
+		[ -e "$f" ] || sbctl remove-file "$f"
+	done
 fi
 
 # The firmware verifies the kernel too: with Secure Boot on and no shim,
@@ -93,7 +104,7 @@ sign() {
 }
 
 for f in /boot/vmlinuz-* /boot/initramfs-*.img /boot/intel-ucode.img \
-	/boot/mango-plymouth.img /boot/pinned/* /boot/memtest86+/memtest.efi \
+	/boot/mango-plymouth.img /boot/pinned/* "$MEMTEST" \
 	/boot/grub/grub.cfg /boot/grub/grubenv /boot/grub/mango-bg.png \
 	/boot/grub/fonts/* /boot/grub/x86_64-efi/*; do
 	sign "$f"

@@ -18,9 +18,9 @@ module-to-file map and the daemon's own CLI.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
-│ ⟡ 1 2 3 4 5 6 7 8 9 ov  window title…   12:34 Tue 25/08 🍅25:00   ▪▪▪ CPU RAM  DOK BAT ◐AI  [⋯]☕ ♫ 🔊 🔇  📶 🖧 🔒 📡 ⛺ ᛒ ⏻ │
+│ ⟡ 1 2 3 4 5 6 7 8 9 ov  window title…   12:34 Tue 25/08 🍅25:00   ▪▪▪ CPU RAM  DOK AI  ☕ ♫ ⚠  🔊62 📶 ᛒ ▮▮▯75% ⏻ │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
-  LAUNCH  TAGS            FOCUS               TIME              TRAY  RESOURCES        TOOLS  AUDIO   CONNECTIVITY        SESSION
+  LAUNCH  TAGS            FOCUS               TIME              TRAY  RESOURCES   TOOL  AUDIO  WARN  STATUS         SESSION
   ─────────────────────────►                 CENTER              ◄──────────────────────────────────────────────────────
         start                                center                                     end
 ```
@@ -29,7 +29,15 @@ module-to-file map and the daemon's own CLI.
 | --- | --- | --- |
 | `start` | launcher → tags → focus | `spark` → `ws-1…9` + `ws-ov` → `win` |
 | `center` | time | `clock` → `date` → `pomo` |
-| `end` | tray → resources → tools → audio → connectivity → session | `tray` `traytoggle` `keepass` → `sysload`(`cpu`+`memory` rows) `battery` `devload`(`claude` row, `docker`+`archupdate` row) → `colorpicker` `darkmode` `snip` `inhibit` → `music` `volume` `mic` → `net-spinner` `wifi` `eth` `netsec` `hotspot` `remote` `bluetooth` → `power` |
+| `end` | tray → resources → tools → audio → network warning → status → session | `tray` `traytoggle` → `sysload`(`cpu`+`memory` rows) `devload`(`claude` row, `docker`+`archupdate` row) → `inhibit` → `music` → `netwarn` → `status` (volume+Wi-Fi+Bluetooth+battery button, click popup: volume/mic/brightness sliders, Wi-Fi/Ethernet/Bluetooth/network/power-mode rows, a toggle grid) → `power` |
+
+Bar-status-panel SPEC §1-§4 (this stage) removed `keepass`, `battery`,
+`colorpicker`, `darkmode`, `snip`, `volume`, `mic`, `net-spinner`, `wifi`,
+`eth`, `netsec` (while secure), `hotspot`, `remote` and `bluetooth` from
+`end` as standalone modules. Each one's exact click command moved into
+the `status` popup below. Battery's mini gauge and the network grade's
+icon moved into `status`/`netwarn` directly. §3.3-§3.7 below describe the
+modules that remain.
 
 The fallback bar carries the same blocks, minus `ws-*`. That bar matched no
 monitor, thus it has no tag block. See §3.1.
@@ -221,14 +229,19 @@ a click target of corner quality.
 | # | Module | Interaction | Width | Rationale |
 | - | --- | --- | --- | --- |
 | 7 | `tray` | click → app window or menu | variable | It leads `end`, thus it takes its own growth alone (INV-1). It is the only member of `end` with a variable width. It is always visible, because the T29 follow-up sets `TRAY_DRAWER_ENABLED = false`. See below. |
-| 7c | `keepass` | click → show/hide KeePassXC | fixed | Moved out of the drawer, because the lock state is worth a glance. |
 
 **T28 — the tray drawer.** Ironbar's native `tray` module has no per-item
 filter. It has `icon_size`, `direction` and `prefer_theme_icons` only, plus
 the common options. Every item gets the same `.item` class, and no item gets
 a name. Thus the tray itself cannot express "important against hidden".
-KeePassXC is the one item on this machine that is worth a permanent glance.
-It is rebuilt as its own pill, in place of an item kept out of the drawer.
+
+**S2 (bar-status-panel SPEC §2) — `keepass` leaves this block.** T28 had
+rebuilt KeePassXC's lock state as its own promoted pill, in place of an
+item kept out of the drawer. The pill is gone now: its toggle button moved
+into the `status` popup's toggle grid (§3.7), reusing the exact
+`mmsg dispatch toggle_named_scratchpad` command the pill used. KeePassXC's
+tray item itself is unaffected — this only removes the second, duplicate
+glance this pill gave it.
 
 `tray-click.sh {address}` also overrides `tray`'s own `on_click_left`. The
 script jumps to an already-open window before it falls back to SNI
@@ -252,18 +265,26 @@ reason.
 
 ### 3.4 `end`, block 2 — resources
 
-`cpu`, `memory`, `docker`, `battery`, `claudebar` and `archupdate` make one
-ambient group for glances only. Each pill or stack has a hover popup. A
-click starts an external tool: `btop`, `powermode.sh`, `powertop` or
-`arch-update`. A right-click on docker opens a menu.
+`cpu`, `memory`, `docker`, `claudebar` and `archupdate` make one ambient
+group for glances only. Each pill or stack has a hover popup. A click
+starts an external tool: `btop` or `arch-update`. A right-click on docker
+opens a menu.
 
 The group uses **proximity and common region**. These modules answer one
 question: "is this machine healthy". The user reads them in one eye
 movement, not in several separate stops. The order in the block reads the
-load from general to specific: cpu → memory → docker (processes) → battery
-(power) → claude → archupdate. `claude` is an external budget, with the
-least relation to the machine itself. `archupdate` is routine maintenance,
-not health.
+load from general to specific: cpu → memory → docker (processes) → claude
+→ archupdate. `claude` is an external budget, with the least relation to
+the machine itself. `archupdate` is routine maintenance, not health.
+
+**S2 (bar-status-panel SPEC §1/§2) — `battery` leaves this block.** The
+standalone `battery` pill (icon, gauge, terminal-nub cap, power-mode click)
+is gone. Its mini gauge and `bat_pct` now sit inside the `status` button
+(§3.7) — `status_module()` gives its root module the extra static class
+`battery`, so every `.battery`/`.gauge*` style.css rule (sizing, the level
+colour ramp, the charging pulse) still matches with no CSS change. The
+power-mode toggle that used to be `battery`'s own `on_click_left` is a row
+button inside the `status` popup instead.
 
 **T28 — gauges replace the percentage.** `cpu` and `memory` drop their digit
 completely. They show an icon and a horizontal `.gauge` box only. The gauge
@@ -330,30 +351,42 @@ T31 removed the T23 tools drawer. The permanent "…" trigger cost the same
 scan attention that Hick's Law charges for the icons. It also added a hover
 step to reach them. The user prefers tools that are always visible.
 
-`colorpicker`, `darkmode` and `snip` are standalone pills again, in the T23
-reading order. Each one is a `custom` module with a static tooltip, and its
-T20 and T23 clicks stay unchanged. **`inhibit`** follows them, also
-unchanged, because keep-awake is a state the user glances at. It renders at
-constant width in both states, because the `nf-md-coffee` and
+**S2 (bar-status-panel SPEC §2) — `colorpicker`, `darkmode` and `snip`
+leave the bar.** T31 had put them back as standalone pills (reversing an
+earlier, user-rejected cut). This stage moves all three into the `status`
+popup's toggle grid (§3.7) instead, each keeping its exact
+`on_click_left` command — the user still reaches every tool, now behind
+the one button that also carries volume/network/battery, in place of
+three permanent pills for actions used a few times a day.
+
+**`inhibit`** is the one tool pill that stays on the bar. S1
+(bar-status-panel SPEC §2/§5e) gave it a `show_if`: the pill is hidden
+except while keep-awake is on, and its dynamic hover popup is a static
+tooltip instead (`inhibit_module()`'s own doc comment) — the "hidden
+until active" reasoning `hotspot_module()`'s own `show_if` used to apply
+(§3.7, before S2) now applies to a pill whose one visible state needs no
+popup to explain it. The `status` popup's toggle grid also carries a
+keep-awake button of its own, reusing `inhibit`'s exact toggle command —
+reachable both ways on purpose, so the on/off switch is never the one
+control locked behind a hidden pill. `inhibit` renders at constant width
+in the one state it now ever shows, because the `nf-md-coffee` and
 `nf-md-coffee_outline` glyphs have the same size.
 
 ### 3.6 `end`, block 4 — audio
 
-`music`, `volume` and `mic` make one domain by proximity and common region.
-They show what plays, and what the machine does with sound.
+`music` is the one module left in this block.
 
 - **`music`** — `music.rs` reads MPRIS with `playerctl --follow`. The text
   truncates at 24 characters, thus it cannot grow past its slot. `music`
-  sits in the middle of the block, not at a growth end. INV-1 therefore
+  sits between `inhibit` and `netwarn`, not at a growth end, so INV-1
   requires this fixed cap in place of an open-ended width.
   - **T26 deviation:** the CSS carried a `min-width: 220px` reserve against
     that cap. A live measurement showed that real track titles never come
     near 30 characters. The reserve then stayed empty behind a short title
     or behind nothing, and it was the largest gap on the bar. The reserve
-    is removed, so `volume` and `mic` now shift when a track starts or
-    stops. That shift is a discrete event caused by the user. It is not
-    the per-tick reflow that INV-1 guards against, thus this spec accepts
-    it.
+    is removed, so a neighbour now shifts when a track starts or stops.
+    That shift is a discrete event caused by the user. It is not the
+    per-tick reflow that INV-1 guards against, thus this spec accepts it.
   - **T28: native `music` module replaced with a `custom` one.** The native
     module renders through GTK4's `set_label_escaped`, as a check against
     the vendored source `modules/music/mod.rs` confirmed. That function
@@ -365,47 +398,64 @@ They show what plays, and what the machine does with sound.
     completely when nothing is loaded, or when a player is paused with no
     track, in place of a reserve for an empty string. T26's own reasoning
     about a discrete event caused by the user applies unchanged.
-- **`volume`** — an icon only on the bar. T9 moved the percentage to the
-  popup. A left click opens a 5s mixer. A right click opens the full
-  mixer. A scroll adjusts the volume.
-- **`mic`** — an icon for the mute state. It renders empty when the
-  microphone is not muted. Before T29 it shared `.volume`'s
-  `min-width: 20px` reserve. That reserve held a full icon's width even
-  while the module was empty, and it was the real cause of a visible gap
-  between `volume` and `wifi`. `mic` now has no reserve of its own, so the
-  common unmuted case adds no width. A mute moves `wifi` by one icon
-  width, which is the same trade this spec already accepts for `music`.
 
-### 3.7 `end`, block 5 — connectivity
+**S2 (bar-status-panel SPEC §1/§2) — `volume` and `mic` leave this block.**
+Both standalone icon pills are gone. The `status` module (§3.7) shows the
+volume icon and `vol_pct` on the bar; its popup carries full sliders and
+mute buttons for both volume and mic (SPEC §1), so the mute-icon state
+`mic` used to show on the bar is reachable there instead. A scroll over
+`status` still adjusts volume ±5%, the same gesture `volume` used to own.
 
-`net-spinner`, `wifi`, `eth`, `netsec`, `hotspot`, `remote` and `bluetooth`
-make one block by proximity and common region. "How am I connected, and is
-it safe" is one question with seven possible answers. It is not seven
-separate questions. This block is the largest single consolidation in the
-layout. Thus the internal order is part of the spec. It runs from general to
-specific:
+### 3.7 `end`, block 5 — network warning and status
 
-1. `net-spinner` — a busy indicator. It replaces `wifi` in place while a
-   link changes state. Its `show_if: "#net_busy"` is the logical inverse of
-   `wifi`'s own `show_if`.
-2. `wifi` — link state and signal.
-3. `eth` — wired link state.
-4. `netsec` — the security verdict *for* the link that `wifi` or `eth` just
-   described. It reports a DNS leak, a route conflict, a captive portal or
-   an open network. It comes immediately after the links it grades.
-5. `hotspot` — a *mode* of the same wifi radio that `wifi` covers.
-   `show_if` hides it until it is active, thus it costs nothing when
-   unused.
-6. `remote` — inbound reachability through wayvnc or KDE Connect. It
-   answers the same "who can reach this machine" question as the security
-   pill. It sits outward from `netsec`, not inside it, because it is a
-   different protocol family with its own click target.
-7. `bluetooth` — the nearest remaining connectivity radio. It is last in
-   the block, because it is the one native module with a click-to-toggle
-   popup that must sit next to `power`'s own corner treatment. T9 found
-   that its popup does not obey `popup_autohide`. An unconditional
-   `hover_exit` and `hide_popup` close it instead. See
-   `bluetooth_module()`'s own doc comment.
+**S2 (bar-status-panel SPEC §1-§4) replaced this block.** `net-spinner`,
+`wifi`, `eth`, `netsec`, `hotspot`, `remote` and `bluetooth` used to make
+one domain here by proximity and common region: "how am I connected, and
+is it safe" was one question with seven separate pills answering it.
+SPEC §1 widens the question to "is my machine OK" and folds volume and
+battery into it too — one button that shows the state at a glance, and
+one popup underneath it that holds every control the seven retired pills
+used to offer, plus the retired `colorpicker`/`darkmode`/`snip`/`keepass`
+tool pills (§3.5) and the retired `battery` power-mode click (§3.4). The
+block is now two modules:
+
+1. **`netwarn`** — a glance-only fault pill, the direct descendant of the
+   old `netsec` pill. `show_if: "#net_warn"` hides it unless the grade
+   needs attention: `net_warn` is false for `Verdict::Secure` and
+   `Verdict::Offline` only, true for every other verdict (DNS leak, route
+   conflict, captive portal, open network — see `net.rs::regrade()`). It
+   carries the class `netsec`, a deliberate reuse so every existing
+   `.netsec.*` style.css rule (the lock colour ramp, the `netsec-pulse`
+   keyframe) still matches with no CSS change, even though the module's
+   own IPC name is now `netwarn`.
+2. **`status`** — a `custom` module, `button` root (SPEC §1/§2): the
+   volume icon + `vol_pct`, a Wi-Fi icon (carrying a `busy` class while
+   `net_busy` is true, in place of the retired `net-spinner` pill — the
+   spin keyframe is scoped to `.status.busy .net-spinner`, a state class,
+   so GTK's frame clock only ticks while a link is actually busy), a
+   Bluetooth icon, and a mini battery gauge + `bat_pct` (the static class
+   `battery` reuses every `.battery`/`.gauge*` rule — §3.4's own note).
+   Left-click toggles its popup; there is no hover at all, per the SPEC §4
+   rule that a popup holding controls opens on click. Scroll still adjusts
+   volume ±5%, same as the retired `volume` pill.
+
+   The popup (one vertical box, opened by the click, not by a hover) holds,
+   top to bottom: a volume slider + mute, a mic slider + mute, a brightness
+   slider (all three `SliderWidget`s — `min max step value on_change`, SPEC
+   §3; `on_change`'s `$0` is `sh -c`'s own positional-parameter slot, not a
+   literal ironbar substitution); row buttons for Wi-Fi (`wifi-menu.sh`),
+   Ethernet (`eth-toggle.sh`), Bluetooth (`blueman-manager`) and the network
+   grade (`net.sh --sec-click`); a power-mode row (`powermode.sh toggle`);
+   and a toggle-button grid: dark mode, keep-awake, screenshot region,
+   colour pick, KeePassXC, hotspot menu, remote (VNC) toggle. Every row
+   reuses its retired pill's exact command — see `status_popup()`'s own
+   doc comment in `genconfig.rs` for which retired function each row
+   replaces.
+
+   Two popup values have no event stream of their own to stay fresh off:
+   brightness (`bri_pct`) and the Bluetooth device count (`bt_text`). Both
+   are read once, synchronously, right before the popup opens
+   (`status-detail` refresh topic) — never polled, per SPEC §3/§6.
 
 ### 3.8 `end`, block 6 — session
 
@@ -465,10 +515,9 @@ omitted. Read the file itself for the full JSON that each builder returns:
 // genconfig.rs::build(), per real monitor bar
 "start":  start_modules(&bar_name),   // spark, workspace_pills(), win
 "center": time_modules(&bar_name),    // clock, date, pomo
-"end":    end_modules(&bar_name),     // tray, keepass,
-                                       // resource_modules(), tools_modules(),
-                                       // audio_modules(), net_modules(), hotspot,
-                                       // remote, bluetooth, power
+"end":    end_modules(&bar_name),     // tray, resource_modules(),
+                                       // tools_modules(), audio_modules(),
+                                       // netwarn, status, power
 ```
 
 ```rust
@@ -481,19 +530,23 @@ fn start_modules(bar_name: &str) -> Vec<Value> {
 
 // T29 follow-up: TRAY_DRAWER_ENABLED = false by default — tray_toggle_module()
 // is only pushed, and tray_module()'s own show_if only set, when true.
+//
+// S2 (bar-status-panel SPEC §2): `keepass`/`hotspot`/`remote`/`bluetooth`
+// and the standalone `battery`/net_modules() block are all gone from this
+// row — each one's click moved into `status_popup()` instead. `netwarn`
+// replaces the old `net_modules()` group; `status` carries battery's own
+// gauge.
 fn end_modules(bar_name: &str) -> Vec<Value> {
     let mut end = vec![tray_module()]; // INV-1: leads end
     if TRAY_DRAWER_ENABLED {
         end.push(tray_toggle_module());
     }
-    end.push(keepass_module(bar_name));     // promoted out of the tray drawer
-    end.extend(resource_modules(bar_name)); // sysload, battery, devload
-    end.extend(tools_modules(bar_name));    // darkmode, inhibit (T31)
-    end.extend(audio_modules(bar_name));    // music, volume, mic
-    end.extend(net_modules(bar_name));      // net-spinner, wifi, eth, netsec
-    end.push(hotspot_module(bar_name));
-    end.push(remote_module(bar_name));
-    end.push(bluetooth_module(bar_name));
+    end.extend(resource_modules(bar_name)); // sysload, devload
+    end.extend(tools_modules());            // inhibit only
+    end.extend(audio_modules(bar_name));    // music only
+    end.push(netwarn_module());
+    end.push(status_module(bar_name));      // volume+wifi+bt+battery button,
+                                             // click popup: sliders + rows
     end.push(power_module());
     end
 }
@@ -508,17 +561,30 @@ fn devload_module(bar_name: &str) -> Value { /* box, orientation: vertical,
     widgets: [row-claude button, row-svc box[cell-docker, cell-au]] */ }
 ```
 
-The tools block (T31 — drawer removed, see §3.5):
+The tools block (S2 — colorpicker/darkmode/snip moved into the `status`
+popup, see §3.5):
 
 ```rust
-fn tools_modules(bar_name: &str) -> Vec<Value> {
-    vec![
-        colorpicker_module(),
-        darkmode_module(),
-        snip_module(),
-        inhibit_module(bar_name),
-    ]
+fn tools_modules() -> Vec<Value> {
+    vec![inhibit_module()]
 }
+```
+
+The status button and its popup (S2 — bar-status-panel SPEC §1-§4, see
+§3.7):
+
+```rust
+fn status_module(bar_name: &str) -> Value { /* type: custom, name: status,
+    class: "status battery", bar: [button[vol icon+#vol_pct, wifi icon
+    (class net-spinner), bt icon, gauge, gauge-cap, #bat_pct]],
+    popup: status_popup(bar_name), on_click_left: refresh + toggle-popup,
+    on_scroll_up/down: wpctl set-volume ±5% */ }
+
+fn status_popup(bar_name: &str) -> Value { /* box, vertical: 3 slider rows
+    (volume, mic, brightness) + mute buttons, a separator, 4 detail rows
+    (wifi, eth, bluetooth, network grade), a separator, 1 power-mode row,
+    a separator, 2 rows of toggle buttons (darkmode, keepawake, snip,
+    colorpicker, keepass / hotspot, remote) */ }
 ```
 
 The CSS is in `matugen/templates/ironbar/style.css`. The selectors are
@@ -545,17 +611,18 @@ classes that `genconfig.rs` sets. They are not waybar-style `#custom-*` ids:
   font-feature-settings: "tnum" 1;
 }
 .sysload { min-width: 40px; }       /* T29: icon + .gauge per row, no digit */
-.battery { min-width: 56px; }       /* T29: gauge + gauge-cap, digit dropped */
+.battery { min-width: 56px; }       /* T29: gauge + gauge-cap, digit dropped.
+   S2: `status_module()` carries this class now (no standalone `battery`
+   module left, §3.4), so the rule still matches with no CSS change. */
 .devload { min-width: 131px; }      /* T29: claude row's countdown is back */
 .clock { min-width: 50px; }
 .date  { min-width: 84px; }
 .pomo  { min-width: 52px; }
-.volume { min-width: 20px; }
-.keepass { min-width: 20px; }       /* T28 — icon-only, same as volume */
-/* T29: `.mic` reserve dropped — it was the real cause of the volume-wifi
-   gap (§3.6's own T29 entry). T26: music has no reserve (dropped, see
-   §3.6's own T26 deviation) — the .music selector above shares the
-   icon-font stack rule only. */
+/* T26: music has no reserve (dropped, see §3.6's own T26 deviation) — the
+   .music selector above shares the icon-font stack rule only. S2:
+   `.volume`/`.mic`/`.keepass` selectors are dead CSS now (no module
+   carries those classes, §3.5/§3.6/§3.3) — left in style.css rather than
+   pruned this stage, since removing dead rules is not this stage's job. */
 
 /* T28 — INV-5's gauge variant: the fill's own width IS the value, so
    there is nothing to reserve beyond the box's own fixed size (§3.4).
@@ -589,26 +656,29 @@ monitor, and everything else on screen.
       changes position.
 - [ ] Focus a window with a 100-character title. The tags and `spark` do
       not move.
-- [ ] Move `sysload`, `battery` and `devload` each from the realistic
-      maximum to the rare overflow: either gauge row at 99%→100%, docker
-      9→99, 100%→100%+eco leaf, with and without the stale-cache marker.
-      `tray`, the leftmost module in `end`, does not shift by a single
-      pixel. `center` is the wrong subject for these three modules. They
-      moved from `start` to `end` at T23, and `end` is right-anchored, so
-      growth pushes `end`'s own leftmost member, `tray` (T25). T29's own
-      reserve numbers for `.sysload`, `.battery` and `.devload` are
-      estimates. Nobody has measured them live. This check corrects them.
+- [ ] Move `sysload` and `devload` each from the realistic maximum to the
+      rare overflow: either gauge row at 99%→100%, docker 9→99,
+      100%→100%+eco leaf, with and without the stale-cache marker. `tray`,
+      the leftmost module in `end`, does not shift by a single pixel.
+      `center` is the wrong subject for these two modules. They moved from
+      `start` to `end` at T23, and `end` is right-anchored, so growth
+      pushes `end`'s own leftmost member, `tray` (T25). T29's own reserve
+      numbers for `.sysload` and `.devload` are estimates. Nobody has
+      measured them live. This check corrects them.
 - [ ] Move `pomo` from idle to running to idle. The `center` width does not
       change.
 - [ ] All 9 tags stay visible with every tag empty. Toggle `ws-ov` on and
-      off. `wifi` does not shift.
+      off. `status` does not shift.
 - [ ] Move from tag 9 to overview to tag 1. No button changes width.
-- [ ] Click `darkmode`. The colour scheme flips, and the pill's icon
-      follows (T31: drawer removed, darkmode standalone).
-- [ ] Toggle `hotspot` from active to inactive. The neighbouring `remote`
-      and `bluetooth` do not shift.
+- [ ] Click `status`. The popup opens with no hover delay. Click a toggle
+      button in its grid (darkmode, keep-awake, screenshot, colour pick,
+      KeePassXC, hotspot, remote) and confirm it runs the same command the
+      retired standalone pill used.
+- [ ] Toggle the network grade from secure to a fault verdict (e.g. an open
+      network). `netwarn` appears; `status` does not shift. Toggle back to
+      secure or offline: `netwarn` disappears again.
 - [ ] Play a long MPRIS track title. `music` truncates at 30 chars, and
-      `volume` does not move.
+      `netwarn`/`status` do not move.
 
 ---
 

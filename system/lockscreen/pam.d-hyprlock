@@ -1,0 +1,19 @@
+#%PAM-1.0
+# Installed to /etc/pam.d/hyprlock by system/lockscreen/install.sh. It
+# replaces the package file, which is "auth include login".
+#
+# No pam_faillock here, on purpose. Through `login`, hyprlock shared the
+# faillock counter with SDDM, the TTYs and sudo: three wrong attempts at
+# the lock screen (one of them an empty submit on wake) locked every login
+# path for 10 minutes (2026-10-14). The lock screen guards a session that
+# is already open, so a fixed 3 s delay after each failure is the brake
+# here. At one guess per 3 s, a strong password holds. The other login
+# paths keep faillock.
+#
+# Fingerprint is not in this stack. hyprlock talks to fprintd itself
+# (auth:fingerprint in hyprlock.conf), and sleep-lock.py turns that on
+# only when the TPM verdict for this boot is ok.
+
+auth      required   pam_faildelay.so  delay=3000000
+auth      required   pam_unix.so
+account   required   pam_unix.so

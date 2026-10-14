@@ -9,7 +9,7 @@
 #   screenrecord.sh test       # self-check
 set -u
 
-OUTDIR="${XDG_VIDEOS_DIR:-$HOME/Videos}/Recordings"
+OUTDIR="${XDG_VIDEOS_DIR:-$HOME/videos}/Recordings"
 # Where the in-progress filename lives, so the stopping press can name the file
 # it just saved. Runtime dir, not /tmp: it is per-user and cleared on logout, so
 # a crashed recorder cannot leave a stale path behind for the next session.

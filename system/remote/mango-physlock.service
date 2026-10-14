@@ -1,0 +1,37 @@
+# Installed to /etc/systemd/system/mango-physlock.service (system, not user
+# — see User=root below) by system/remote/install.sh.
+#
+# Started and stopped only by the user session's remote.sh, over the two
+# NOPASSWD sudoers verbs in mango-physlock.sudoers:
+#   --privacy-watch   on a VNC client connecting   -> systemctl start
+#   --privacy-watch   on a VNC client disconnecting -> systemctl stop
+#                      (after confirming the local session is locked —
+#                      see remote.sh's own comment on that ordering)
+# Never enabled at login — same "nothing runs until the user session asks
+# for it" policy as wayvnc.service and mango-keepawake.service.
+#
+# User=root: grabbing every physical keyboard/touchpad/mouse/touchscreen
+# with EVIOCGRAB needs access the session user deliberately does not have
+# (not a member of `input` — same policy system/vault/ applies to the
+# power button alone). This is the one piece of SPEC.md §7.2-7.3 that
+# cannot run as the session user at all.
+#
+# ExecStopPost always runs --on-stop, on a clean stop or a crash: SPEC.md
+# §7.2 step 5's fail-closed rule. By the time ExecStopPost runs, the grab
+# is already gone (ExecStart's process has exited) — the one thing left to
+# do is make sure the session ends locked, not silently unlocked behind
+# panels that may still be dark. physlock.py's own module docstring has
+# the reasoning; README.md's "Why a lock, not just a blank" has the
+# residual gap this still leaves (the window between the grab coming off
+# and this ExecStopPost's lock actually landing).
+
+[Unit]
+Description=mango-physlock — root input grab for a physical lock during a remote session
+Documentation=file:system/remote/README.md
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/mango-physlock
+ExecStopPost=/usr/local/bin/mango-physlock --on-stop
+TimeoutStopSec=20s

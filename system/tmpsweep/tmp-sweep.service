@@ -1,0 +1,13 @@
+# Runs tmp-sweep once. It removes stale cargo artifacts and stale Claude
+# scratch dirs from /tmp, and it sends one warning when the per-user /tmp
+# quota is near full. The timer tmp-sweep.timer starts it.
+[Unit]
+Description=Sweep stale build and scratch files from /tmp
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/tmp-sweep
+Nice=19
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

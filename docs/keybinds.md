@@ -28,7 +28,7 @@ is the one exception, because `Print` is not a text-editing key.
 | ``SUPER+` `` | jump back to the previous window |
 | `Alt+Tab` | mango's jump labels. This is not an alt-tab switcher |
 | `SUPER+W` | wallpaper switch (see [theming.md](theming.md)) |
-| `SUPER+L` | lock with `sleep-lock.py lock`. It starts swaylock. It pauses the pomodoro while the screen stays locked |
+| `SUPER+L` | lock with `sleep-lock.py lock`. It starts hyprlock (falls back to swaylock if hyprlock does not confirm the lock). It pauses the pomodoro while the screen stays locked |
 | `SUPER+SHIFT+L` | suspend |
 | `CTRL+ALT+Delete` | power menu |
 | `Alt+H` | hotspot menu |

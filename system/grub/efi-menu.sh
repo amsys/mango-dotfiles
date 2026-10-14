@@ -4,8 +4,10 @@
 #   sudo ~/src/mango-dotfiles/system/grub/efi-menu.sh
 #
 # What it does:
-#   1. Adds a "Memtest86+" entry for \memtest86+\memtest.efi when the
-#      file is on the ESP and no entry points to it yet.
+#   1. Adds a "Memtest86+" entry for \memtest86+\memtest86x64.efi when
+#      the file is on the ESP and no entry points to it yet. A "Memtest86+"
+#      entry for another path (memtest86+-efi 7.x used memtest.efi) is
+#      deleted first.
 #   2. Sets BootOrder to: GRUB, ST GRUB (supergrub2), Memtest86+,
 #      Windows Boot Manager, then everything else in its old order.
 #
@@ -32,16 +34,20 @@ entry_num() {
 	efibootmgr | sed -n "s/^Boot\([0-9A-F]\{4\}\)\*\{0,1\} $1\(\t.*\)\{0,1\}\$/\1/p" | head -n1
 }
 
-if [ -f /boot/memtest86+/memtest.efi ]; then
-	if efibootmgr | grep -qi 'memtest86+\\memtest\.efi'; then
+if [ -f /boot/memtest86+/memtest86x64.efi ]; then
+	if efibootmgr | grep -qi 'memtest86+\\memtest86x64\.efi'; then
 		echo "==> Memtest86+ entry already present"
 	else
+		while num=$(entry_num 'Memtest86+') && [ -n "$num" ]; do
+			echo "==> delete stale Memtest86+ entry Boot$num"
+			efibootmgr --delete-bootnum --bootnum "$num" >/dev/null
+		done
 		echo "==> create Memtest86+ entry ($disk part $part_num)"
 		efibootmgr --create --disk "$disk" --part "$part_num" \
-			--label 'Memtest86+' --loader '\memtest86+\memtest.efi' >/dev/null
+			--label 'Memtest86+' --loader '\memtest86+\memtest86x64.efi' >/dev/null
 	fi
 else
-	echo "==> no /boot/memtest86+/memtest.efi — install memtest86+-efi first"
+	echo "==> no /boot/memtest86+/memtest86x64.efi — install memtest86+-efi first"
 fi
 
 echo "==> BootOrder: GRUB, ST GRUB, Memtest86+, Windows, rest"

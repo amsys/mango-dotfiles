@@ -591,6 +591,19 @@ impl Power {
         Some(pct(br, mx))
     }
 
+    /// S2 (bar-status-panel SPEC §3): `bri_pct` for the `status` popup's
+    /// brightness slider — read on popup open only (the "status-detail"
+    /// refresh topic, main.rs), never polled. A pure sysfs read, no fork —
+    /// same cost class as `archupdate.rs::refresh()`. Leaves `bri_pct` at
+    /// its last value (default "0") when there is no backlight device,
+    /// rather than overwriting it with something the sysfs read can't
+    /// actually back.
+    pub fn refresh_brightness(&self, vars: &mut Vars) {
+        if let Some(p) = self.backlight_pct() {
+            vars.set("bri_pct", p.to_string());
+        }
+    }
+
     fn hist_file(&self, model: &str) -> Option<PathBuf> {
         let mut names: Vec<String> = std::fs::read_dir(&self.upower_dir)
             .ok()?
@@ -676,7 +689,12 @@ impl Power {
     fn emit_absent(&self, vars: &mut Vars) {
         vars.set("bat_text", "");
         set_titled(vars, "bat_tip", "Battery", "No battery".to_string());
-        vars.set(&class_key("battery"), "absent");
+        // S2 (bar-status-panel SPEC §2): IPC module target renamed
+        // "battery" -> "status" — see `refresh()`'s own comment on its two
+        // class writes for the full reasoning (the standalone `battery`
+        // pill this used to address is gone from the bar).
+        vars.set(&class_key("status#battery"), "absent");
+        vars.set("bat_pct", "0");
     }
 
     /// Re-derives `bat_text`/`bat_tip`/`@class/battery` from a fresh sysfs
@@ -830,14 +848,40 @@ impl Power {
             None => "Battery".to_string(),
         };
 
+        // S2 (bar-status-panel SPEC): `pm_state` is `pm_mode`'s own label
+        // only — the planned " · <time left>" suffix is skipped here
+        // because `refresh()` never builds that string itself; `secs` is
+        // raw seconds, and the one place that formats it into a "left" /
+        // "until full" string is `build_tip` above, folded into the whole
+        // tooltip text, not a standalone value this scope can read back.
+        // Reaching into `build_tip` to pull that substring back out would
+        // be a second, divergent copy of its `if secs > 0 { ... }` branch,
+        // not a reuse of data already here.
+        vars.set("pm_state", pm_mode.as_str());
+
         vars.set("bat_text", text);
         set_titled(vars, "bat_tip", &title_text, tip);
-        vars.set(&class_key("battery"), class);
+        // S2 (bar-status-panel SPEC §2): the standalone `battery` pill this
+        // used to address is gone from the bar — its mini gauge now lives
+        // inside `status_module()` (genconfig.rs), which carries a static
+        // `class: "status battery"` so every existing `.battery.*`/`.pNN
+        // .gauge-fill` style.css rule still matches once the module also
+        // carries the dynamic class below. `ipc.rs::set_class` addresses by
+        // module `name` ("status" now, not "battery"); the slot suffixes
+        // (`#battery`, `#level`) are this process's own `Vars` bookkeeping
+        // only (vars.rs's slot-suffix convention) — they never reach the
+        // wire, so "status#battery" and net.rs's bare "status" (the wifi
+        // busy class) and "status#level" below never collide or evict each
+        // other.
+        vars.set(&class_key("status#battery"), class);
+        // S2: bare percentage for the status button's own `#bat_pct` label.
+        vars.set("bat_pct", charge.to_string());
         // T28: independent `#level` slot drives the `.gauge` fill — see
-        // cpu.rs's set_vars for why this never evicts `class`. `battery`
-        // stays its own module (T29 only merged cpu/memory and claude/
-        // docker), so the bare `p` prefix — no collision possible.
-        vars.set(&class_key("battery#level"), level_class("p", charge));
+        // cpu.rs's set_vars for why this never evicts `class`. The bare `p`
+        // prefix is still collision-free: `status`'s other level-tracking
+        // keys (none exist) and the module's own `#battery`/bare slots
+        // above are distinguished by `Vars`'s key, not by the `p` value.
+        vars.set(&class_key("status#level"), level_class("p", charge));
     }
 }
 

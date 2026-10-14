@@ -55,34 +55,56 @@ Center (time):
 | date | the date. The popup shows a month calendar | focus the calendar app |
 | pomo | pomodoro state | left: start/pause; right: mute |
 
-End (tray → resources → tools → audio → connectivity → session):
+End (tray → resources → tools → audio → network warning → status → session):
 
 | Pill | Shows | Click |
 |---|---|---|
 | tray | hidden while the drawer is closed | the app window or the menu. It goes to an open window first |
 | traytoggle | drawer trigger | open/close the tray drawer |
-| keepass | KeePassXC lock state | show/hide KeePassXC |
 | sysload | two stacked rows. The top row has the cpu icon and gauge. The bottom row has the memory icon and gauge. One popup covers both rows. It gives the exact %, the per-core bars, the temperature and the top processes. It also gives the RAM and swap meters, the page faults and the DIMM data | `btop` |
-| battery | the icon, the gauge and a terminal-nub cap. The popup gives the health, the cycle count, the watts, the time estimate and the power attribution | left: power mode toggle; right: powertop |
 | devload | two stacked rows. The top row shows the Claude usage. The bottom row shows a docker container count and a pending-update count. A count of zero is hidden. One popup covers all three | claude row right: usage settings; docker cell right: docker menu; updates cell left: run `arch-update` |
-| colorpicker | pixel color picker | pick a color (`hyprpicker`) |
-| darkmode | light/dark scheme toggle | toggle scheme |
-| snip | screenshot | left: region; right: window |
-| inhibit | keep-awake state | toggle keep-awake |
+| inhibit | keep-awake state — shown only while on, with a static tooltip | toggle keep-awake |
 | music | the current track on two lines. The dim artist is above the title. The pill is hidden if nothing is loaded | play/pause |
-| volume, mic | audio | `pavucontrol-qt`; scroll: volume |
-| net-spinner, wifi, eth, netsec | network state and a security grade | menus; see below |
-| hotspot | hidden while inactive | left: menu; right: toggle |
-| remote | the popup gives a read-only status: VNC on or off, the blank state of the local screens, the pulled tag, and KDE Connect on or off | left: VNC toggle (this also starts KDE Connect); right: KDE Connect toggle. To cycle the pull, use the SUPER+CTRL keybinds, or click a tag pill on the remote-control strip of the headless bar |
-| bluetooth | devices | right: `blueman-manager` |
+| netwarn | a network-security fault glyph — shown only while the grade needs attention (hidden while secure or offline) | — (see the `status` popup for the network rows) |
+| status | the volume icon and `vol_pct`, the Wi-Fi icon, the Bluetooth icon, and a mini battery gauge with `bat_pct` | left: toggle the popup below; scroll: volume ±5% |
 | power | — | session menu |
+
+The `status` pill (bar-status-panel SPEC §1-§4) replaced the standalone
+`volume`, `mic`, `wifi`, `eth`, `netsec` (while secure), `bluetooth`,
+`battery`, `hotspot`, `remote`, `colorpicker`, `darkmode`, `snip` and
+`keepass` pills with one click-only popup:
+
+| Popup row | Control |
+|---|---|
+| volume | slider (`wpctl set-volume @DEFAULT_AUDIO_SINK@`) + mute |
+| mic | slider (`wpctl set-volume @DEFAULT_AUDIO_SOURCE@`) + mute |
+| brightness | slider (`brightnessctl set`) |
+| Wi-Fi | `wifi-menu.sh` |
+| Ethernet | `eth-toggle.sh` |
+| Bluetooth | `blueman-manager` |
+| Network (security grade) | `net.sh --sec-click` |
+| Power mode | `powermode.sh toggle` |
+| toggle grid | dark mode, keep-awake, screenshot region, color pick, KeePassXC, hotspot menu, remote (VNC) toggle — each reuses its retired pill's own command |
+
+`bri_pct` (brightness) and `bt_text` (Bluetooth device count) are read
+once, when the popup opens. Neither is polled.
+
+The collectors of the removed pills (keepass, hotspot, remote, wifi, eth,
+volume) still write their CSS classes. No module on the bar carries those
+classes now. The daemon drops a class for a module that is not on the bar
+(`genconfig::class_target_known`). It sends no IPC and does not retry.
 
 ## Hover popups
 
 The popups are ironbar `popup` widgets. They are bound to variables that
 the daemon owns. A hover opens a popup. A click does not open it. Each
 pill reports `hover enter|exit` to the daemon. The daemon debounces the
-report: an 80 ms open delay, and a 200 ms grace to cross into the popup.
+report: a 300 ms open delay, and a 200 ms grace to cross into the popup.
+`status` is the one exception: its popup holds controls (sliders, toggle
+buttons), not information, so it opens and closes on left-click only — it
+reports no hover to the daemon at all (bar-status-panel SPEC §4's rule: a
+popup that holds controls opens on click; one that only shows information
+opens on hover).
 
 The daemon then refreshes that collector and toggles the popup. It writes
 only the variables that changed. It debounces these writes at 150 ms.
@@ -136,7 +158,7 @@ and the idle-timeout lock of hypridle both use `sleep-lock.py lock` (see
 `docs/power.md`). For this reason a phase boundary that occurs while the
 screen is locked never rings the bell.
 
-`focus-break.sh` also refuses to open its overlay while `swaylock` runs.
+`focus-break.sh` also refuses to open its overlay while `hyprlock` or `swaylock` runs.
 The overlay closes after 120s (`OVERLAY_TIMEOUT`) if it cannot take the
 keyboard input. `SUPER+SHIFT+Escape` kills a stuck rofi by hand.
 

@@ -41,6 +41,11 @@ pub fn listen() -> io::Result<UnixListener> {
 pub enum HoverEvent {
     Enter,
     Exit,
+    /// `hover toggle <bar> <widget>` — a click-opened popup (the status
+    /// panel). Opens at once with no hover delay, or closes it when it is
+    /// the one already open. The pill's `on_mouse_exit` and the popup's
+    /// hold/release then close it like any hover popup.
+    Toggle,
 }
 
 /// `hover hold <bar>` / `hover release <bar>` — the popup's own *content
@@ -102,6 +107,9 @@ pub fn parse(line: &str) -> Line {
             }
             ["exit", bar, widget] => {
                 Line::Hover(HoverEvent::Exit, bar.to_string(), widget.to_string())
+            }
+            ["toggle", bar, widget] => {
+                Line::Hover(HoverEvent::Toggle, bar.to_string(), widget.to_string())
             }
             ["hold", bar] => Line::HoverPopup(PopupHoverEvent::Hold, bar.to_string()),
             ["release", bar] => Line::HoverPopup(PopupHoverEvent::Release, bar.to_string()),

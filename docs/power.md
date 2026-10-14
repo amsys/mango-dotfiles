@@ -111,9 +111,22 @@ muted. It also sends the new cable state to `powermode.sh`.
 
 The systemd user unit `mango-sleep-lock.service` locks the screen before a
 suspend. It also pauses the pomodoro during the sleep. It holds a logind
-delay inhibitor. It releases the inhibitor when `swaylock --ready-fd`
-confirms the lock, or after a limit of 3 s. It covers each suspend path, and
-this includes the lid close.
+delay inhibitor. hyprlock is the primary locker now, themed by
+`matugen/templates/hyprlock/hyprlock.conf` (see `theming.md`). hyprlock has
+no `--ready-fd`. Thus the script watches its log output for the line
+`onLockLocked called`. hyprlock writes this line when it gets the real,
+protocol-level "locked" signal. hyprlock writes its log to stdout, not
+stderr (the hyprutils logger). The script reads stdout and merges stderr
+into it. When the line appears, the script releases the inhibitor. If the
+line does not appear in 3 s, the script kills hyprlock and starts
+`swaylock --ready-fd`. Then it waits for that fd (up to 1 s more) before
+it releases the inhibitor. The fd write is the same protocol-level
+signal. Thus the script does not release the inhibitor only because a
+locker started: a locker must confirm the lock, or the time limit must
+end. The 4 s total stays below the 5 s logind limit (`InhibitDelayMaxSec`).
+The line is a log message, not an API. Make sure that it is still there
+after each hyprlock upgrade. The script covers each suspend path, and this
+includes the lid close.
 
 This task is not the job of hypridle. A compositor can have no Hyprland
 lock-notify protocol. On such a compositor, hypridle releases its sleep
@@ -122,17 +135,55 @@ yet locked at that time. `hypr/hypridle.conf` gives the full explanation.
 
 The `sleep-lock.py lock` subcommand of the same file extends the pause to
 each *lock*, not only to a suspend. `SUPER+L` and the 300 s idle-timeout
-listener of hypridle call it instead of a bare `swaylock`. Before this
+listener of hypridle call it instead of a bare `hyprlock`. Before this
 change, the pomodoro continued while the screen was locked. A phase boundary
 in that time started a full-screen rofi overlay that could not take keyboard
 input after the unlock. The Pomodoro section of `docs/bar.md` has the
 symptom and the rest of the fix (the swaylock guard and the timeout in
-`focus-break.sh`). `lock` looks for a swaylock process first and does
+`focus-break.sh`). `lock` gives hyprlock 5 s to confirm the lock, then falls
+back to `swaylock`, the same as the suspend path above but with a longer
+limit — `lock` holds no logind inhibitor, so it has no 3 s backstop to
+race. `lock` looks for a running hyprlock or swaylock first and does
 nothing if it finds one, thus you can bind it in all conditions.
 
 `sleep-lock.py test` runs a self-check. The check includes the pause,
-swaylock, and unpause call order of `lock`. `SIGUSR1` on the running daemon
+lock, and unpause call order of `lock`, against a stub hyprlock and a stub
+swaylock: hyprlock confirming the lock, hyprlock timing out so swaylock
+takes over, and a locker already running. `SIGUSR1` on the running daemon
 does a lock-and-pause rehearsal without a suspend.
+
+## Lock screen login
+
+The lock screen has the same column as the boot screen: the clock, the date
+line, and the card with the password field. The date line shows the TPM
+TOTP, the same code as the boot screen. Compare it with the phone. If the
+TPM refuses the seal, the line shows "TPM mismatch: do not enter your
+password" in the error colour. If the TOTP cannot be read (no
+`system/lockscreen` sudo rule), the line shows the date.
+`mango/scripts/lock-status.sh` makes the line. It asks the TPM one time
+for each 30 s slot.
+
+Rows below the card show the fingerprint prompt, "Caps Lock is on", and
+the keep-awake notice. Caps Lock also turns the field outline to the
+`tertiary` colour. A failed attempt shows the attempt count in the field.
+
+Fingerprint login follows the TPM. Each TOTP read writes a verdict to
+`$XDG_RUNTIME_DIR/mango-lock/tpm-state`. `sleep-lock.py` reads it before
+it starts hyprlock. Only "ok" for this boot gives a runtime config with
+`auth:fingerprint` on. A missing, stale or "fail" verdict gives password
+only. The daemon asks for a verdict when it starts, so the first lock of a
+login already has one.
+
+Failed attempts cannot lock you out. `system/lockscreen` gives hyprlock its
+own PAM stack: `pam_unix` with a 3 s delay after each failure, and no
+`pam_faillock`. Before this, hyprlock shared the faillock counter with SDDM,
+the TTYs and sudo, and three wrong attempts locked all of them for
+10 minutes (2026-10-14). `ignore_empty_input` stops an empty Enter (to wake
+the panels) from reaching PAM.
+
+If the lock screen stops taking input, do not restart SDDM: the old session
+keeps tty1, and SDDM cannot start a new one. Go to a TTY and send
+`pkill -USR1 hyprlock`. hyprlock then opens the session.
 
 ## Keep-awake
 

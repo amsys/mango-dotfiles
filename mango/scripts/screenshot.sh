@@ -14,7 +14,7 @@ set -u
 # mango's env= parser does a literal setenv with no ~ or $HOME expansion (see
 # README's "Machine-specific values"), so a leading ~/ has to be expanded here
 # or MANGO_SCREENSHOT_DIR=~/Shots would create a directory literally named ~.
-DIR="${MANGO_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots}"
+DIR="${MANGO_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/pictures}/screenshots}"
 # literal ~/ prefix check, not a shell expansion
 # shellcheck disable=SC2088
 case "$DIR" in

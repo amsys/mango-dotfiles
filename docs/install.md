@@ -113,7 +113,7 @@ The config installer obeys these rules:
 
 | Group | Packages |
 |---|---|
-| Core | `mangowm-git`ᴬ `ironbar kitty rofi-wayland mako` `wlogout`ᴬ `swaylock hypridle matugen awww cliphist wl-clipboard` |
+| Core | `mangowm-git`ᴬ `ironbar kitty rofi-wayland mako` `wlogout`ᴬ `hyprlock swaylock hypridle matugen awww cliphist wl-clipboard` |
 | Tools | `grim slurp swappy hyprpicker tesseract tesseract-data-eng wf-recorder brightnessctl playerctl wireplumber networkmanager nm-connection-editor iw blueman pavucontrol-qt jq libnotify libpulse xdg-user-dirs btop dmidecode imagemagick python-gobject wayvnc kdeconnect` |
 | Look | `fish starship eza ttf-jetbrains-mono-nerd` `adw-gtk-theme-git`ᴬ `breeze-plus`ᴬ `kde-cli-tools ttf-ibm-plex` `ttf-material-symbols-variable-git`ᴬ |
 | Shell | `fd fzf zoxide bat yazi git-delta` |
@@ -144,6 +144,7 @@ its own root script. The installer never symlinks these directories:
 | `system/secureboot/` | the `mango-sign-boot` tool, the GPG and sbctl keys, the mkinitcpio and pacman hooks, and a staged `GRUB-SB` image. The script signs files. It enrolls no key and it enables no firmware setting | — |
 | `system/powermode/` | the root helper that writes the CPU and PCI power knobs | [power.md](power.md) |
 | `system/rapl/` | read access to the RAPL power counters, and a powertop sudo rule | [power.md](power.md) |
+| `system/lockscreen/` | the hyprlock PAM stack without faillock, and the sudo rule that lets the lock screen show the TPM TOTP. Needs `system/tpm-totp/` first | [power.md](power.md) |
 | `system/fprint-notify/` | the root helper and the icon that show a notification for each fingerprint request. The script prints the two PAM lines, but it does not edit `/etc/pam.d/sudo` | [security.md](security.md) |
 | `system/vault/` | the udev rule that gives the active seat an ACL on the Power Button evdev node. `mango-powerkey` then works after you leave the `input` group. Also holds `vault-session`, the wallet sandbox launcher, which `install-config.sh` links to `~/.local/bin/` | — |
 | `system/hotspot/` | the Wi-Fi hotspot helper | — |

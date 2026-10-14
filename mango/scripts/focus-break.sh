@@ -26,12 +26,18 @@ if [ "${1:-}" = "test" ]; then
 	chmod +x "$TMP/rofi"
 
 	# swaylock running -> the guard must skip rofi entirely.
-	printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/pidof"
+	printf '#!/usr/bin/env bash\n[ "$1" = swaylock ] && exit 0\nexit 1\n' >"$TMP/pidof"
 	chmod +x "$TMP/pidof"
 	MARK="$TMP/marked-locked" "$0" "Break" 5
-	[ -e "$TMP/marked-locked" ] && { echo "guard did not skip rofi while locked"; exit 1; }
+	[ -e "$TMP/marked-locked" ] && { echo "guard did not skip rofi while locked (swaylock)"; exit 1; }
 
-	# swaylock not running -> the overlay must still fire.
+	# hyprlock running -> the guard must also skip rofi.
+	printf '#!/usr/bin/env bash\n[ "$1" = hyprlock ] && exit 0\nexit 1\n' >"$TMP/pidof"
+	chmod +x "$TMP/pidof"
+	MARK="$TMP/marked-locked-hypr" "$0" "Break" 5
+	[ -e "$TMP/marked-locked-hypr" ] && { echo "guard did not skip rofi while locked (hyprlock)"; exit 1; }
+
+	# neither locker running -> the overlay must still fire.
 	printf '#!/usr/bin/env bash\nexit 1\n' >"$TMP/pidof"
 	chmod +x "$TMP/pidof"
 	MARK="$TMP/marked-unlocked" "$0" "Break" 5
@@ -57,7 +63,10 @@ MINUTES="${2:?usage: focus-break.sh <phase-label> <minutes>}"
 # keyboard, and mango does not re-scan it on unlock, leaving it visible and
 # deaf (the `killall rofi` bug this guard exists to prevent). Every lock
 # path is meant to pause the pomodoro instead (sleep-lock.py's `lock`
-# subcommand), so this is defense in depth, not the primary fix.
+# subcommand), so this is defense in depth, not the primary fix. hyprlock is
+# the primary locker and swaylock its fallback (SPEC.md §7) — recognise
+# whichever one is actually on screen.
+pidof hyprlock >/dev/null && exit 0
 pidof swaylock >/dev/null && exit 0
 
 MSG="$LABEL — $MINUTES min"

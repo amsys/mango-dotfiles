@@ -53,7 +53,7 @@ export GNUPGHOME=$ETC/gnupg
 PUBKEY=$ETC/grub-pubkey.gpg
 
 [ "$(id -u)" -eq 0 ] || { echo "run me with sudo" >&2; exit 1; }
-for cmd in sbctl grub-install gpg; do
+for cmd in sbctl grub-install gpg jq; do
 	command -v "$cmd" >/dev/null || { echo "missing dependency: $cmd" >&2; exit 1; }
 done
 [ -d /sys/firmware/efi ] || { echo "not an EFI boot" >&2; exit 1; }

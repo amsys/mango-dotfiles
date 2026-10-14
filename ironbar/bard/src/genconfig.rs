@@ -19,6 +19,7 @@ use crate::mango::{
     overview_label, slugs_for, tag_label, var_lbl, var_ov, var_tags, var_tip, ws_module,
     ws_module_ov, TAG_COUNT,
 };
+use crate::net::IC_ETH;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -211,6 +212,8 @@ pub fn build(monitors: &[String]) -> Value {
     defaults.insert("net_busy".into(), json!("false"));
     defaults.insert("wifi_show".into(), json!("true"));
     defaults.insert("wifi_text".into(), json!(""));
+    defaults.insert("wifi_icon".into(), json!(""));
+    defaults.insert("wifi_pct".into(), json!(""));
     defaults.insert("eth_text".into(), json!(""));
     defaults.insert("sec_text".into(), json!(""));
     // T19: wifi/eth/netsec detail popups (T7b) — see net.rs's
@@ -218,13 +221,40 @@ pub fn build(monitors: &[String]) -> Value {
     defaults.insert("wifi_tip".into(), json!(""));
     defaults.insert("eth_tip".into(), json!(""));
     defaults.insert("sec_tip".into(), json!(""));
+    // S2 (bar-status-panel SPEC): the status popup's Wi-Fi/Ethernet/Network
+    // detail rows carry a right-hand value column now — see net.rs's own
+    // `wifi_state`/`eth_state`/`sec_state` writers (refresh()).
+    defaults.insert("wifi_state".into(), json!("off"));
+    defaults.insert("eth_state".into(), json!(""));
+    defaults.insert("sec_state".into(), json!(""));
     // T4 audio vars — see audio.rs.
     defaults.insert("vol_text".into(), json!(""));
     defaults.insert("vol_tip".into(), json!(""));
     defaults.insert("mic_text".into(), json!(""));
+    // The mic mute button's own label, independent of
+    // `mic_text` (empty unless muted — see audio.rs). Default is the
+    // unmuted glyph (IC_MIC, audio.rs:29) so the button is never empty
+    // before audio.rs's first refresh.
+    defaults.insert("mic_icon".into(), json!("\u{f036c}"));
+    // S2 (bar-status-panel SPEC §3): bare percentage numerals for the
+    // `status` module's compact button and its popup sliders — distinct
+    // from `vol_text`/`mic_text` above, which carry an icon glyph, not a
+    // number. Default "0", not "": the popup slider's own `value` script
+    // (`ironbar var get vol_pct`) must always parse as a number.
+    defaults.insert("vol_pct".into(), json!("0"));
+    defaults.insert("mic_pct".into(), json!("0"));
+    // S2: brightness, read on popup open only (power.rs::refresh_brightness,
+    // dispatched by the "status-detail" topic) — never polled, see SPEC §3.
+    defaults.insert("bri_pct".into(), json!("0"));
     // T5 power vars — see power.rs.
     defaults.insert("bat_text".into(), json!(""));
     defaults.insert("bat_tip".into(), json!(""));
+    // S2: the status button's own battery numeral — see `bat_text` above
+    // for the (now orphaned but harmless) rich tip text.
+    defaults.insert("bat_pct".into(), json!("0"));
+    // S2 (bar-status-panel SPEC): the status popup's Power mode row value —
+    // see power.rs's `refresh()`, which writes `pm_mode.as_str()`.
+    defaults.insert("pm_state".into(), json!(""));
     // T6a cpu/memory vars — see cpu.rs/memory.rs. `_tip` entries added at
     // T7a: the popup content, built lazily by `refresh_detail` (D1/D2).
     defaults.insert("cpu_text".into(), json!(""));
@@ -244,12 +274,25 @@ pub fn build(monitors: &[String]) -> Value {
     // has no show_if, unlike hotspot's above.
     defaults.insert("remote_text".into(), json!(""));
     defaults.insert("remote_tip".into(), json!(""));
+    // S2 (bar-status-panel SPEC §3): bluetooth device count, read on popup
+    // open only (net.rs::refresh_bt_text, dispatched by "status-detail" —
+    // same no-poll rule as `bri_pct` above).
+    defaults.insert("bt_text".into(), json!("No devices"));
+    // S2 (bar-status-panel SPEC §2/§3): true unless the netsec grade is
+    // secure or offline — gates the `netwarn` pill's own show_if
+    // (net.rs::regrade()).
+    defaults.insert("net_warn".into(), json!("false"));
     // keep-awake — see keepawake.rs. Keys stay named `inhibit_*` (not
     // `keepawake_*`): they replace the native `inhibit` module's own
     // `format_on`/`format_off` in place, and the style.css `.inhibit`
     // selectors already target this class.
     defaults.insert("inhibit_text".into(), json!(""));
-    defaults.insert("inhibit_tip".into(), json!(""));
+    // S1 (bar-status-panel SPEC §2/§5e/§7): `awake_on` gates the pill's own
+    // `show_if` — defaults "false" (hidden) like `hotspot_show` above,
+    // since the daemon's first `keepawake.refresh()` hasn't landed yet at
+    // config-generation time. `inhibit_tip` is gone: the popup it fed is
+    // replaced by a static tooltip (`inhibit_module()`'s own doc comment).
+    defaults.insert("awake_on".into(), json!("false"));
     defaults.insert("dark_icon".into(), json!(""));
     // T6c claudebar vars — see claude.rs.
     defaults.insert("claude_text".into(), json!(""));
@@ -386,6 +429,51 @@ pub fn build(monitors: &[String]) -> Value {
     })
 }
 
+/// True if `module` is the name of a module that `build()` puts on a bar,
+/// so an `ironbar style add-class` to it can succeed.
+///
+/// S2 (bar-status-panel SPEC §2): the panel removed many pills (keepass,
+/// hotspot, remote, wifi, ...), but their collectors still write `@class/`
+/// keys. A class write to a module that does not exist fails at every
+/// flush and retries every `RETRY_COOLDOWN` (vars.rs, T-freeze-2026-08-29).
+/// main.rs's `flush_vars` uses this check to drop such keys. The set comes
+/// from `build()` itself, so a module that leaves the bar in a later change
+/// is covered with no second list to keep in sync. `ws-*` names depend on
+/// the live outputs, and mango.rs prunes those itself, so all `ws-*` names
+/// pass.
+pub fn class_target_known(module: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    if module.starts_with("ws-") {
+        return true;
+    }
+    NAMES
+        .get_or_init(|| {
+            // One real and one HEADLESS output, so both bar shapes and the
+            // fallback bar contribute their module names.
+            let cfg = build(&["X-1".to_string(), "HEADLESS-1".to_string()]);
+            let mut names = HashSet::new();
+            let bars = std::iter::once(&cfg).chain(
+                cfg["monitors"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|m| m.values()),
+            );
+            for bar in bars {
+                for row in ["start", "center", "end"] {
+                    for m in bar[row].as_array().into_iter().flatten() {
+                        if let Some(n) = m["name"].as_str() {
+                            names.insert(n.to_string());
+                        }
+                    }
+                }
+            }
+            names
+        })
+        .contains(module)
+}
+
 /// `end` row, grouped by domain per statusbar-layout.md §3.3-3.8: tray
 /// (leads, INV-1 growth end) → resources → darkmode/inhibit → audio →
 /// connectivity →
@@ -409,18 +497,26 @@ fn end_modules(bar_name: &str) -> Vec<Value> {
     // always visible, no hide-behind-toggle. `tray_toggle_module()` is
     // simply not added when disabled; `tray_module()` itself drops its own
     // `show_if` in the same case (see its own doc comment).
+    // S2 (bar-status-panel SPEC §2): `keepass`/`hotspot`/`remote`/
+    // `bluetooth` are gone from this row — each one's exact `on_click`
+    // command moves into the `status` popup's toggle-button row instead
+    // (`status_popup()`'s own doc comment), reusing the command, not the
+    // module. `net_modules()` (wifi/eth/netsec/net-spinner) is replaced by
+    // `netwarn_module()` alone — the rest of that detail also moves into
+    // the popup. `power_modules()` (the standalone `battery` pill) is gone
+    // too: the mini gauge it drew now lives inside `status_module()`
+    // itself (see that function's own doc comment for the class-reuse
+    // trick that keeps every `.battery`/`.gauge*` style.css rule working
+    // unmodified).
     let mut end = vec![tray_module()];
     if TRAY_DRAWER_ENABLED {
         end.push(tray_toggle_module());
     }
-    end.push(keepass_module(bar_name));
     end.extend(resource_modules(bar_name));
-    end.extend(tools_modules(bar_name));
+    end.extend(tools_modules());
     end.extend(audio_modules(bar_name));
-    end.extend(net_modules(bar_name));
-    end.push(hotspot_module(bar_name));
-    end.push(remote_module(bar_name));
-    end.push(bluetooth_module(bar_name));
+    end.push(netwarn_module());
+    end.push(status_module(bar_name));
     end.push(power_module());
     end
 }
@@ -439,13 +535,16 @@ fn end_modules(bar_name: &str) -> Vec<Value> {
 /// one stacked module (`sysload_module()`/`devload_module()`) — see either
 /// function's own doc comment for why a plain two-row `custom` module,
 /// rather than nesting native modules, is the only shape that keeps every
-/// row's own state classes reachable. `battery` is unaffected: it was
-/// already a single row and stays one.
+/// row's own state classes reachable. S2: `battery` dropped out of this
+/// group entirely — see the function body's own comment.
 fn resource_modules(bar_name: &str) -> Vec<Value> {
-    let mut m = vec![sysload_module(bar_name)];
-    m.extend(power_modules(bar_name));
-    m.push(devload_module(bar_name));
-    m
+    // S2 (bar-status-panel SPEC §2): `power_modules()` (the standalone
+    // `battery` pill) dropped out of this group — its mini gauge now lives
+    // inside `status_module()` instead (see that function's own doc
+    // comment). `power.rs::refresh()` keeps running unmodified: it still
+    // drives the AC-edge/powermode side effects regardless of whether any
+    // bar pill displays its output.
+    vec![sysload_module(bar_name), devload_module(bar_name)]
 }
 
 /// `center`'s whole content (statusbar-layout.md §3.2): clock, date, pomo —
@@ -469,17 +568,21 @@ fn time_modules(bar_name: &str) -> Vec<Value> {
 
 /// T31: the T23 tools drawer is gone — the user judged the "…" trigger a
 /// waste of space, and wants the TOOLS THEMSELVES back on the bar, not
-/// hidden: colorpicker, darkmode and snip return as standalone pills in
-/// the T23 reading order, `inhibit` follows unchanged. (The first T31 cut
+/// hidden: colorpicker, darkmode and snip returned as standalone pills in
+/// the T23 reading order, `inhibit` following unchanged. (The first T31 cut
 /// deleted colorpicker/snip as keybind duplicates — user feedback
 /// reversed that: "remove the drawer" meant the reveal mechanism only.)
-fn tools_modules(bar_name: &str) -> Vec<Value> {
-    vec![
-        colorpicker_module(),
-        darkmode_module(),
-        snip_module(),
-        inhibit_module(bar_name),
-    ]
+///
+/// S2 (bar-status-panel SPEC §2): colorpicker/darkmode/snip leave the bar
+/// again — this time into the `status` popup's own toggle-button row
+/// (`status_popup()`'s own doc comment), each reusing its exact
+/// `on_click_left` command. `inhibit` is the one survivor: SPEC §2 keeps it
+/// as the bar's own conditional keep-awake pill (S1 already gave it
+/// `show_if: "#awake_on"` — see `inhibit_module()`), distinct from the
+/// *also*-reachable keep-awake toggle button the popup carries for
+/// convenience when the pill itself is hidden (off).
+fn tools_modules() -> Vec<Value> {
+    vec![inhibit_module()]
 }
 
 /// T8c: `truncate` added (= config.jsonc:22's `max-length: 32`, dropped
@@ -642,22 +745,11 @@ fn tray_toggle_module() -> Value {
     })
 }
 
-/// KeePassXC lock-state pill (T28, see keepass.rs) — promoted out of the
-/// tray drawer since lock state is glance-worthy. `on_click_left` reuses
-/// the exact named scratchpad already bound to `Alt+k` in mango/config.conf
-/// (`toggle_named_scratchpad,org.keepassxc.KeePassXC,none,keepassxc`).
-fn keepass_module(bar_name: &str) -> Value {
-    json!({
-        "type": "custom",
-        "name": "keepass",
-        "class": "keepass",
-        "bar": [ { "type": "button", "label": "#kp_text" } ],
-        "popup": popup("kp_tip", bar_name),
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} keepass -q"),
-        "on_mouse_exit": format!("mango-bard hover exit {bar_name} keepass -q"),
-        "on_click_left": "mmsg dispatch toggle_named_scratchpad,org.keepassxc.KeePassXC,none,keepassxc"
-    })
-}
+// S2 (bar-status-panel SPEC §2): the KeePassXC lock-state pill this used to
+// be (`keepass_module()`, T28) leaves the bar — its `#kp_text` glyph and its
+// `on_click_left` (the named scratchpad bound to `Alt+k` in
+// mango/config.conf: `toggle_named_scratchpad,org.keepassxc.KeePassXC,none,
+// keepassxc`) are now a toggle-button row in `status_popup()` instead.
 
 // T29: `archupdate` (T28, see archupdate.rs) stopped being its own
 // top-level pill — its `au_text`/`au_show`/`au_tip` ironvars and its click
@@ -774,143 +866,397 @@ fn pomo_pill(bar_name: &str) -> Value {
     })
 }
 
-/// Single glyph, animated by CSS `@keyframes` — this is what T0/S4 already
-/// concluded (spinner-over-IPC would cost ~72us x 8.3Hz forever while a
-/// link transitions; a class-flipping var costs one set per transition
-/// edge instead). First frame of net-watch.sh's own pie-slice family
-/// (`\xf3\xb0\xaa\xa5`, U+F0AA5) — reused rather than picking a fresh glyph,
-/// since it is already proven to render in this environment.
-const NET_SPINNER_GLYPH: &str = "\u{f0aa5}";
+// S2 (bar-status-panel SPEC §2/§5): the standalone `net-spinner` pill this
+// glyph used to feed is gone from the bar — `status_module()`'s own wifi
+// icon now carries the busy state as a CSS class instead of swapping to a
+// dedicated spinner glyph (see that function's own doc comment).
 
-/// Audio block (statusbar-layout.md §3.6): music, volume, mic — one domain
-/// by proximity/common region ("what's playing, and what is the machine
-/// doing with sound"). T23: `music_module()` moved here from `start`'s old
-/// `leftcenter_modules()`/`resource_modules()` group — see this function's
-/// own doc comment for why the resource block is machine-health only now.
+/// Audio block (statusbar-layout.md §3.6): music only now. T23: `music_module()`
+/// moved here from `start`'s old `leftcenter_modules()`/`resource_modules()`
+/// group — see this function's own doc comment for why the resource block
+/// is machine-health only now.
 ///
-/// Volume/mic: T4 (see audio.rs). Bar-global, like `net_modules()` —
-/// audio state is the same on every monitor. Click layout is a T4 design
-/// decision (IRONBAR.md has no hover tooltip, so the popup needs a click):
-/// left opens the popup (the detail that used to live under hover), right
-/// and middle keep waybar's own `on-click`/`on-click-right`
-/// (config.jsonc:309-312) unchanged. Scroll wiring is copied verbatim from
-/// the same lines.
-///
-/// T9: `vol_text` dropped its `NN%` suffix (see `audio.rs::refresh()` —
-/// icon only now, percentage stays in the popup this already opens on
-/// click) to stop crowding the wifi/eth/netsec trio next to it. A
-/// `SliderWidget` in the popup was tried and rejected: live-spiked against
-/// a throwaway ironbar instance (`SliderWidget.value`'s `ScriptInput`),
-/// its value script fired 8 times *before the popup was ever opened* and
-/// kept firing roughly every 3s with the popup closed — an unconditional
-/// poll, not a fetch-on-open, the exact always-on pattern T7a's own design
-/// correction already rejected for embedded interval scripts (IRONBAR.md's
-/// T7a entry). No slider; the text meter `tooltip.rs` already builds stays
-/// the only popup content.
+/// S2 (bar-status-panel SPEC §2): the standalone `volume`/`mic` pills this
+/// used to also build are gone — `status_module()` shows the compact icon +
+/// `#vol_pct` and `status_popup()` carries the full sliders/mute controls
+/// that used to live in `volume`'s own popup. T9 rejected a `SliderWidget`
+/// because its poll-mode `value` script runs while the popup stays closed.
+/// The status sliders use watch mode on `slider-watch.sh` instead, so they
+/// cost no wakeups at idle. See `status_slider_row()`.
 fn audio_modules(bar_name: &str) -> Vec<Value> {
-    vec![
-        music_module(bar_name),
-        json!({
-            "type": "custom",
-            "name": "volume",
-            "class": "volume",
-            "bar": [ { "type": "button", "label": "#vol_text" } ],
-            "popup": popup("vol_tip", bar_name),
-            // T-hover: on_click_left's plain toggle-popup is gone — hover
-            // opens/closes it instead (marks audio_due, same "already fresh
-            // off its own event stream" shape as battery/docker). Scroll and
-            // right are untouched; T15 moves the tabbed mixer shortcut that
-            // used to live on middle-click onto left (freed by the toggle
-            // removal above — a launch, not a toggle, so it cannot fight
-            // hover's open/close).
-            "on_mouse_enter": format!("mango-bard hover enter {bar_name} volume -q"),
-            "on_mouse_exit": format!("mango-bard hover exit {bar_name} volume -q"),
-            "on_click_left": "pavucontrol-qt -t 5",
-            "on_click_right": "pavucontrol-qt",
-            "on_scroll_up": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%+ -l 1.0",
-            "on_scroll_down": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%-"
-        }),
-        json!({
-            "type": "custom",
-            "name": "mic",
-            "class": "mic",
-            "bar": [ { "type": "label", "label": "#mic_text" } ],
-            "tooltip": "Microphone mute state"
-        }),
-    ]
+    vec![music_module(bar_name)]
 }
 
-/// Network pills: T3 (see net.rs). Bar-global — one instance per bar, like
-/// `window_module()` — rather than per-monitor, since network state is the
-/// same everywhere. Module names double as `@class/<module>` targets,
-/// exactly as `ws_module()` establishes for workspace pills (mango.rs).
+/// S2 (bar-status-panel SPEC §2): the network pills T3 built here (wifi/eth/
+/// netsec/net-spinner, see net.rs) are gone from the bar — their click
+/// targets (`wifi-menu.sh`/`eth-toggle.sh`/`net.sh --sec-click`) are now
+/// row buttons in `status_popup()`, and their state icons move into
+/// `status_module()`'s compact button. `netwarn_module()` (below) is the
+/// one survivor: a fault pill, shown only while the network needs
+/// attention. One left click opens the VPN picker (SPEC §5).
 ///
-/// Click paths point at `~/.config/ironbar/scripts/<script>` — the surviving
-/// click-only shell scripts, moved there at T8 from waybar's own
-/// `config.jsonc` convention (now deleted, waybar with it). T3 keeps every
-/// click-driven menu as shell (IRONBAR.md goal 4); only the polling/event
-/// code moved into the daemon. `nm-connection-editor` is a real installed
-/// binary, not a repo script, so it is referenced bare.
+/// Net security warning pill (bar-status-panel SPEC §2/§3): replaces the
+/// retired standalone `netsec` pill. `class: "netsec"` is a deliberate
+/// reuse, not a new name: every `.netsec.*` style.css rule (the lock
+/// color ramp, the `netsec-pulse` keyframe, the font-family/padding
+/// entries in the shared icon-pill lists) already matches on that literal
+/// class, and `net.rs::regrade()` now pushes its verdict class to the IPC
+/// module name "netwarn" (ipc.rs::set_class addresses by JSON `name`, not
+/// `class` — see net.rs's own comment) — the widget ends up carrying both
+/// "netsec" (static) and e.g. "open" (dynamic) at once, so the existing
+/// `.netsec.open` selector matches with no CSS change needed. No popup, no
+/// hover: the full wifi/eth/bluetooth/netsec detail lives in
+/// `status_popup()` now. A module-level `on_click_left` runs
+/// `net.sh --sec-click`, which opens the VPN picker. Module-level keys take
+/// no `!` prefix (only nested widget handlers need it).
+fn netwarn_module() -> Value {
+    json!({
+        "type": "custom",
+        "name": "netwarn",
+        "class": "netsec",
+        "show_if": "#net_warn",
+        "bar": [ { "type": "label", "label": "#sec_text" } ],
+        "tooltip": "Not protected — click to pick a VPN",
+        "on_click_left": "~/.config/ironbar/scripts/net.sh --sec-click"
+    })
+}
+
+/// Bluetooth glyph for the compact `status` button — T19's "enabled" state
+/// codepoint (nf-md bluetooth), live-confirmed rendering correctly on this
+/// machine (see the retired `bluetooth_module()`'s own history, kept in
+/// this file's git log). Reused as a fixed presence icon, not a per-state
+/// one: `status_popup()`'s own bluetooth row carries the live `#bt_text`
+/// detail (device count), so the compact button only needs "bluetooth is a
+/// thing", not which of its four states applies.
+const IC_STATUS_BT: &str = "\u{f00af}";
+
+/// Compact status button (bar-status-panel SPEC §1/§2): volume icon +
+/// `#vol_pct`, a wifi icon, a fixed bluetooth glyph, and a battery mini
+/// gauge + `#bat_pct` — one button standing in for the volume/mic/wifi/
+/// eth/netsec/bluetooth/battery pills it replaces; their full detail and
+/// controls are one click away in `status_popup()` instead. Left click
+/// toggles the popup (SPEC §4's rule: a popup that holds controls opens on
+/// click, never hover — so this module carries no `on_mouse_enter`/`exit`
+/// at all, unlike every hover-eligible pill elsewhere in this file).
+/// Scroll changes volume, the same ±5% step the retired `volume` pill's
+/// `on_scroll_up`/`down` used to carry (widened from its own 2% — SPEC §4).
 ///
-/// T19: `wifi`/`eth`/`netsec` gain hover detail popups (net.rs's
-/// `refresh_wifi_tip`/`refresh_eth_tip`/`refresh_sec_tip`, T7b) — the last
-/// three pills that still carried a static `tooltip` instead. Each moves
-/// from a bare `label` to a `button` (only a real `GtkButton` registers a
-/// popup anchor — a bare label never does, confirmed by every other
-/// popup-bearing module in this file) and drops its `tooltip` string, whose
-/// gesture hint moved into `tooltip.rs`'s `HINTS` table
-/// (`wifi_tip`/`eth_tip`/`sec_tip`). `on_click_left`/`on_click_right` stay —
-/// both are launches (a menu script, an external editor), never a popup
-/// toggle, so neither fights hover the way a leftover `toggle-popup` would.
-/// `net_modules` now takes `bar_name`, same shape as `audio_modules`/
-/// `sysload_module`, to build the `hover enter|exit <bar> <widget>` commands.
-fn net_modules(bar_name: &str) -> Vec<Value> {
-    vec![
-        json!({
-            "type": "custom",
-            "name": "net-spinner",
-            "class": "net-spinner",
-            "show_if": "#net_busy",
-            "bar": [ { "type": "label", "label": NET_SPINNER_GLYPH } ]
+/// `class: "status battery"` is the same reuse trick `netwarn_module()`
+/// uses for `.netsec`: giving the module a second, static class means
+/// every existing `.battery`/`.gauge`/`.gauge-fill`/`.gauge-cap`/`.pNN
+/// .gauge-fill`/`.battery.charging`/`.battery.critical` style.css rule
+/// (sizing, the level-color ramp, the charging pulse) matches unmodified —
+/// `power.rs::refresh()` now keys its charge/level class writes to the
+/// "status" module name instead of the retired "battery" one (ipc.rs
+/// addresses by `name`), but the *value* it sends (`charging`/`critical`/
+/// `pNN`) is unchanged, so the node ends up carrying "battery" (static)
+/// and e.g. "charging" (dynamic) at once, which is exactly what those
+/// selectors already require. The wifi icon's own nested label gets the
+/// static class "net-spinner" the same way, for its font stack only — the
+/// spin keyframe itself is scoped to `.status.busy .net-spinner` in
+/// style.css (a NEW rule: `net.rs::refresh_busy_var()` can only class the
+/// whole `status` module over IPC, never a widget nested inside it, so the
+/// busy trigger class sits one level up from the icon it visually
+/// animates).
+fn status_module(bar_name: &str) -> Value {
+    json!({
+        "type": "custom",
+        "name": "status",
+        "class": "status battery",
+        "bar": [ { "type": "button", "widgets": [
+            { "type": "label", "label": "#vol_text" },
+            { "type": "label", "class": "vol-pct", "label": "#vol_pct" },
+            { "type": "label", "class": "net-spinner", "label": "#wifi_icon" },
+            { "type": "label", "label": IC_STATUS_BT },
+            { "type": "box", "class": "gauge", "valign": "center", "widgets": [
+                { "type": "box", "class": "gauge-fill" }
+            ] },
+            { "type": "box", "class": "gauge-cap", "valign": "center" },
+            { "type": "label", "class": "bat-pct", "label": "#bat_pct" }
+        ] } ],
+        "popup": status_popup(bar_name),
+        // Click opens at once and a second click closes (`hover toggle`).
+        // Leaving the button or the popup closes it after the 200 ms grace,
+        // the same as every hover popup. The first build used ironbar's
+        // own `toggle-popup`, and the popup then stayed open until the
+        // next click on the button (user report, 2026-10-03).
+        "on_click_left": format!("mango-bard hover toggle {bar_name} status -q"),
+        "on_mouse_exit": format!("mango-bard hover exit {bar_name} status -q"),
+        "on_scroll_up": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+ -l 1.0",
+        "on_scroll_down": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+    })
+}
+
+/// One slider row of `status_popup()`: a mute button or a plain icon, a
+/// `SliderWidget`, and a value label.
+///
+/// The slider value comes from `slider-watch.sh <source>` in ironbar's
+/// `watch` mode: the script prints the value once, then again on each real
+/// change event (pactl sink/source events, the backlight uevent). It does
+/// not poll. The first build used a poll-mode `ironbar var get <var>`. That
+/// ran every 5 s on every bar while the popup was closed, and it put a
+/// dragged brightness slider back to the value from the popup open,
+/// because nothing refreshed `bri_pct` after a drag (S2 judge, 2026-10-03).
+///
+/// `show_label: false` and a `#var` value label in its own column: GTK's
+/// own drawn value floats above the knob with one decimal ("98.5"), out of
+/// line with the rows (user screenshot, 2026-10-03). The labels stay live:
+/// mango-bard writes `vol_pct`/`mic_pct` from pactl events, and
+/// `slider-watch.sh brightness` writes `bri_pct` on each backlight event.
+///
+/// `icon` doubles as the mute button's own label when `mute_cmd` is set
+/// (`#vol_text`/`#mic_icon` — confirmed in audio.rs: both are glyph-only
+/// and change on mute, so the button needs no separate state var; mic
+/// uses `mic_icon`, not `mic_text`, because `mic_text` is empty unless
+/// muted) and as a plain icon label otherwise (the
+/// brightness row has no mute concept).
+/// `on_change` and `mute_cmd` are the bare command text, with no leading
+/// `!` — this function adds it. ironbar's custom-widget dispatcher
+/// (`modules/custom/mod.rs`) runs a nested `ButtonWidget.on_click`/
+/// `SliderWidget.on_change` as a shell command ONLY when the string starts
+/// with `!`; anything else is logged "Received invalid command" and
+/// dropped (ironbar 0.19.1 source, `modules/custom/mod.rs`, the
+/// `starts_with('!')` branch of `spawn_controller`). The slider's changed value still lands in
+/// `$0` inside the command text (POSIX `sh -c <cmd> <value>` assigns the
+/// first argument after the command string to `$0`, not `$1`): the `!`
+/// prefix only changes which strings ironbar is willing to run, not how it
+/// runs them.
+///
+/// The mute button carries a `tooltip`. `ButtonWidget` itself has no such
+/// field, but every nested widget also takes the flattened common options
+/// (`WidgetConfig` in `ironbar --print-schema`), and `tooltip` is one.
+fn status_slider_row(
+    icon: &str,
+    source: &str,
+    value_var: &str,
+    on_change: &str,
+    mute_cmd: Option<&str>,
+) -> Value {
+    let item1 = match mute_cmd {
+        Some(cmd) => json!({
+            "type": "button",
+            "class": "popup-mute",
+            "label": icon,
+            "tooltip": "Mute",
+            "on_click": format!("!{cmd}")
         }),
+        None => json!({ "type": "label", "class": "popup-row-icon", "label": icon }),
+    };
+    // item1 (mute button or brightness icon label) sits in a
+    // fixed-width column so all three slider tracks start at one x — see
+    // `style.css`'s own `.popup-icon-col` rule for why a wrapper box, not a
+    // `min-width` on the label/button itself, is required (GTK centres a
+    // width-constrained label; a box lets the child keep its own size).
+    let icon_col = json!({ "type": "box", "class": "popup-icon-col", "widgets": [item1] });
+    let widgets = vec![
+        icon_col,
         json!({
-            "type": "custom",
-            "name": "wifi",
-            "class": "wifi",
-            // Logical inverse of net_busy: the spinner REPLACES the wifi
-            // pill rather than sitting beside it (net.sh:598-608's
-            // contract, ported to show_if — see net.rs's refresh_busy_var).
-            "show_if": "#wifi_show",
-            "bar": [ { "type": "button", "label": "#wifi_text" } ],
-            "popup": popup("wifi_tip", bar_name),
-            "on_mouse_enter": format!("mango-bard hover enter {bar_name} wifi -q"),
-            "on_mouse_exit": format!("mango-bard hover exit {bar_name} wifi -q"),
-            "on_click_left": "~/.config/ironbar/scripts/wifi-menu.sh",
-            "on_click_right": "nm-connection-editor"
+            "type": "slider",
+            "class": "popup-slider",
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "show_label": false,
+            // ironbar 0.19.1 SliderWidget has no hexpand; `length` fixes
+            // the width so the three rows line up. 220, not 200: the thick
+            // pill trough (style.css) is itself 220px wide.
+            "length": 220,
+            "value": {
+                "mode": "watch",
+                "cmd": format!("~/.config/ironbar/scripts/slider-watch.sh {source}")
+            },
+            "on_change": format!("!{on_change}")
         }),
-        json!({
-            "type": "custom",
-            "name": "eth",
-            "class": "eth",
-            "bar": [ { "type": "button", "label": "#eth_text" } ],
-            "popup": popup("eth_tip", bar_name),
-            "on_mouse_enter": format!("mango-bard hover enter {bar_name} eth -q"),
-            "on_mouse_exit": format!("mango-bard hover exit {bar_name} eth -q"),
-            "on_click_left": "~/.config/ironbar/scripts/eth-toggle.sh",
-            "on_click_right": "nm-connection-editor"
-        }),
-        json!({
-            "type": "custom",
-            "name": "netsec",
-            "class": "netsec",
-            "bar": [ { "type": "button", "label": "#sec_text" } ],
-            "popup": popup("sec_tip", bar_name),
-            "on_mouse_enter": format!("mango-bard hover enter {bar_name} netsec -q"),
-            "on_mouse_exit": format!("mango-bard hover exit {bar_name} netsec -q"),
-            "on_click_left": "~/.config/ironbar/scripts/net.sh --sec-click",
-            "on_click_right": "~/.config/ironbar/scripts/net.sh --sec-edit"
-        }),
-    ]
+        json!({ "type": "label", "class": "popup-row-value", "label": format!("#{value_var}") }),
+    ];
+    json!({ "type": "box", "class": "popup-row popup-slider-row", "widgets": widgets })
+}
+
+/// One click-only detail row of `status_popup()`: a single full-row
+/// `ButtonWidget` (`class: "popup-row-button"`) holding four `LabelWidget`
+/// children — icon, text label, right-hand value, chevron — so the whole
+/// row is one click target, not just its text (user report: "all the
+/// buttons down have hover highlight, but are not clickable" — the hover
+/// rect already covered the full row via CSS, but only the text label sat
+/// inside an actual `ButtonWidget`; clicking the icon or value columns hit
+/// nothing). The labels carry no `on_click_*`/`on_mouse_*` of their own, so
+/// they stay windowless and every click falls through to the button
+/// underneath (confirmed against `modules/custom/button.rs`: a nested
+/// widget only gets its own event controller when its `common` config sets
+/// one of those fields). `icon` is a bare `#var` or a literal glyph, never
+/// mixed with text — `every_referenced_var_has_a_default`'s own var
+/// collector only understands a `#var` field as a pure reference, the same
+/// convention every other module in this file already follows.
+///
+/// `on_click` is the bare command, no leading `!` — see `status_slider_row`'s
+/// own doc comment for why this function adds it.
+fn status_detail_row(icon: &str, label: &str, value: &str, on_click: &str) -> Value {
+    // Label and value each sit in a fixed-width column so the
+    // rows line up — a wrapper `box`, not a `min-width` on the label
+    // itself, for the same centring reason `popup-icon-col` needs one (see
+    // `status_slider_row`'s own doc comment). The value label also gets
+    // `truncate` (same shape as `window_module()`'s own `#win_text` at
+    // this file's `win_text` label) so a long value (e.g. a Wi-Fi SSID)
+    // clips instead of stretching the row.
+    let label_col = json!({
+        "type": "box",
+        "class": "popup-col-label",
+        "widgets": [{ "type": "label", "class": "popup-row-label", "label": label }]
+    });
+    let value_col = json!({
+        "type": "box",
+        "class": "popup-col-value",
+        "widgets": [{
+            "type": "label",
+            "class": "popup-row-value",
+            "label": value,
+            "truncate": { "mode": "end", "max_length": 24 }
+        }]
+    });
+    json!({
+        "type": "box",
+        "class": "popup-row",
+        "widgets": [{
+            "type": "button",
+            "class": "popup-row-button",
+            "on_click": format!("!{on_click}"),
+            "widgets": [
+                { "type": "label", "class": "popup-row-icon", "label": icon },
+                label_col,
+                value_col,
+                { "type": "label", "class": "popup-row-chevron", "label": "\u{203a}" }
+            ]
+        }]
+    })
+}
+
+/// One icon-only button of `status_popup()`'s toggle grid — no separate
+/// text label, same "icon says enough" shape the retired standalone pills
+/// (`darkmode`/`snip`/`colorpicker`/etc.) already used on the bar, just
+/// moved into the popup. `icon` is a bare `#var` or a literal glyph, same
+/// rule as `status_detail_row()`'s own icon parameter. `on_click` is the
+/// bare command; see `status_slider_row`'s own doc comment for the `!`
+/// prefix this function adds.
+///
+/// `tooltip` names the toggle, because the icon alone does not. It is a
+/// common option (`WidgetConfig`), so it is legal on a nested button.
+fn status_toggle_button(icon: &str, tooltip: &str, on_click: &str) -> Value {
+    json!({ "type": "button", "class": "popup-toggle", "label": icon, "tooltip": tooltip, "on_click": format!("!{on_click}") })
+}
+
+/// `status_module()`'s popup (bar-status-panel SPEC §1): three slider rows
+/// (volume/mic/brightness), the network/power rows, and the toggle-button
+/// grid that replaces every pill `end_modules()` no longer builds directly.
+/// Every row button below reuses a retired module's exact command — see
+/// each one's own old function (now a doc comment only) in this file's git
+/// history for the full reasoning behind that specific gesture:
+///
+/// - wifi/eth/bluetooth/netsec rows: `wifi-menu.sh`, `eth-toggle.sh`,
+///   `blueman-manager` (was `bluetooth_module()`'s `on_click_right`),
+///   `net.sh --sec-click` (was `netsec`'s own `on_click_left`).
+/// - powermode row: `powermode.sh toggle` (was `battery`'s `on_click_left`).
+/// - toggle grid: `darkmode.sh --toggle`, `keepawake.sh --toggle` (the
+///   same command the bar's own conditional `inhibit` pill already runs —
+///   deliberately reachable both ways, see `tools_modules()`'s own doc
+///   comment), `screenshot.sh region`, `hyprpicker -a`, the KeePassXC named
+///   scratchpad, `hotspot.sh --menu`, `remote.sh --toggle-vnc`.
+///
+/// Every nested `on_click`/`on_change` below carries a leading `!` — see
+/// `status_slider_row`'s own doc comment for why: ironbar 0.19.1 only runs
+/// a custom widget's command when it starts with `!`, and silently drops
+/// (logs "Received invalid command") anything else. `status_slider_row`/
+/// `status_detail_row`/`status_toggle_button` each add the prefix
+/// themselves, so every call below passes the bare command text. Past the
+/// prefix check, `$0` is still `sh -c`'s own positional-parameter behavior:
+/// ironbar passes the stripped command through `sh -c <cmd> <value>`, and
+/// POSIX `sh -c` assigns the first argument AFTER the command string to
+/// `$0`, not `$1` — so the slider's changed value lands in `$0` inside
+/// `on_change`'s own command text, exactly as SPEC §3 specifies.
+///
+/// Wrapped in one outer vertical box with hover hold/release, the same
+/// shape `popup()` gives every other module's popup — harmless here even
+/// though `status_module()` opens this popup by click, not hover: nothing
+/// in main.rs's hover state machine ever registers this module (it has no
+/// `on_mouse_enter`), so `hover hold`/`release` simply have nothing
+/// pending to extend or cancel.
+fn status_popup(bar_name: &str) -> Value {
+    let widgets = vec![
+        status_slider_row(
+            "#vol_text",
+            "volume",
+            "vol_pct",
+            r#"wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(printf %.0f "$0")%""#,
+            Some("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"),
+        ),
+        status_slider_row(
+            "#mic_icon",
+            "mic",
+            "mic_pct",
+            r#"wpctl set-volume @DEFAULT_AUDIO_SOURCE@ "$(printf %.0f "$0")%""#,
+            Some("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"),
+        ),
+        status_slider_row(
+            "\u{2600}", // plain Unicode sun — no new Nerd Font glyph to verify, same
+            // reasoning as tray_toggle_module()'s own plain-punctuation pick.
+            "brightness",
+            "bri_pct",
+            r#"brightnessctl -q set "$(printf %.0f "$0")%""#,
+            None,
+        ),
+        json!({ "type": "box", "class": "popup-sep" }),
+        status_detail_row(
+            "#wifi_icon",
+            "Wi-Fi",
+            "#wifi_state",
+            "~/.config/ironbar/scripts/wifi-menu.sh",
+        ),
+        status_detail_row(
+            &IC_ETH.to_string(),
+            "Ethernet",
+            "#eth_state",
+            "~/.config/ironbar/scripts/eth-toggle.sh",
+        ),
+        status_detail_row(IC_STATUS_BT, "Bluetooth", "#bt_text", "blueman-manager"),
+        status_detail_row(
+            "#sec_text",
+            "VPN",
+            "#sec_state",
+            "~/.config/ironbar/scripts/net.sh --sec-click",
+        ),
+        json!({ "type": "box", "class": "popup-sep" }),
+        status_detail_row(
+            "\u{f032a}", // md-leaf, power.rs IC_LEAF: `bat_text` is empty in some modes
+            "Power mode",
+            "#pm_state",
+            "~/.config/mango/scripts/powermode.sh toggle",
+        ),
+        json!({ "type": "box", "class": "popup-sep" }),
+        json!({ "type": "box", "class": "popup-toggles", "widgets": [
+            status_toggle_button("#dark_icon", "Dark mode", "~/.config/ironbar/scripts/darkmode.sh --toggle"),
+            status_toggle_button("#inhibit_text", "Keep awake", "~/.config/ironbar/scripts/keepawake.sh --toggle"),
+            status_toggle_button("#remote_text", "Remote desktop (VNC)", "~/.config/ironbar/scripts/remote.sh --toggle-vnc"),
+            // Fixed glyph (hotspot.rs IC_HOTSPOT): `hotspot_text` is empty
+            // while the hotspot is off, which left an empty button and
+            // wrapped the grid (user screenshot, 2026-10-03).
+            status_toggle_button("\u{f0003}", "Hotspot", "~/.config/ironbar/scripts/hotspot.sh --menu"),
+        ] }),
+        json!({ "type": "box", "class": "popup-toggles popup-toggles-actions", "widgets": [
+            status_toggle_button("\u{f0e5a}", "Screenshot region", "~/.config/mango/scripts/screenshot.sh region"),
+            status_toggle_button("\u{f020b}", "Colour picker", "hyprpicker -a"),
+            status_toggle_button(
+                "#kp_text",
+                "KeePassXC",
+                "mmsg dispatch toggle_named_scratchpad,org.keepassxc.KeePassXC,none,keepassxc",
+            ),
+        ] }),
+    ];
+    json!([{
+        "type": "box",
+        "orientation": "vertical",
+        "widgets": widgets,
+        "on_mouse_enter": format!("mango-bard hover hold {bar_name} -q"),
+        "on_mouse_exit": format!("mango-bard hover release {bar_name} -q")
+    }])
 }
 
 /// CPU/memory pills: T6a (see cpu.rs/memory.rs), popups added at T7a. Click
@@ -1017,53 +1363,13 @@ fn sysload_module(bar_name: &str) -> Value {
     })
 }
 
-/// Battery pill: T5 (see power.rs). Bar-global, like `net_modules()` — one
-/// battery, not one per monitor. Click layout follows T4's rule (no hover
-/// tooltip exists in ironbar, so rich detail needs a click): left opens the
-/// popup, replacing waybar's own plain left-click; middle takes over
-/// waybar's old left (`powermode.sh toggle`, config.jsonc:249); right keeps
-/// waybar's own right-click powertop report unchanged.
-///
-/// T-hover: `on_click_left`'s plain `toggle-popup` is gone — hover opens/
-/// closes it instead (main.rs's debounced state machine marks `power_due`
-/// before opening, since power.rs already stays fresh off its own udev event
-/// stream — no lazy detail build needed here, unlike cpu/memory). Powermode
-/// (T15: moved from middle- to left-click) and right (powertop) are
-/// untouched otherwise.
-///
-/// T29: gains a third widget, `.gauge-cap` — a small filled square right of
-/// the gauge so the pair reads as a battery (rectangle + terminal nub)
-/// instead of a plain rounded bar. Battery only: `sysload_module()`'s two
-/// gauges stay bare, this is what visually marks battery as the one gauge
-/// that means "charge remaining" rather than "load". `bat_text` itself
-/// drops its `NN%` (power.rs) — the gauge now carries the level the same
-/// way T28 already made it carry cpu/memory's.
-fn power_modules(bar_name: &str) -> Vec<Value> {
-    vec![json!({
-        "type": "custom",
-        "name": "battery",
-        "class": "battery",
-        // T28: same `widgets`-not-`label` reasoning as sysload_module().
-        // T31: `.gauge` gains a child `.gauge-fill` that carries the
-        // level gradient (`.pNN .gauge-fill`, style.css). One node used
-        // to carry border AND fill, so the charging pulse (an opacity
-        // animation) dimmed the outline too; a separate fill node lets
-        // only the charge level flash. The child sits inside `.gauge`'s
-        // 2px border automatically (GTK borders inset content).
-        "bar": [ { "type": "button", "widgets": [
-            { "type": "label", "label": "#bat_text" },
-            { "type": "box", "class": "gauge", "valign": "center", "widgets": [
-                { "type": "box", "class": "gauge-fill" }
-            ] },
-            { "type": "box", "class": "gauge-cap", "valign": "center" }
-        ] } ],
-        "popup": popup("bat_tip", bar_name),
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} battery -q"),
-        "on_mouse_exit": format!("mango-bard hover exit {bar_name} battery -q"),
-        "on_click_left": "~/.config/mango/scripts/powermode.sh toggle",
-        "on_click_right": "kitty --class mango-monitor -e sudo -n powertop"
-    })]
-}
+// S2 (bar-status-panel SPEC §2): the standalone `battery` pill this used to
+// be (`power_modules()`) is retired — its mini gauge now lives inside
+// `status_module()` (see that function's own doc comment for the
+// class-reuse trick), and its `powermode.sh toggle` click is a row button
+// in `status_popup()`. The right-click powertop launch has no equivalent
+// slot in a single-action popup row and is dropped — `kitty --class
+// mango-monitor -e sudo -n powertop` stays reachable from a terminal.
 
 /// T29: `claudebar` and `docker` merged into one two-row stack, the same
 /// shape and for the same reason as `sysload_module()` (see its own doc
@@ -1142,61 +1448,15 @@ fn devload_module(bar_name: &str) -> Value {
     })
 }
 
-/// Hotspot pill: T6b (see hotspot.rs). Bar-global, like `keepass_module()`.
-///
-/// T15: middle-click retired bar-wide, and hotspot moves onto the same
-/// hover-opens-the-popup pattern as every other converted pill (T-hover) —
-/// it was the last module still opening its popup from a click. Left keeps
-/// waybar's own menu (config.jsonc:358); toggle takes the gesture middle
-/// used to hold, moved to right since that is now free. The static
-/// `tooltip` is dropped for the same reason T13 dropped it everywhere
-/// else — it fires on the same hover as the popup and
-/// `tooltip_and_hover_are_mutually_exclusive` forbids both; its gesture
-/// hint moved into `tooltip.rs`'s `HINTS` table (`hotspot_tip`).
-fn hotspot_module(bar_name: &str) -> Value {
-    json!({
-        "type": "custom",
-        "name": "hotspot",
-        "class": "hotspot",
-        "show_if": "#hotspot_show",
-        "bar": [ { "type": "button", "label": "#hotspot_text" } ],
-        "popup": popup("hotspot_tip", bar_name),
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} hotspot -q"),
-        "on_mouse_exit": format!("mango-bard hover exit {bar_name} hotspot -q"),
-        "on_click_left": "~/.config/ironbar/scripts/hotspot.sh --menu",
-        "on_click_right": "~/.config/ironbar/scripts/hotspot.sh --toggle"
-    })
-}
-
-/// Remote-access pill: wayvnc + kdeconnectd, one button (see remote.rs).
-/// Unlike `hotspot_module` above, no `show_if` — a toggle that hides itself
-/// once off has no way to be clicked back on, so this pill stays visible
-/// and carries its on/off/partial state entirely through `@class/remote`
-/// (style.css's `.remote.active`/`.remote.partial`). `on_click_left` toggles
-/// VNC only (turning it on also starts kdeconnectd; turning it off leaves
-/// kdeconnectd running); `on_click_right` toggles kdeconnectd only. Tag
-/// pull cycling moved off the pill onto the SUPER+CTRL keybinds — a
-/// three-state pill (VNC/KDE Connect/pull) has no room left for a third
-/// click.
-///
-/// T-remote-popup: the popup is the plain `popup()` stack again, same as
-/// every other simple pill. A deleted helper used to append a clickable
-/// per-monitor tag grid below the body. The grid was dropped on user report
-/// — a popup that only opens on hover over a 20px pill is not a place a tag
-/// button can be reached in practice. The popup is read-only status now.
-fn remote_module(bar_name: &str) -> Value {
-    json!({
-        "type": "custom",
-        "name": "remote",
-        "class": "remote",
-        "bar": [ { "type": "button", "label": "#remote_text" } ],
-        "popup": popup("remote_tip", bar_name),
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} remote -q"),
-        "on_mouse_exit": format!("mango-bard hover exit {bar_name} remote -q"),
-        "on_click_left": "~/.config/ironbar/scripts/remote.sh --toggle-vnc",
-        "on_click_right": "~/.config/ironbar/scripts/remote.sh --toggle-kdeconnect"
-    })
-}
+// S2 (bar-status-panel SPEC §2): the hotspot pill this used to be
+// (`hotspot_module()`, T6b) and the remote-access pill (`remote_module()`,
+// wayvnc + kdeconnectd) both leave the bar — each one's `on_click_left`
+// (`hotspot.sh --menu`, `remote.sh --toggle-vnc`) is now a toggle-button
+// row in `status_popup()`. `hotspot.sh --toggle` (hotspot's own right-click)
+// and `remote.sh --toggle-kdeconnect` (remote's own right-click) have no
+// slot in a single-action popup row and are dropped from the bar/popup
+// alike — both scripts stay reachable from a terminal or their own
+// keybind, if one exists.
 
 /// T28: `custom` module fed by music.rs, replacing the native `music`
 /// module this used to be (config.jsonc:62-69's own `mpris` built-in,
@@ -1223,89 +1483,13 @@ fn music_module(bar_name: &str) -> Value {
     })
 }
 
-/// Native `bluetooth` module, replacing waybar's `bluetooth` built-in
-/// (config.jsonc:374-381).
-///
-/// T8c: `format` reduced to the bare icon on every state (waybar's own
-/// `format`/`format-connected`/`format-disabled` at config.jsonc:375-377
-/// are also icon-only — the verbose "RAPOO BT4.0 Mouse • 85%" this module
-/// printed by default was never parity, it was ironbar's own richer
-/// built-in default). Codepoints are U+E1A7/E1A8/E1A9 in the schema's
-/// default (`FormatConfig`'s own doc, Material Symbols
-/// enabled/bluetooth/disabled) but those fail the same GTK4 variable-font
-/// bug T8b found — U+F293 (a Nerd Font bluetooth glyph, live-confirmed
-/// rendering correctly) is used for every state instead, since the pill's
-/// only job here is "bluetooth is a thing you can click", not
-/// distinguishing on/off at the glyph level (waybar didn't either — same
-/// glyph in all three of its states).
-///
-/// T19: U+F293 (Font Awesome bluetooth, a filled blob) -> four distinct
-/// `nf-md` bluetooth glyphs, one per state — part of the one-icon-family
-/// sweep (IRONBAR.md T19): every remaining Font Awesome glyph on the bar
-/// sat smaller and higher than its Material Design neighbours. This also
-/// regains the per-state resolution T8c's "icon-only, same glyph every
-/// state" reduction gave up — `enabled`/`disabled`/`connected`/
-/// `connected_battery` now read apart at a glance, matching the schema's
-/// own default four-way `FormatConfig` shape more closely than a single
-/// glyph ever did. Checked with `pango-view` before wiring in.
-///
-/// T9: `on_click_left` is back, set to `toggle-popup` — see the finding
-/// below for why. `blueman-manager` stays on `on_click_right` so the fuller
-/// GUI is still one click away.
-///
-/// **T9 finding, live-confirmed:** ironbar's native `bluetooth` popup does
-/// not respect `popup_autohide` (set bar-wide in `build()`, and confirmed
-/// working for every `custom`-type popup on this bar). Live probe: opened
-/// the bluetooth popup, clicked empty desktop via `ydotool`,
-/// `ironbar bar <bar> get-popup-visible` stayed `true` and a scoped
-/// screenshot was pixel-identical before/after. `--print-schema` confirms
-/// `PopupConfig` has no autohide override — no config-side fix exists, same
-/// category as T8b's cursor-property dead end.
-///
-/// **T-hover: this is what actually fixes the T9 gap above, not a
-/// workaround for it.** `on_click_left`'s `toggle-popup` is gone —
-/// `on_mouse_exit` calls `hide_popup` unconditionally (main.rs's hover state
-/// machine), and `hide_popup` closes whatever is open regardless of
-/// `popup_autohide`. The popup now closes the instant the cursor leaves,
-/// every time, with no dependence on the GTK-level bug T9 found. No refresh
-/// is dispatched on hover-open (`hover_refresh_topic` returns `None` for
-/// `bluetooth`) — this is a native module with no daemon-tracked ironvar, so
-/// there is nothing here for `mango-bard` to refresh. `blueman-manager`
-/// stays on `on_click_right`, untouched.
-fn bluetooth_module(bar_name: &str) -> Value {
-    json!({
-        "type": "bluetooth",
-        "name": "bluetooth",
-        "class": "bluetooth",
-        "format": {
-            "enabled": "\u{f00af}",
-            "disabled": "\u{f00b0}",
-            "connected": "\u{f00b1}",
-            "connected_battery": "\u{f00b1}",
-            "not_found": ""
-        },
-        // T13: static `tooltip` deleted, same as every other hover-eligible
-        // module — but this is a native `bluetooth` module (ironbar's own
-        // device-list popup, not a daemon-owned tip ironvar), so unlike the
-        // `custom` modules there is nowhere to fold its "right-click for
-        // full manager" hint into. Known gap — still documented in
-        // IRONBAR.md/README.md, just not on-screen.
-        //
-        // T-popup-hold: `on_mouse_exit` dropped outright, not converted to
-        // `hover exit` — this is the one popup this repo builds no `popup:`
-        // widgets for at all (ironbar's own native device list), so there
-        // is no content box to wire `hover hold`/`release` onto the way
-        // `genconfig.rs::popup()` does for every `custom` module. Reported
-        // symptom: the pointer crossing `popup_gap` into the device list to
-        // click a device closed it first, every time. Without
-        // `on_mouse_exit`, the popup instead stays open until the pointer
-        // hovers a different pill (`hover_enter`'s own "different widget
-        // open" branch still hides it unconditionally) or the user clicks
-        // away (`popup_autohide: true`, set daemon-wide in `build()`).
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} bluetooth -q"),
-        "on_click_right": "blueman-manager"
-    })
-}
+// S2 (bar-status-panel SPEC §2/§4): the native `bluetooth` module this
+// used to be is gone from the bar entirely — `status_module()` carries a
+// fixed bluetooth glyph (IC_STATUS_BT) and `status_popup()`'s own
+// bluetooth row reuses this module's exact `on_click_right` command
+// (`blueman-manager`) as a left-click row button instead. The live device
+// count (`bt_text`) is read on popup open only — see net.rs's
+// `refresh_bt_text()`.
 
 /// Session-menu button — config.jsonc:275-279, static, no daemon var. Last
 /// module of the last row, same as waybar's own placement.
@@ -1320,60 +1504,13 @@ fn power_module() -> Value {
     })
 }
 
-/// Darkmode toggle: T6b (see darkmode.rs).
-///
-/// T23 nested it inside the tools drawer; T31 removed the drawer (see
-/// `tools_modules()`'s own doc comment) and this became a standalone
-/// `custom` module again — `button` bar root like `inhibit_module()`, the
-/// shape whose click and hover are proven to work. The static `tooltip`
-/// returns: the icon is always visible again, so it needs a name on
-/// hover (ironbar schema: `tooltip` is `string|null`, static strings need
-/// no `{{script}}`; no `on_mouse_enter` here, so no conflict with the
-/// static-tooltip-xor-hover-popup rule).
-fn darkmode_module() -> Value {
-    json!({
-        "type": "custom",
-        "name": "darkmode",
-        "class": "darkmode",
-        "bar": [ { "type": "button", "label": "#dark_icon" } ],
-        "tooltip": "Toggle light/dark",
-        "on_click_left": "~/.config/ironbar/scripts/darkmode.sh --toggle"
-    })
-}
-
-/// Color picker: standalone pill again (T31, see `tools_modules()`'s own
-/// doc comment — its whole T23 drawer life is over). Same shape as
-/// `power_module()`: `label` bar root (windowless, so the module-level
-/// click lands — proven by power's own working click), static tooltip.
-/// Glyph history (U+E3B8 -> U+F1FB -> U+F020B md-eyedropper_variant) is
-/// in IRONBAR.md's T8b/T19 entries.
-fn colorpicker_module() -> Value {
-    json!({
-        "type": "custom",
-        "name": "colorpicker",
-        "class": "colorpicker",
-        "bar": [ { "type": "label", "label": "\u{f020b}" } ],
-        "tooltip": "Color picker",
-        "on_click_left": "hyprpicker -a"
-    })
-}
-
-/// Screenshot pill: standalone again (T31, same reversal as
-/// `colorpicker_module()` above). Both clicks route through
-/// screenshot.sh so each mode saves + copies + notifies the same way
-/// (T20); the tooltip carries the discoverability the drawer dropped.
-/// Glyph U+F0E5A (md-monitor_screenshot) — T19's one-family sweep.
-fn snip_module() -> Value {
-    json!({
-        "type": "custom",
-        "name": "snip",
-        "class": "snip",
-        "bar": [ { "type": "label", "label": "\u{f0e5a}" } ],
-        "tooltip": "Screenshot — left: region, right: window",
-        "on_click_left": "~/.config/mango/scripts/screenshot.sh region",
-        "on_click_right": "~/.config/mango/scripts/screenshot.sh window"
-    })
-}
+// S2 (bar-status-panel SPEC §2): darkmode/colorpicker/snip leave the bar —
+// see `tools_modules()`'s own doc comment. Each command is reused verbatim
+// as a toggle-button row in `status_popup()`: `darkmode.sh --toggle`,
+// `hyprpicker -a`, `screenshot.sh region`. Snip's own `on_click_right`
+// (`screenshot.sh window`) has no slot in a single-action popup row and is
+// dropped — the script's own `window` mode stays reachable from a
+// terminal or a keybind.
 
 /// Keep-awake pill — was ironbar's native `inhibit` module (`"type":
 /// "inhibit"`, replacing waybar's `idle_inhibitor` built-in,
@@ -1400,15 +1537,31 @@ fn snip_module() -> Value {
 /// so the pill doesn't change width when it toggles. Full glyph-choice
 /// history (Font Awesome/Codicon mismatch, symbol-cmap fallback, PUA
 /// plane) is on keepawake.rs's `IC_ON`/`IC_OFF` constants now.
-fn inhibit_module(bar_name: &str) -> Value {
+///
+/// S1 (bar-status-panel SPEC §2/§5e): the pill now matches the spec's "a
+/// pill that shows a fault/mode appears only while active" rule —
+/// `show_if: "#awake_on"` (keepawake.rs sets it alongside the existing
+/// `inhibit_text`/`@class/inhibit` writes) hides it the rest of the time,
+/// same `_show`-ironvar shape as `hotspot_module()`'s `hotspot_show`. Since
+/// the pill is now never visible except while on, its dynamic hover popup
+/// (`inhibit_tip`, built from `keepawake.rs::refresh`) is replaced by the
+/// one line that popup ever needed to say: a static `tooltip`, same idiom
+/// as `darkmode_module()`. That also drops `on_mouse_enter`/`on_mouse_exit`
+/// — a static `tooltip` and a hover popup are mutually exclusive
+/// (`tooltip_and_hover_are_mutually_exclusive` test) and a fixed string
+/// needs no `mango-bard hover` round trip to render. The glyph's color
+/// moves to `@warn` in style.css (was `@accent`): on a pill that is only
+/// ever shown in its "on" state, a neutral accent reads as decoration, not
+/// as the attention-worthy "this machine will not sleep" signal the SPEC
+/// wants.
+fn inhibit_module() -> Value {
     json!({
         "type": "custom",
         "name": "inhibit",
         "class": "inhibit",
+        "show_if": "#awake_on",
         "bar": [ { "type": "button", "label": "#inhibit_text" } ],
-        "popup": popup("inhibit_tip", bar_name),
-        "on_mouse_enter": format!("mango-bard hover enter {bar_name} inhibit -q"),
-        "on_mouse_exit": format!("mango-bard hover exit {bar_name} inhibit -q"),
+        "tooltip": "Keep-awake on: this computer will not sleep",
         "on_click_left": "~/.config/ironbar/scripts/keepawake.sh --toggle"
     })
 }
@@ -1619,6 +1772,30 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    #[test]
+    fn class_target_known_matches_the_modules_on_the_bar() {
+        // S2: collectors that still write a class must reach a real module.
+        for m in ["status", "netwarn", "inhibit", "sysload", "devload", "pomo"] {
+            assert!(class_target_known(m), "{m} must be a known class target");
+        }
+        assert!(class_target_known("ws-DP-1-3"));
+        // S2: retired pills. Their collectors still write these classes;
+        // main.rs's flush_vars must drop them instead of retrying forever.
+        for m in [
+            "keepass",
+            "hotspot",
+            "remote",
+            "eth",
+            "wifi",
+            "volume",
+            "battery",
+            "netsec",
+            "net-spinner",
+        ] {
+            assert!(!class_target_known(m), "{m} is not on the bar any more");
+        }
+    }
+
     fn collect_var_refs(v: &Value, out: &mut HashSet<String>) {
         match v {
             Value::String(s) => {
@@ -1779,102 +1956,255 @@ mod tests {
     }
 
     #[test]
-    fn volume_hover_targets_its_own_bar_name_and_drops_the_click_toggle() {
-        // T-hover: volume's plain toggle-popup on_click_left is gone —
-        // on_mouse_enter/on_mouse_exit target the bar instead.
-        // T15: on_click_left is not absent any more — it's the tabbed mixer
-        // shortcut that used to live on middle-click, freed by the toggle
-        // removal above.
+    fn status_is_click_only_scrolls_volume_and_targets_its_own_bar_name() {
+        // S2 (bar-status-panel SPEC §4): replaces
+        // `volume_hover_targets_its_own_bar_name_and_drops_the_click_toggle`
+        // and `battery_hover_targets_its_own_bar_name_and_drops_the_click_
+        // toggle` — `status_module()` is click-only by design (a popup that
+        // holds controls, per SPEC §4's own rule), so it carries no
+        // `on_mouse_enter`/`on_mouse_exit` at all, unlike every hover pill
+        // this replaces.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let volume = end.iter().find(|m| m["name"] == "volume").unwrap();
-        assert_eq!(volume["on_click_left"], json!("pavucontrol-qt -t 5"));
-        assert_eq!(volume["on_click_right"], json!("pavucontrol-qt"));
-        assert!(volume.get("on_click_middle").is_none());
-        assert!(volume["on_mouse_enter"]
-            .as_str()
-            .unwrap()
-            .contains("bar-eDP-1"));
-        assert!(volume["on_mouse_exit"]
-            .as_str()
-            .unwrap()
-            .contains("bar-eDP-1"));
+        let status = end.iter().find(|m| m["name"] == "status").unwrap();
+        // Opens by click only (no hover open), closes on leave: the exit
+        // handler arms the daemon's grace close (user report 2026-10-03:
+        // ironbar's own toggle-popup left it open).
+        assert!(status.get("on_mouse_enter").is_none());
+        assert_eq!(
+            status["on_mouse_exit"],
+            json!("mango-bard hover exit bar-eDP-1 status -q")
+        );
+        assert_eq!(
+            status["on_click_left"],
+            json!("mango-bard hover toggle bar-eDP-1 status -q")
+        );
+        assert_eq!(
+            status["on_scroll_up"],
+            json!("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+ -l 1.0")
+        );
+        assert_eq!(
+            status["on_scroll_down"],
+            json!("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-")
+        );
+        assert_eq!(status["class"], json!("status battery"));
 
-        // The fallback bar (no monitor listed) must also get a name to
-        // target, per T0 spike S3 — an unlisted output still gets this bar.
         let fallback = build(&[]);
-        assert_eq!(fallback["name"], json!("bar-default"));
         let fb_end = fallback["end"].as_array().unwrap();
-        let fb_volume = fb_end.iter().find(|m| m["name"] == "volume").unwrap();
-        assert!(fb_volume["on_mouse_enter"]
+        let fb_status = fb_end.iter().find(|m| m["name"] == "status").unwrap();
+        assert!(fb_status["on_click_left"]
             .as_str()
             .unwrap()
             .contains("bar-default"));
     }
 
     #[test]
-    fn battery_hover_targets_its_own_bar_name_and_drops_the_click_toggle() {
-        // T-hover: see volume_hover_targets_its_own_bar_name_and_drops_the_
-        // click_toggle — same shape.
-        // T15: on_click_left is powermode toggle now, moved from middle;
-        // right stays untouched.
-        // T23: `battery` is part of `resource_modules()`, which lives in
-        // `end` now — see that function's own doc comment.
+    fn status_sliders_watch_events_and_never_poll() {
+        // A poll-mode `value` runs every 5 s on every bar, also while the
+        // popup is closed, and a stale var put a dragged slider back.
+        // Each slider must use watch mode on slider-watch.sh. It draws no
+        // value of its own (GTK floats it above the knob with a decimal);
+        // a live `#var` label in the next column carries the number.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let battery = end.iter().find(|m| m["name"] == "battery").unwrap();
-        assert!(battery["on_mouse_enter"]
-            .as_str()
-            .unwrap()
-            .contains("bar-eDP-1"));
-        assert!(battery["on_mouse_exit"]
-            .as_str()
-            .unwrap()
-            .contains("bar-eDP-1"));
-        assert_eq!(
-            battery["on_click_left"],
-            json!("~/.config/mango/scripts/powermode.sh toggle")
-        );
-        assert!(battery.get("on_click_middle").is_none());
-        assert!(battery["on_click_right"].is_string());
+        let status = end.iter().find(|m| m["name"] == "status").unwrap();
+        let mut sliders = Vec::new();
+        fn walk<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+            match v {
+                Value::Object(o) => {
+                    if o.get("type") == Some(&json!("slider")) {
+                        out.push(v);
+                    }
+                    o.values().for_each(|x| walk(x, out));
+                }
+                Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        walk(&status["popup"], &mut sliders);
+        let sources: Vec<String> = sliders
+            .iter()
+            .map(|s| {
+                assert_eq!(
+                    s["value"]["mode"],
+                    json!("watch"),
+                    "slider must not poll: {s}"
+                );
+                assert_eq!(s["show_label"], json!(false));
+                s["value"]["cmd"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit(' ')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(sources, ["volume", "mic", "brightness"]);
+        let whole = serde_json::to_string(&status["popup"]).unwrap();
+        for var in ["#vol_pct", "#mic_pct", "#bri_pct"] {
+            assert!(whole.contains(var), "slider row has no {var} value label");
+        }
+    }
 
+    #[test]
+    fn status_popup_has_three_sliders_and_reuses_every_retired_pills_command() {
+        // S2 (bar-status-panel SPEC §1/§2): replaces
+        // `remote_left_toggles_vnc_right_toggles_kdeconnect`,
+        // `volume_bar_text_is_icon_only`,
+        // `bluetooth_is_icon_only_and_opens_on_click_only`, and
+        // `tools_are_standalone_pills_in_reading_order_before_inhibit` for
+        // the commands those retired pills carried — each now lives inside
+        // `status_popup()` instead of on its own bar module.
+        let cfg = build(&["eDP-1".to_string()]);
+        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
+        let status = end.iter().find(|m| m["name"] == "status").unwrap();
+        assert_eq!(status["bar"][0]["widgets"][0]["label"], json!("#vol_text"));
+        assert_eq!(status["bar"][0]["widgets"][1]["label"], json!("#vol_pct"));
+        assert_eq!(status["bar"][0]["widgets"][6]["label"], json!("#bat_pct"));
+
+        let whole = serde_json::to_string(&status["popup"]).unwrap();
+        assert!(
+            whole.matches("\"slider\"").count() >= 3,
+            "status popup must carry three sliders (volume/mic/brightness)"
+        );
+        for cmd in [
+            "~/.config/ironbar/scripts/wifi-menu.sh",
+            "~/.config/ironbar/scripts/eth-toggle.sh",
+            "blueman-manager",
+            "~/.config/ironbar/scripts/net.sh --sec-click",
+            "~/.config/mango/scripts/powermode.sh toggle",
+            "~/.config/ironbar/scripts/darkmode.sh --toggle",
+            "~/.config/ironbar/scripts/keepawake.sh --toggle",
+            "~/.config/mango/scripts/screenshot.sh region",
+            "hyprpicker -a",
+            "toggle_named_scratchpad,org.keepassxc.KeePassXC,none,keepassxc",
+            "~/.config/ironbar/scripts/hotspot.sh --menu",
+            "~/.config/ironbar/scripts/remote.sh --toggle-vnc",
+        ] {
+            assert!(whole.contains(cmd), "status popup missing command: {cmd}");
+        }
+        // S2 (bar-status-panel SPEC §3): every nested on_click/on_change
+        // must carry a `!` prefix (ironbar 0.19.1 only runs a custom
+        // widget's command when it starts with one — see
+        // `status_slider_row`); the printf-rounded value replaces the old
+        // bare `$0%`, so the commands get a whole percent, not "42.7%"
+        // (user report 2026-10-06: a dragged slider did nothing, because
+        // with no `!` the command never ran).
+        // Checked on the parsed `Value`, not the serialized `whole` string
+        // above: the embedded `"` in the printf command would otherwise
+        // need matching against its own JSON-escaped (`\"`) form.
+        fn on_changes(v: &Value, out: &mut Vec<String>) {
+            match v {
+                Value::Object(o) => {
+                    if let Some(c) = o.get("on_change").and_then(Value::as_str) {
+                        out.push(c.to_string());
+                    }
+                    o.values().for_each(|x| on_changes(x, out));
+                }
+                Value::Array(a) => a.iter().for_each(|x| on_changes(x, out)),
+                _ => {}
+            }
+        }
+        let mut changes = Vec::new();
+        on_changes(&status["popup"], &mut changes);
+        assert!(
+            changes.contains(
+                &r#"!wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(printf %.0f "$0")%""#.to_string()
+            ),
+            "volume slider on_change missing its ! prefix or printf rounding: {changes:?}"
+        );
+        assert!(
+            changes.contains(
+                &r#"!wpctl set-volume @DEFAULT_AUDIO_SOURCE@ "$(printf %.0f "$0")%""#.to_string()
+            ),
+            "mic slider on_change missing its ! prefix or printf rounding: {changes:?}"
+        );
+        assert!(
+            changes.contains(&r#"!brightnessctl -q set "$(printf %.0f "$0")%""#.to_string()),
+            "brightness slider on_change missing its ! prefix or printf rounding: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn every_popup_command_has_the_bang_prefix() {
+        // S2 (bar-status-panel SPEC root cause): ironbar 0.19.1's custom
+        // widget dispatcher (`modules/custom/mod.rs`) only runs a nested
+        // `ButtonWidget.on_click`/`SliderWidget.on_change` as a shell
+        // command when the string starts with `!` — anything else is
+        // logged "Received invalid command" and dropped. This walks every
+        // "custom" module's own `popup` tree in the built config (not just
+        // `status`'s) and fails loud the moment one is found with no `!`,
+        // so a future row/row can't silently reintroduce the bug this row
+        // fixed (user report: "nothing is clickable"). Module-level
+        // handlers (`on_click_left`, `on_mouse_enter`, …) are a different
+        // key and a different code path — they take no `!` and must not
+        // get one; this walker only ever looks at the literal keys
+        // "on_click"/"on_change", so it can't touch them by accident.
+        fn walk(v: &Value, out: &mut Vec<String>) {
+            match v {
+                Value::Object(o) => {
+                    for key in ["on_click", "on_change"] {
+                        if let Some(cmd) = o.get(key).and_then(Value::as_str) {
+                            out.push(cmd.to_string());
+                        }
+                    }
+                    o.values().for_each(|x| walk(x, out));
+                }
+                Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+
+        let mut popups: Vec<Value> = Vec::new();
+        fn collect_popups(v: &Value, out: &mut Vec<Value>) {
+            match v {
+                Value::Object(o) => {
+                    if o.get("type") == Some(&json!("custom")) {
+                        if let Some(popup) = o.get("popup") {
+                            out.push(popup.clone());
+                        }
+                    }
+                    o.values().for_each(|x| collect_popups(x, out));
+                }
+                Value::Array(a) => a.iter().for_each(|x| collect_popups(x, out)),
+                _ => {}
+            }
+        }
+
+        let cfg = build(&["eDP-1".to_string(), "DP-1".to_string()]);
+        collect_popups(&cfg, &mut popups);
         let fallback = build(&[]);
-        let fb_end = fallback["end"].as_array().unwrap();
-        let fb_battery = fb_end.iter().find(|m| m["name"] == "battery").unwrap();
-        assert!(fb_battery["on_mouse_enter"]
-            .as_str()
-            .unwrap()
-            .contains("bar-default"));
+        collect_popups(&fallback, &mut popups);
+        assert!(!popups.is_empty(), "no custom module popup found to check");
+
+        let mut commands = Vec::new();
+        for popup in &popups {
+            walk(popup, &mut commands);
+        }
+        assert!(
+            !commands.is_empty(),
+            "no nested on_click/on_change found in any custom module's popup"
+        );
+        for cmd in &commands {
+            assert!(
+                cmd.starts_with('!'),
+                "nested on_click/on_change must start with '!': {cmd}"
+            );
+        }
     }
 
     #[test]
-    fn remote_left_toggles_vnc_right_toggles_kdeconnect() {
-        let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let remote = end.iter().find(|m| m["name"] == "remote").unwrap();
-        assert_eq!(
-            remote["on_click_left"],
-            json!("~/.config/ironbar/scripts/remote.sh --toggle-vnc")
-        );
-        assert_eq!(
-            remote["on_click_right"],
-            json!("~/.config/ironbar/scripts/remote.sh --toggle-kdeconnect")
-        );
-    }
-
-    #[test]
-    fn remote_popup_is_the_plain_read_only_stack() {
-        // Replaces `remote_popup_has_one_pull_row_per_physical_monitor…`.
-        // T-remote-popup deleted the clickable tag grid from the physical
-        // bars' `remote` pill. Equality against `popup()` is the whole
-        // assertion for this bar: the plain stack has no extra section by
-        // construction, so no grid row and no button can hide in it.
-        //
-        // T-headless-strip put `--pull` back — deliberately, on the
-        // HEADLESS bar only, where a remote viewer can actually reach it
-        // (see genconfig.rs module doc / IRONBAR.md's T-headless-strip
-        // entry). So the "no pull command anywhere" check narrows to the
-        // physical bars and the fallback bar: nothing reachable only via
+    fn remote_pull_command_never_reaches_a_physical_or_fallback_bar() {
+        // S2 (bar-status-panel SPEC §2): the standalone `remote` pill this
+        // test used to also check (`remote_popup_is_the_plain_read_only_
+        // stack`, T-remote-popup) is gone — its `--toggle-vnc` command is a
+        // toggle-button row in `status_popup()` now (see
+        // `status_toggle_button_grid_reuses_every_retired_pills_command`).
+        // What survives here is the other half of that old test: the
+        // `--pull` guard, still load-bearing — T-headless-strip put `--pull`
+        // back deliberately, on the HEADLESS bar only, where a remote
+        // viewer can actually reach it. Nothing reachable only via
         // SUPER+CTRL keybinds (unreachable to a remote viewer) may also
         // carry a pull button.
         let cfg = build(&[
@@ -1882,9 +2212,6 @@ mod tests {
             "DP-1".to_string(),
             "HEADLESS-4".to_string(),
         ]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let remote = end.iter().find(|m| m["name"] == "remote").unwrap();
-        assert_eq!(remote["popup"], popup("remote_tip", "bar-eDP-1"));
         for bar in ["eDP-1", "DP-1"] {
             let whole = serde_json::to_string(&cfg["monitors"][bar]).unwrap();
             assert!(
@@ -2007,34 +2334,36 @@ mod tests {
     }
 
     #[test]
-    fn sysload_battery_devload_sit_together_in_end() {
+    fn sysload_devload_sit_together_in_end() {
         // T23: the resource block (statusbar-layout.md §3.4) — general to
-        // specific: cpu+memory -> battery -> claude+docker(+archupdate).
-        // T29 merged cpu/memory into `sysload` and claudebar/docker/
-        // archupdate into `devload` — see `resource_modules()`'s own doc
-        // comment. `music` is deliberately absent: it moved to
-        // `audio_modules()` instead (see that function's own doc comment)
-        // — grouped with volume/mic by domain, not kept alongside the
-        // machine-health pills.
+        // specific: cpu+memory -> claude+docker(+archupdate). T29 merged
+        // cpu/memory into `sysload` and claudebar/docker/archupdate into
+        // `devload` — see `resource_modules()`'s own doc comment. `music`
+        // is deliberately absent: it moved to `audio_modules()` instead
+        // (see that function's own doc comment). S2 (bar-status-panel SPEC
+        // §2): `battery` drops out of this block entirely — its mini gauge
+        // moved into `status_module()` (see `resource_modules()`'s own
+        // comment), so there is no third name to order here any more.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
         let tray = names.iter().position(|n| *n == "tray").unwrap();
         let sysload = names.iter().position(|n| *n == "sysload").unwrap();
-        let battery = names.iter().position(|n| *n == "battery").unwrap();
         let devload = names.iter().position(|n| *n == "devload").unwrap();
         assert!(tray < sysload, "resource block must follow tray in end");
-        assert!(sysload < battery && battery < devload);
+        assert!(sysload < devload);
+        assert!(
+            !names.contains(&"battery"),
+            "battery must not still be in end"
+        );
     }
 
     #[test]
-    fn all_36_modules_survive_the_reorder() {
+    fn all_named_modules_survive_the_s2_reorder() {
         // Conservation check (statusbar-layout.md's own acceptance
-        // criterion): a reorder must never silently drop a pill. Every name
-        // present in the OLD start/center/end shape (T22, before T23) must
-        // still be present somewhere in the new one, and the total count
-        // must stay 36 for a two-monitor build (9 tags + 1 overview, times
-        // 2 monitors, plus the 16 bar-global/static modules).
+        // criterion): a reorder must never silently drop a pill — every
+        // name that should still exist after S2 (bar-status-panel SPEC)
+        // must be present, and every name SPEC §2 retires must not be.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
@@ -2045,48 +2374,47 @@ mod tests {
             &mut names,
         );
         let expected = [
-            "spark",
-            "win",
-            "clock",
-            "date",
-            "pomo",
-            "tray",
-            "sysload",
-            "battery",
-            "devload",
-            "colorpicker",
-            "darkmode",
-            "snip",
-            "inhibit",
-            "music",
-            "volume",
-            "mic",
-            "net-spinner",
-            "wifi",
-            "eth",
-            "netsec",
-            "hotspot",
-            "remote",
-            "bluetooth",
+            "spark", "win", "clock", "date", "pomo", "tray", "sysload", "devload", "inhibit",
+            "music",   // S2: replaces wifi/eth/netsec/net-spinner.
+            "netwarn", // S2: replaces volume/mic/wifi/eth/bluetooth/battery.
+            "status",
             "power",
             // T28: the pill promoted out of the tray drawer it gates
             // (T29: `archupdate` is no longer one of these — it folded
             // into `devload`'s docker row). `traytoggle` itself is gone
             // from this list — the drawer is disabled by default now
             // (`TRAY_DRAWER_ENABLED`), so its trigger is never generated.
-            "keepass",
+            // S2 removes `keepass` itself (now a popup toggle button).
         ];
         for name in expected {
             assert!(names.contains(name), "{name} missing after reorder");
+        }
+        let gone = [
+            "battery",
+            "volume",
+            "mic",
+            "wifi",
+            "eth",
+            "bluetooth",
+            "colorpicker",
+            "darkmode",
+            "snip",
+            "keepass",
+            "hotspot",
+            "remote",
+            "net-spinner",
+            "netsec",
+        ];
+        for name in gone {
+            assert!(
+                !names.contains(name),
+                "{name} must not survive the S2 reorder"
+            );
         }
         for tag in 1..=TAG_COUNT {
             assert!(names.contains(&ws_module("eDP-1", tag)));
         }
         assert!(names.contains(&ws_module_ov("eDP-1")));
-        // T31: 25 named non-tag modules (26 post-T29 minus the `tools`
-        // drawer module itself; its three nested tools survive as
-        // standalone pills) + 9 tags + 1 overview = 35 names.
-        assert_eq!(names.len(), 35);
     }
 
     // T23: `end_no_longer_carries_the_leftcenter_modules` (a T8d regression
@@ -2101,13 +2429,17 @@ mod tests {
     // test checked, so nothing is lost by removing it.
 
     #[test]
-    fn hotspot_sits_after_net_pills_in_end() {
+    fn netwarn_sits_before_status_in_end() {
+        // S2 (bar-status-panel SPEC §2): replaces
+        // `hotspot_sits_after_net_pills_in_end` — `netwarn`/`status` are the
+        // two survivors of the connectivity/audio block this test used to
+        // check the ordering of.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
-        let netsec = names.iter().position(|n| *n == "netsec").unwrap();
-        let hotspot = names.iter().position(|n| *n == "hotspot").unwrap();
-        assert!(netsec < hotspot);
+        let netwarn = names.iter().position(|n| *n == "netwarn").unwrap();
+        let status = names.iter().position(|n| *n == "status").unwrap();
+        assert!(netwarn < status);
     }
 
     #[test]
@@ -2173,67 +2505,34 @@ mod tests {
             .contains("bar-default"));
     }
 
-    #[test]
-    fn hotspot_hover_targets_its_own_bar_name() {
-        // T15: hotspot's popup opens on hover now, not on right-click (that
-        // gesture is `hotspot.sh --toggle` instead) — same shape every
-        // other converted pill uses.
-        let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let hotspot = end.iter().find(|m| m["name"] == "hotspot").unwrap();
-        assert!(hotspot["on_mouse_enter"]
-            .as_str()
-            .unwrap()
-            .contains("bar-eDP-1"));
-        assert!(hotspot["on_mouse_exit"]
-            .as_str()
-            .unwrap()
-            .contains("bar-eDP-1"));
-        assert_eq!(
-            hotspot["on_click_right"],
-            json!("~/.config/ironbar/scripts/hotspot.sh --toggle")
-        );
-        assert_eq!(
-            hotspot["on_click_left"],
-            json!("~/.config/ironbar/scripts/hotspot.sh --menu")
-        );
-    }
+    // S2 (bar-status-panel SPEC §2): `hotspot_hover_targets_its_own_bar_
+    // name` removed outright — the standalone `hotspot` pill it checked is
+    // gone. `hotspot.sh --menu` is now a toggle-button row in
+    // `status_popup()`, checked by
+    // `status_popup_has_three_sliders_and_reuses_every_retired_pills_
+    // command`. `hotspot.sh --toggle` (hotspot's own right-click) has no
+    // slot in a single-action popup row and is dropped.
 
     #[test]
-    fn tools_are_standalone_pills_in_reading_order_before_inhibit() {
-        // T31: the tools drawer is gone (see `tools_modules()`'s own doc
-        // comment) — colorpicker/darkmode/snip are standalone modules
-        // again, always visible (no `show_if`), in the T23 reading order,
-        // with `inhibit` right after. Real per-monitor bar and the
-        // fallback bar both get them.
+    fn tools_modules_builds_only_inhibit_now() {
+        // S2 (bar-status-panel SPEC §2): replaces
+        // `tools_are_standalone_pills_in_reading_order_before_inhibit` —
+        // colorpicker/darkmode/snip leave the bar for good this stage (see
+        // `tools_modules()`'s own doc comment); `inhibit` is the one
+        // survivor. Real per-monitor bar and the fallback bar both still
+        // get it.
         let cfg = build(&["eDP-1".to_string(), "DP-1".to_string()]);
         for mon in ["eDP-1", "DP-1"] {
             let end = cfg["monitors"][mon]["end"].as_array().unwrap();
             let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
-            let cp = names.iter().position(|n| *n == "colorpicker").unwrap();
-            let dm = names.iter().position(|n| *n == "darkmode").unwrap();
-            let sn = names.iter().position(|n| *n == "snip").unwrap();
-            let inh = names.iter().position(|n| *n == "inhibit").unwrap();
-            assert!(cp < dm && dm < sn && sn < inh);
-            assert_eq!(sn + 1, inh);
+            assert!(names.contains(&"inhibit"));
             for name in ["colorpicker", "darkmode", "snip"] {
-                let m = end.iter().find(|m| m["name"] == name).unwrap();
-                assert!(m.get("show_if").is_none(), "{name} must be always visible");
-                assert!(m["tooltip"].is_string(), "{name} needs its static tooltip");
-                assert!(m["on_click_left"].is_string());
+                assert!(!names.contains(&name), "{name} must not still be in end");
             }
-            let darkmode = &end[dm];
-            assert_eq!(darkmode["bar"][0]["type"], json!("button"));
-            assert_eq!(
-                darkmode["on_click_left"],
-                json!("~/.config/ironbar/scripts/darkmode.sh --toggle")
-            );
         }
         let fallback = build(&[]);
         let fb_end = fallback["end"].as_array().unwrap();
-        for name in ["colorpicker", "darkmode", "snip"] {
-            assert!(fb_end.iter().any(|m| m["name"] == name));
-        }
+        assert!(fb_end.iter().any(|m| m["name"] == "inhibit"));
     }
 
     // ---- T7a additions
@@ -2389,8 +2688,10 @@ mod tests {
         let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
         assert_eq!(names.first(), Some(&"tray"));
         let sysload = names.iter().position(|n| *n == "sysload").unwrap();
-        let volume = names.iter().position(|n| *n == "volume").unwrap();
-        assert!(sysload < volume, "resources must precede audio in end");
+        // S2 (bar-status-panel SPEC §2): `volume` is gone — `music` is the
+        // one survivor of `audio_modules()`'s own group.
+        let music = names.iter().position(|n| *n == "music").unwrap();
+        assert!(sysload < music, "resources must precede audio in end");
     }
 
     #[test]
@@ -2423,58 +2724,33 @@ mod tests {
     }
 
     #[test]
-    fn bluetooth_and_power_land_at_the_end_of_end() {
-        // T23: connectivity -> session is still the tail of `end`
-        // (statusbar-layout.md §3.7-3.8) — `music` lives in `audio_modules()`
-        // now (see that function's own doc comment), so it's absent from
-        // this specific trailing check.
+    fn status_and_power_land_at_the_end_of_end() {
+        // S2 (bar-status-panel SPEC §2): replaces
+        // `bluetooth_and_power_land_at_the_end_of_end` — `hotspot`/
+        // `bluetooth` are gone (see `netwarn_module()`/`status_module()`'s
+        // own doc comments), `status` is their replacement at the tail.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let names: Vec<&str> = end.iter().map(|m| m["name"].as_str().unwrap()).collect();
-        let hotspot = names.iter().position(|n| *n == "hotspot").unwrap();
-        let bluetooth = names.iter().position(|n| *n == "bluetooth").unwrap();
+        let status = names.iter().position(|n| *n == "status").unwrap();
         let power = names.iter().position(|n| *n == "power").unwrap();
-        assert!(hotspot < bluetooth && bluetooth < power);
+        assert!(status < power);
         // power is the last module of the last row — INV-3's corner target.
         assert_eq!(names.last(), Some(&"power"));
     }
 
     #[test]
-    fn bluetooth_is_icon_only_and_hovers_its_own_popup() {
-        // T8c: format reduced to the bare icon on every state (waybar
-        // parity — its own format/format-connected/format-disabled are
-        // also icon-only). T-hover: on_click_left's toggle-popup is gone —
-        // hover-exit's unconditional hide_popup used to be what fixed the
-        // T9 popup_autohide gap, so a second click was no longer needed to
-        // close it.
-        //
-        // T-popup-hold: `on_mouse_exit` removed outright — bluetooth is a
-        // native module with no `popup:` content box of ours to wire
-        // `hover hold`/`release` onto, so `on_mouse_exit` closed the popup
-        // the instant the pointer crossed `popup_gap` toward it, every
-        // time (the reported "can never reach it" case) — see
-        // `bluetooth_module()`'s own doc comment.
+    fn bluetooth_native_module_is_gone_from_the_bar() {
+        // S2 (bar-status-panel SPEC §2/§4): replaces
+        // `bluetooth_is_icon_only_and_opens_on_click_only` — the native
+        // `bluetooth` module itself is retired; `status_popup()`'s own
+        // bluetooth row (checked by
+        // `status_popup_has_three_sliders_and_reuses_every_retired_pills_
+        // command`) reuses its `blueman-manager` command instead.
         let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let bt = end.iter().find(|m| m["name"] == "bluetooth").unwrap();
-        let format = bt["format"].as_object().unwrap();
-        for (key, value) in format {
-            let text = value.as_str().unwrap();
-            assert!(
-                !text.contains('{'),
-                "format.{key} still has a placeholder: {text}"
-            );
-        }
-        assert!(bt.get("on_click_left").is_none());
-        let enter = bt["on_mouse_enter"].as_str().unwrap();
-        assert!(enter.contains("hover enter"));
-        assert!(enter.contains("bar-eDP-1"));
-        assert!(enter.contains("bluetooth"));
-        assert!(
-            bt.get("on_mouse_exit").is_none(),
-            "bluetooth must not close on hover-exit — see popup_gap comment above"
-        );
-        assert_eq!(bt["on_click_right"], "blueman-manager");
+        let mut names = HashSet::new();
+        collect_module_names(&cfg, &mut names);
+        assert!(!names.contains("bluetooth"));
     }
 
     #[test]
@@ -2511,15 +2787,22 @@ mod tests {
     }
 
     #[test]
-    fn inhibit_module_has_a_hover_popup() {
-        // Same shape as remote_module(): a real popup and both hover
-        // attributes, unlike the native `inhibit` module it replaced.
+    fn inhibit_module_shows_only_while_awake_with_a_static_tooltip() {
+        // S1 (bar-status-panel SPEC §2/§5e): the pill is now show_if-gated
+        // on `#awake_on` (keepawake.rs) and carries a static tooltip in
+        // place of the dynamic hover popup this replaced — see
+        // `inhibit_module()`'s own doc comment.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
         let inhibit = end.iter().find(|m| m["name"] == "inhibit").unwrap();
-        assert!(inhibit.get("popup").is_some());
-        assert!(inhibit["on_mouse_enter"].is_string());
-        assert!(inhibit["on_mouse_exit"].is_string());
+        assert_eq!(inhibit["show_if"], json!("#awake_on"));
+        assert_eq!(
+            inhibit["tooltip"],
+            json!("Keep-awake on: this computer will not sleep")
+        );
+        assert!(inhibit.get("popup").is_none());
+        assert!(inhibit.get("on_mouse_enter").is_none());
+        assert!(inhibit.get("on_mouse_exit").is_none());
     }
 
     #[test]
@@ -2527,11 +2810,14 @@ mod tests {
         // T28: `music` dropped out of this group — it is a `custom` module
         // now, fed by music.rs (see `music_module()`'s own doc comment for
         // why: the native module's `set_label_escaped` render path can't
-        // carry the two-line markup the window pill uses). `bluetooth` and
-        // `tray` are still the real native modules on this bar.
+        // carry the two-line markup the window pill uses). S2
+        // (bar-status-panel SPEC §2): `bluetooth` drops out too — the
+        // native module itself is retired (see
+        // `bluetooth_native_module_is_gone_from_the_bar`). `tray` is the
+        // one real native module left on this bar.
         let cfg = build(&["eDP-1".to_string()]);
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        for name in ["bluetooth", "tray"] {
+        for name in ["tray"] {
             let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert_eq!(m["type"], json!(name));
             assert_eq!(m["class"], json!(name));
@@ -2550,17 +2836,12 @@ mod tests {
         assert_eq!(fallback["popup_gap"], json!(12));
     }
 
-    #[test]
-    fn volume_bar_text_is_icon_only() {
-        // T9: percentage moved to the popup — see audio_modules()'s doc
-        // comment for why the SliderWidget alternative was rejected.
-        let cfg = build(&["eDP-1".to_string()]);
-        let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        let volume = end.iter().find(|m| m["name"] == "volume").unwrap();
-        assert_eq!(volume["bar"][0]["label"], json!("#vol_text"));
-        // vol_text's own content (icon-only, no "%") is audio.rs's job —
-        // this only asserts genconfig still points at the same ironvar.
-    }
+    // S2 (bar-status-panel SPEC §2): `volume_bar_text_is_icon_only` removed
+    // outright — the standalone `volume` pill it checked is gone. Its
+    // replacement, `status_module()`'s own `#vol_text` widget, is checked
+    // by `status_popup_has_three_sliders_and_reuses_every_retired_pills_
+    // command` instead. `vol_text`'s own content (icon-only, no "%") stays
+    // audio.rs's job, unaffected by this reorganisation.
 
     #[test]
     fn tooltip_and_hover_are_mutually_exclusive() {
@@ -2591,33 +2872,35 @@ mod tests {
 
         let win = start.iter().find(|m| m["name"] == "win").unwrap();
         assert!(win["tooltip"].is_string());
-        // T19: wifi/eth/netsec moved out of this group — see below.
-        let mic = end.iter().find(|m| m["name"] == "mic").unwrap();
-        assert!(mic["tooltip"].is_string(), "mic missing a tooltip");
 
-        // T23: all three are part of `resource_modules()`, which lives in
-        // `end` now — see that function's own doc comment (T29: `cpu`/
-        // `memory`/`docker`/`claudebar` are `sysload`/`devload` now). T28:
-        // `music` joins this group — it lost its static tooltip the same
-        // way these did, when it converted from a native module to a
-        // hover-popup `custom` one (`music_module()`'s own doc comment).
-        for name in ["sysload", "devload", "battery", "music"] {
+        // T23: both are part of `resource_modules()`, which lives in `end`
+        // now — see that function's own doc comment (T29: `cpu`/`memory`/
+        // `docker`/`claudebar` are `sysload`/`devload` now). T28: `music`
+        // joins this group — it lost its static tooltip the same way these
+        // did, when it converted from a native module to a hover-popup
+        // `custom` one (`music_module()`'s own doc comment). S2
+        // (bar-status-panel SPEC §2): `battery` drops out of this group —
+        // it no longer exists as a bar module at all.
+        for name in ["sysload", "devload", "music"] {
             let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert!(
                 m["tooltip"].is_null(),
                 "{name} should have lost its tooltip"
             );
         }
-        // T15: hotspot joins this group — its static tooltip moved into
-        // tooltip::HINTS when it gained a hover popup.
-        // T19: wifi/eth/netsec join too — same reasoning (T7b popups).
-        for name in ["volume", "bluetooth", "hotspot", "wifi", "eth", "netsec"] {
-            let m = end.iter().find(|m| m["name"] == name).unwrap();
-            assert!(
-                m["tooltip"].is_null(),
-                "{name} should have lost its tooltip"
-            );
-        }
+        // S2: `status` is click-only (no tooltip, no hover popup — SPEC
+        // §4's rule) and `netwarn` is a glance pill with a static tooltip
+        // and no hover popup — both replace the volume/bluetooth/hotspot/
+        // wifi/eth/netsec group this loop used to check.
+        let status = end.iter().find(|m| m["name"] == "status").unwrap();
+        assert!(status["tooltip"].is_null());
+        let netwarn = end.iter().find(|m| m["name"] == "netwarn").unwrap();
+        assert!(netwarn["tooltip"].is_string());
+        // S4 (hotspot-vpn SPEC §5): one click opens the VPN picker. A
+        // module-level key takes no `!` prefix.
+        let click = netwarn["on_click_left"].as_str().unwrap();
+        assert!(click.contains("net.sh --sec-click"));
+        assert!(!click.starts_with('!'));
         // T23: tags live in `start` now — see `start_modules()`'s own doc
         // comment.
         let ws1 = start
@@ -2646,12 +2929,13 @@ mod tests {
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        // T28: `music`/`keepass` join this group — same hover-opens-the-
-        // popup shape as the resource pills. T29: `archupdate` drops out
-        // of this list — it is no longer a top-level module (folded into
-        // `devload`'s docker row), so it has no `on_mouse_enter` of its
-        // own to check here any more.
-        for name in ["sysload", "devload", "battery", "music", "keepass"] {
+        // T28: `music` joins this group — same hover-opens-the-popup shape
+        // as the resource pills. T29: `archupdate` drops out of this list —
+        // it is no longer a top-level module (folded into `devload`'s
+        // docker row), so it has no `on_mouse_enter` of its own to check
+        // here any more. S2 (bar-status-panel SPEC §2): `battery`/`keepass`
+        // drop out too — neither exists as a bar module any more.
+        for name in ["sysload", "devload", "music"] {
             let m = end.iter().find(|m| m["name"] == name).unwrap();
             assert!(
                 m["on_mouse_enter"].is_string(),
@@ -2673,27 +2957,15 @@ mod tests {
                 "{name} missing on_mouse_exit"
             );
         }
-        // T19: wifi/eth/netsec join volume here — see net_modules()'s own
-        // doc comment. T-popup-hold: bluetooth dropped from this list — it
-        // no longer carries on_mouse_exit at all (see bluetooth_module()'s
-        // own doc comment), checked separately by
-        // bluetooth_is_icon_only_and_hovers_its_own_popup.
-        for name in ["volume", "wifi", "eth", "netsec"] {
-            let m = end.iter().find(|m| m["name"] == name).unwrap();
-            assert!(
-                m["on_mouse_enter"].is_string(),
-                "{name} missing on_mouse_enter"
-            );
-            assert!(
-                m["on_mouse_exit"].is_string(),
-                "{name} missing on_mouse_exit"
-            );
-        }
-        let bluetooth = end.iter().find(|m| m["name"] == "bluetooth").unwrap();
-        assert!(
-            bluetooth["on_mouse_enter"].is_string(),
-            "bluetooth missing on_mouse_enter"
-        );
+        // S2 (bar-status-panel SPEC §2/§4): volume/wifi/eth/netsec/
+        // bluetooth/hotspot/battery/keepass all drop out of this group —
+        // none of them hover any more. `status` (click-only, SPEC §4) and
+        // `netwarn` (a static-tooltip glance pill) are their replacements,
+        // and both are checked elsewhere
+        // (`status_is_click_only_scrolls_volume_and_targets_its_own_bar_
+        // name`, `tooltip_and_hover_are_mutually_exclusive`) rather than
+        // here — this loop is for modules that DO hover, and none of the
+        // new ones do.
         // T23: tags live in `start` now.
         for n in 1..=TAG_COUNT {
             let module = ws_module("eDP-1", n);
@@ -2716,10 +2988,11 @@ mod tests {
         // A pill with no `popup` field has nothing to show — hover there
         // must stay a no-op, so these must carry neither attribute.
         //
-        // T31: `colorpicker`/`darkmode`/`snip` rejoin this list — they
-        // are standalone modules again (the tools drawer is gone, see
-        // `tools_modules()`'s own doc comment), popup-free with static
-        // tooltips, so hover must stay a no-op on each.
+        // S2 (bar-status-panel SPEC §2/§4): colorpicker/darkmode/snip/mic/
+        // net-spinner all leave the bar for good this stage (see
+        // `tools_modules()`/`audio_modules()`/`net_modules()`'s own doc
+        // comments) — `netwarn` (a static-tooltip glance pill, no popup) is
+        // their replacement in this group.
         let cfg = build(&["eDP-1".to_string()]);
         let start = cfg["monitors"]["eDP-1"]["start"].as_array().unwrap();
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
@@ -2736,15 +3009,7 @@ mod tests {
         // the native `inhibit` module (no popup) to a `custom` one with a
         // hover popup (inhibit_module()'s own doc comment) — checked by
         // inhibit_module_has_a_hover_popup below instead.
-        for name in [
-            "spark",
-            "power",
-            "mic",
-            "net-spinner",
-            "colorpicker",
-            "darkmode",
-            "snip",
-        ] {
+        for name in ["spark", "power", "netwarn"] {
             let m = all
                 .iter()
                 .find(|m| m["name"] == name)
@@ -2816,7 +3081,9 @@ mod tests {
         let cfg = build(&["eDP-1".to_string()]);
         let center = cfg["monitors"]["eDP-1"]["center"].as_array().unwrap();
         let end = cfg["monitors"]["eDP-1"]["end"].as_array().unwrap();
-        for name in ["sysload", "devload", "battery"] {
+        // S2 (bar-status-panel SPEC §2): `battery` drops out of this
+        // loop — it no longer exists as a bar module.
+        for name in ["sysload", "devload"] {
             let m = end.iter().find(|m| m["name"] == name).unwrap();
             if let Some(click) = m.get("on_click_left").and_then(|v| v.as_str()) {
                 assert!(
@@ -2872,23 +3139,18 @@ mod tests {
                 );
             }
         }
-        // T19: wifi/eth/netsec join volume/bluetooth — their on_click_left
-        // is a real shell script launch (wifi-menu.sh/eth-toggle.sh/
-        // net.sh), never a popup toggle, so it can't race hover either.
-        for name in ["volume", "bluetooth", "wifi", "eth", "netsec"] {
-            let m = end.iter().find(|m| m["name"] == name).unwrap();
-            if let Some(click) = m.get("on_click_left").and_then(|v| v.as_str()) {
-                assert!(
-                    !click.contains("toggle-popup"),
-                    "{name}'s on_click_left must not send toggle-popup: {click}"
-                );
-            }
-        }
-        // bluetooth/clock carry no on_click_left at all, and neither do
-        // devload's claude row or docker cell (the au cell is the one
-        // exception — it runs arch-update, checked separately) — still
-        // true, and worth pinning so a future edit that adds one notices
-        // this test instead of sliding past it silently.
+        // S2 (bar-status-panel SPEC §2/§4): volume/bluetooth/wifi/eth/
+        // netsec all leave the bar — `status`'s own `on_click_left` is a
+        // deliberate, unconditional `toggle-popup` instead (SPEC §4: click
+        // opens the popup, no hover to race against), checked separately by
+        // `status_is_click_only_scrolls_volume_and_targets_its_own_bar_
+        // name`, not by this loop.
+        //
+        // clock carries no on_click_left at all, and neither do devload's
+        // claude row or docker cell (the au cell is the one exception — it
+        // runs arch-update, checked separately) — still true, and worth
+        // pinning so a future edit that adds one notices this test instead
+        // of sliding past it silently.
         {
             let devload = end.iter().find(|m| m["name"] == "devload").unwrap();
             assert!(devload.get("on_click_left").is_none());
@@ -2904,8 +3166,6 @@ mod tests {
         }
         let clock = center.iter().find(|m| m["name"] == "clock").unwrap();
         assert!(clock.get("on_click_left").is_none());
-        let bt = end.iter().find(|m| m["name"] == "bluetooth").unwrap();
-        assert!(bt.get("on_click_left").is_none());
     }
 
     #[test]

@@ -31,7 +31,7 @@ opt() { printf '\0%s\x1f%s\n' "$1" "$2"; }
 # to the same directory anyway).
 wallpaper_dir() {
 	local d
-	for d in "$HOME/Wallpapers" "$(xdg-user-dir PICTURES)/Wallpapers" "$(xdg-user-dir PICTURES)"; do
+	for d in "$HOME/pictures/wallpapers" "$(xdg-user-dir PICTURES)/wallpapers" "$(xdg-user-dir PICTURES)"; do
 		[[ -d "$d" ]] && { printf '%s' "$d"; return 0; }
 	done
 	return 1

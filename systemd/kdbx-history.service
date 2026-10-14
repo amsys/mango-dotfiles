@@ -5,4 +5,4 @@ Description=Copy Consolidated.kdbx into the local history and check it
 Type=oneshot
 Nice=10
 IOSchedulingClass=idle
-ExecStart=%h/work/mango-dotfiles/src/systemd/kdbx-history.sh
+ExecStart=%h/projects/system/mango-dotfiles/src/systemd/kdbx-history.sh

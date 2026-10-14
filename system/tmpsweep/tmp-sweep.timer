@@ -1,0 +1,12 @@
+# Starts tmp-sweep.service every 10 minutes, five minutes after login.
+[Unit]
+Description=Periodic /tmp sweep and quota check
+Wants=tmp-sweep.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

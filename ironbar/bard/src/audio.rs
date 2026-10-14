@@ -332,12 +332,24 @@ impl Audio {
             _ => String::new(),
         };
         vars.set("mic_text", mic_text);
+        // Status panel: the mic icon is always shown — muted or unmuted.
+        let mic_icon = match &mic {
+            Some(m) if m.muted => IC_MIC_MUTED.to_string(),
+            _ => IC_MIC.to_string(),
+        };
+        vars.set("mic_icon", mic_icon);
+        // S2 (bar-status-panel SPEC §3): bare percentage for the `status`
+        // popup's mic slider (genconfig.rs::status_popup()) — distinct from
+        // `mic_text` above, which is empty unless muted.
+        vars.set("mic_pct", mic.as_ref().map_or(0, |m| m.pct).to_string());
 
         match &dev {
             None => {
                 // volume.sh:102-105 — no sink at all: plain text, no markup.
                 vars.set("vol_text", "");
                 set_titled(vars, "vol_tip", "Volume", "No audio sink".to_string());
+                // S2: no sink, so the status button/popup's slider read 0.
+                vars.set("vol_pct", "0");
             }
             Some(d) => {
                 let sink_inputs =
@@ -347,10 +359,19 @@ impl Audio {
                 // pill already opens on click, to stop crowding the
                 // wifi/eth/netsec trio next to it.
                 vars.set("vol_text", barico(ic_vol(d.pct, d.muted)));
+                // S2 (bar-status-panel SPEC §2): the `volume` pill is gone
+                // from the bar, so no module carries this class now. The
+                // write stays: main.rs's `flush_vars` drops a class for a
+                // module that is not on the bar
+                // (`genconfig::class_target_known`), with no IPC and no
+                // retry. The T9 opacity-by-level look is dropped.
                 vars.set(
                     &format!("{CLASS_PREFIX}volume"),
                     volume_class(d.pct, d.muted),
                 );
+                // S2 (bar-status-panel SPEC §3): bare percentage for the
+                // `status` module's compact button and its popup slider.
+                vars.set("vol_pct", d.pct.to_string());
                 set_titled(vars, "vol_tip", "Volume", build_tip(d, mic.as_ref(), &apps));
             }
         }

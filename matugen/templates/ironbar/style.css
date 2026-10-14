@@ -661,15 +661,23 @@ window.background,
 	padding: 0 4px;
 	background: transparent;
 	color: alpha(@bar_fg_dim, 0.90);
-	border-radius: 9999px;
+	/* S1 (bar-status-panel SPEC §5b): 6px, down from the full-oval 9999px —
+	 * a tag pill reads as a small tile in the row, not a capsule. */
+	border-radius: 6px;
 }
 /* T23: retargeted from `#bar #center` — the tag pills moved to `start`
  * (statusbar-layout.md §3.1, reversing T-next item 3's move into `center`;
  * see genconfig.rs::time_modules()'s own doc comment for why the reversal
  * is safe). Same rule, same reasoning as T14's own comment above — only
- * the row changed. */
+ * the row changed.
+ *
+ * S1 (bar-status-panel SPEC §5b): vertical margin added (0 -> 6px) so the
+ * active fill sits 28px tall inside the 40px bar instead of the full
+ * height — the tile now reads as a distinct pill in the row rather than a
+ * full-height wall of color.
+ */
 #bar #start > .ws {
-	margin: 0 2px;
+	margin: 6px 2px;
 }
 /* T19: `min-width` above sizes the `.ws` module container, but its child
  * button has hexpand=false, so GTK packs it at the container's start and
@@ -715,9 +723,30 @@ window.background,
 	background: @accent;
 	color: @accent_fg;
 }
+/* S1 (bar-status-panel SPEC §5b/§6): a flash, not a standing pulse — an
+ * `infinite` animation here would keep GTK's frame clock running for as
+ * long as any tag stays urgent, which can be indefinite (SPEC §6's CPU
+ * invariant: infinite is only for a class gated to a bounded or
+ * momentary active state, like `.netsec.open` below, not an open-ended
+ * one). `ws-urgent` alternates between a dim and a full-strength fill;
+ * 6 iterations of a 0.5s half-cycle is 3 full flashes in 3s. When the
+ * animation ends, the still-standing `.ws.urgent` rule below — never
+ * touched by the keyframe's own `color` — keeps the solid `@urgent` fill
+ * and holds it for as long as the tag stays urgent, with no animation
+ * running.
+ */
+@keyframes ws-urgent {
+	from {
+		background: alpha(@urgent, 0.35);
+	}
+	to {
+		background: @urgent;
+	}
+}
 .ws.urgent {
 	background: @urgent;
 	color: @urgent_fg;
+	animation: ws-urgent 0.5s ease-in-out 6 alternate;
 }
 /* Sized to the row it replaces, recalculated for T14's tighter `.ws` box
  * model: TAG_COUNT (mango.rs) is 9, not 8 — the "8 pills" this comment
@@ -847,6 +876,26 @@ window.background,
  */
 .net-spinner, .net-spinner label {
 	font-family: "JetBrainsMono Nerd Font Propo", monospace;
+}
+/* S1 (bar-status-panel SPEC §5a/§6): the spin used to run on the bare
+ * `.net-spinner` class, so GTK kept the frame clock ticking even while
+ * `show_if: #net_busy` collapsed the widget to zero width — measured
+ * 3.8% CPU / 111 wakeups/s idle (SPEC audit evidence), against 0.55% / 8/s
+ * with it off. Scoping the animation to a state class that exists only
+ * while busy means the keyframe only exists while the icon is both visible
+ * and actually busy — never while hidden or idle.
+ *
+ * S2 (bar-status-panel SPEC §2/§5): the standalone `net-spinner` pill this
+ * rule used to gate on its OWN `.spinning` class is gone from the bar — the
+ * glyph is now a nested label (static class `net-spinner`, for its font
+ * stack only) inside the `status` module's button
+ * (genconfig.rs::status_module()). `ipc.rs::set_class` can only address a
+ * module by its JSON `name`, never a widget nested inside one, so
+ * `net.rs::refresh_busy_var()` now sets a `busy` class on the whole
+ * `status` module instead of `net-spinner` itself — the selector below
+ * reaches back down to the icon from there, so visually only the icon
+ * spins, even though the trigger class sits one level up. */
+.status.busy .net-spinner, .status.busy .net-spinner label {
 	animation: net-spinner-spin 0.9s linear infinite;
 }
 @keyframes net-spinner-spin {
@@ -951,7 +1000,13 @@ window.background,
  * `.mem-ico`/`.gauge-mem`), which covers the same nodes the row selector
  * used to reach.
  */
-.battery.critical,
+/* The status button carries the static class `battery` so the gauge
+ * rules match (genconfig.rs status_module). Colour only the battery parts
+ * on critical, not the volume and wifi icons in the same button.
+ */
+.status.critical .gauge,
+.status.critical .gauge-cap,
+.status.critical .bat-pct,
 .cpu-warning .cpu-ico,
 .cpu-warning .gauge-cpu,
 .mem-warning .mem-ico,
@@ -1127,12 +1182,16 @@ window.background,
 
 /* Keep-awake state — `.inhibit` is now a `custom` module (keepawake.rs),
  * so unlike the native `inhibit` module this replaced, it carries its own
- * `@class/inhibit` ironvar. Same two-state accent treatment as
- * `.remote.active`/`.hotspot.vpn` above — a bare untagged pill (no class)
- * is off.
+ * `@class/inhibit` ironvar.
+ *
+ * S1 (bar-status-panel SPEC §2/§5e): color moved to `@warn` (was
+ * `@accent`). `show_if: "#awake_on"` (genconfig.rs::inhibit_module) means
+ * the pill is now only ever shown while `.active` — a neutral accent read
+ * as decoration on a pill with no other state to contrast against; `@warn`
+ * reads as the "this machine will not sleep" signal the SPEC calls for.
  */
 .inhibit.active {
-	color: @accent;
+	color: @warn;
 }
 
 /* The one destructive target on the bar — reads as one on hover rather than
@@ -1354,4 +1413,177 @@ popover:not(.menu) > contents {
 	 * wrong CJK glyph, until a follow-up pass gives them the same
 	 * Nerd Font swap the bar pills got in T8b. */
 	font-family: "IBM Plex Sans", "JetBrainsMono Nerd Font", monospace;
+}
+
+/* Status button and panel (bar-status-panel SPEC section 5). The volume
+ * number is the one bright item, so the eye finds volume first. The other
+ * icons stay dim. `#bar #end >` is needed to win over `#bar #end > *`.
+ */
+#bar #end > .status {
+	margin: 0 8px;
+}
+.status,
+.status label {
+	color: @bar_fg_dim;
+}
+.status .vol-pct,
+.status .vol-pct label {
+	color: @bar_fg;
+	margin-right: 6px;
+}
+.status .bat-pct {
+	margin-left: 4px;
+}
+/* Status panel rows. `.popup label` above pads every label 10px 14px for
+ * the text popups; the panel resets that and pads the row instead, so the
+ * icon, the slider and the value sit on one line. Each class rule has a
+ * `label` twin: in GTK4 a rule on the node beats an inherited value
+ * (memory: GTK4 CSS font trap). GTK CSS has no flex, gap, width or
+ * text-align: boxes lay out the row, min-width makes the columns.
+ *
+ * Every button rule below is `.popup button.<class>` (specificity 0,2,1),
+ * so it beats `.custom button` (0,1,1, above): the panel's popover sits
+ * inside the `.custom` module, so a bare `.popup-toggle`/`.popup-mute`/
+ * `.popup-row-button` class rule (0,1,0) lost every size and fill to it.
+ */
+.popup-row {
+	padding: 3px 10px;
+	min-height: 32px;
+}
+.popup .popup-row label,
+.popup .popup-toggles label {
+	padding: 0;
+}
+
+/* Icon column: a fixed-width box holds the mute button or the plain
+ * brightness icon label, so all three slider tracks (mic, volume,
+ * brightness) start at the same x no matter which widget fills column
+ * one. */
+.popup-icon-col {
+	min-width: 36px;
+}
+/* Air above the first row; the tile row below has 10px under it. */
+.popup .popup-slider-row:first-child {
+	padding-top: 12px;
+}
+/* Detail rows: the same icon column, so the glyph never touches its label. */
+.popup .popup-row-button label.popup-row-icon {
+	min-width: 28px;
+	margin-right: 8px;
+	color: @bar_fg;
+	font-family: "JetBrainsMono Nerd Font Propo", monospace;
+}
+.popup .popup-slider-row label.popup-row-icon {
+	min-width: 32px;
+	color: @bar_fg;
+	font-family: "JetBrainsMono Nerd Font Propo", monospace;
+}
+.popup button.popup-mute {
+	min-width: 32px;
+	min-height: 32px;
+	padding: 0;
+	border-radius: 9999px;
+	background: none;
+}
+.popup button.popup-mute:hover {
+	background-color: alpha(@bar_fg_dim, 0.14);
+}
+.popup .popup-mute label {
+	color: @bar_fg;
+	font-family: "JetBrainsMono Nerd Font Propo", monospace;
+}
+
+/* Thick pill sliders (user choice, 2026-10-06): a 24px track whose fill
+ * is the accent colour. The knob is hidden; a click on the track jumps
+ * there (GTK's default primary-button-warps-slider) and a drag follows. */
+.popup-slider {
+	margin: 0 8px;
+	padding: 0;
+}
+.popup-slider trough {
+	min-height: 24px;
+	border-radius: 12px;
+	border: none;
+	background-color: alpha(@bar_fg_dim, 0.18);
+}
+.popup-slider trough highlight {
+	min-height: 24px;
+	border-radius: 12px;
+	border: none;
+	background-color: @accent;
+}
+.popup-slider:hover trough highlight {
+	background-color: shade(@accent, 1.08);
+}
+.popup-slider trough slider {
+	min-width: 0;
+	min-height: 0;
+	margin: 0;
+	padding: 0;
+	border: none;
+	background: none;
+	box-shadow: none;
+	opacity: 0;
+}
+.popup .popup-slider-row label.popup-row-value {
+	min-width: 36px;
+	color: @bar_fg_dim;
+	font-feature-settings: "tnum" 1;
+}
+
+/* Detail rows: one button per row, so the whole row is the target. The
+ * label and value columns are fixed-width wrapper boxes, not min-width on
+ * the labels themselves — a GTK label with CSS min-width centres its
+ * text (xalign 0.5, which CSS cannot change); the box gives the column
+ * its width and the label keeps its natural, left-aligned position
+ * inside it. This lines up the chevrons. */
+.popup button.popup-row-button {
+	padding: 6px 8px;
+	border-radius: 10px;
+	background: none;
+}
+.popup button.popup-row-button:hover {
+	background-color: alpha(@bar_fg_dim, 0.14);
+}
+.popup-col-label {
+	min-width: 104px;
+}
+.popup-col-value {
+	min-width: 176px;
+}
+.popup .popup-row-button label.popup-row-label {
+	color: @bar_fg;
+}
+.popup .popup-row-button label.popup-row-value {
+	color: @bar_fg_dim;
+	font-feature-settings: "tnum" 1;
+}
+.popup .popup-row-button label.popup-row-chevron {
+	margin-left: 6px;
+	color: @bar_fg_dim;
+}
+
+/* Toggle grid: row one holds the on/off switches, row two the one-shot
+ * actions. */
+.popup-toggles {
+	padding: 4px 10px;
+	margin-top: 4px;
+}
+.popup-toggles-actions {
+	padding-bottom: 10px;
+}
+.popup button.popup-toggle {
+	min-width: 44px;
+	min-height: 36px;
+	margin: 0 4px;
+	padding: 0;
+	border-radius: 10px;
+	background-color: alpha(@bar_fg_dim, 0.10);
+}
+.popup button.popup-toggle:hover {
+	background-color: alpha(@bar_fg_dim, 0.20);
+}
+.popup .popup-toggle label {
+	color: @bar_fg;
+	font-family: "JetBrainsMono Nerd Font Propo", monospace;
 }

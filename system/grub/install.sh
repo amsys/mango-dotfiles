@@ -78,7 +78,7 @@ echo "==> 45_mango-extras -> /etc/grub.d/45_mango-extras"
 install -m 0755 -o root -g root "$SRC_DIR/45_mango-extras" /etc/grub.d/45_mango-extras
 extra_patterns=(mango-recovery)
 # The memtest entry comes from the package's own 60_memtest86+-efi.
-[ -f /boot/memtest86+/memtest.efi ] && extra_patterns+=('/memtest86\+/memtest\.efi')
+[ -f /boot/memtest86+/memtest86x64.efi ] && extra_patterns+=('/memtest86\+/memtest86x64\.efi')
 
 echo "==> $DEFAULTS (backup: $DEFAULTS.bak.$STAMP)"
 cp -a "$DEFAULTS" "$DEFAULTS.bak.$STAMP"

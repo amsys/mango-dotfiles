@@ -134,6 +134,28 @@ impl Verdict {
     }
 }
 
+/// S2 (bar-status-panel SPEC §2): the `net_warn` ironvar `regrade()` writes
+/// for the `netwarn` pill's `show_if` — true for every verdict except the
+/// two "nothing to see" ones. Pulled out of `regrade()` into its own pure
+/// function so the full verdict set has a direct test, not just coverage
+/// by way of whichever verdicts `classify()`'s own fixtures happen to hit.
+pub fn net_warn_for(verdict: Verdict) -> bool {
+    !matches!(verdict, Verdict::Secure | Verdict::Offline)
+}
+
+/// S2 (bar-status-panel SPEC §3): the `bt_text` row label for the `status`
+/// popup's bluetooth row, given the connected-device count `refresh_bt_text`
+/// parses out of `bluetoothctl`. Pure function, no forks — same reasoning as
+/// `net_warn_for` above, pulled out so the 0/1/many wording has a direct
+/// test independent of a live `bluetoothctl` call.
+pub fn bt_text_for(n: usize) -> String {
+    match n {
+        0 => "No devices".to_string(),
+        1 => "1 device".to_string(),
+        _ => format!("{n} devices"),
+    }
+}
+
 /// Exact port of net.sh's `classify()` (net.sh:273-306). Pure function, no
 /// commands, no globals — `tuns`/`dns` are space-separated tokens, exactly
 /// the shape `check()`'s selftest fixtures already pass as shell words.
@@ -343,6 +365,19 @@ pub fn arc(pct: i32) -> char {
         50..=74 => '\u{f0925}',  // md-wifi_strength_3
         25..=49 => '\u{f0922}',  // md-wifi_strength_2
         _ => '\u{f091f}',        // md-wifi_strength_1
+    }
+}
+
+/// `wifi_state` ironvar text for the status popup's Wi-Fi row: the SSID
+/// `parse_iw_link` found in the already-fetched `iw dev <dev> link` output,
+/// plus the signal percentage (e.g. "My Network · 72%"). Falls back to the
+/// bare percentage when `iw` reported a link with no `SSID:` line. The
+/// caller sends "off" instead of calling this at all when `iw` says there
+/// is no link (see `regrade()`).
+pub fn wifi_state_text(ssid: Option<&str>, pct: i32) -> String {
+    match ssid {
+        Some(s) if !s.is_empty() => format!("{s} · {pct}%"),
+        _ => format!("{pct}%"),
     }
 }
 
@@ -605,18 +640,56 @@ impl Net {
         // net.sh:598-608's "emit busy \"\" \"\"" contract via show_if
         // instead of an empty label.
         vars.set("wifi_show", if busy { "false" } else { "true" });
+        // S1 (bar-status-panel SPEC §5a/§6): the spin keyframe used to run
+        // unconditionally on `.net-spinner`, so GTK kept ticking it even
+        // while `show_if` hid the widget — measured 3.8% CPU/111 wakeups/s
+        // idle (SPEC audit evidence). An `@class` ironvar adds/removes a
+        // state class through the existing `style add-class`/`remove-class`
+        // IPC path (main.rs's `flush_vars`), so the keyframe only exists
+        // while the class is actually set.
+        //
+        // S2 (bar-status-panel SPEC §2/§5): the standalone `net-spinner`/
+        // `wifi` pills this used to target are gone from the bar — the wifi
+        // icon now lives nested inside the `status` module's own button
+        // (genconfig.rs::status_module()). `ipc.rs::set_class` addresses a
+        // module by its JSON `name`, never a widget nested inside one, so
+        // the busy class has to land on "status" (the whole button) rather
+        // than on the icon directly; style.css scopes the reused
+        // `net-spinner-spin` keyframe to `.status.busy .net-spinner`, which
+        // still animates only the icon, not the whole button.
+        vars.set(&class_key("status"), if busy { "busy" } else { "" });
     }
 
     /// Pure recompute of the netsec `eco` class from the current powermode
     /// — no forks. Used both inside `regrade()` and standalone by main.rs's
     /// powermode-change arm (which must not fork just to redraw a class).
+    ///
+    /// S2 (bar-status-panel SPEC §2): the IPC module target is "netwarn"
+    /// now, not "netsec" — `netwarn_module()` (genconfig.rs) is the bar
+    /// pill's new name, and `ipc.rs::set_class` addresses by that literal
+    /// JSON `name`. The CSS class value itself ("eco") is unchanged, and
+    /// still matches `.netsec.eco.*` in style.css: the module's own static
+    /// `class` field stays "netsec" (a deliberate reuse — see
+    /// `netwarn_module()`'s own doc comment), so this dynamic class lands
+    /// on a node that already carries the literal "netsec" token too.
     pub fn set_eco_class(&self, vars: &mut Vars, pm_mode: powermode::Mode) {
         let eco = if pm_mode != powermode::Mode::Full {
             "eco"
         } else {
             ""
         };
-        vars.set(&class_key("netsec#eco"), eco);
+        vars.set(&class_key("netwarn#eco"), eco);
+    }
+
+    /// S2 (bar-status-panel SPEC §3): `bt_text` for the `status` popup's
+    /// bluetooth row — connected-device count, read on popup open only (the
+    /// "status-detail" refresh topic, main.rs), never polled. One fork
+    /// (`bluetoothctl devices Connected`), same cost class as `hotspot`/
+    /// `remote`'s own on-edge refreshes.
+    pub async fn refresh_bt_text(&self, vars: &mut Vars) {
+        let out = run("bluetoothctl", &["devices", "Connected"]).await;
+        let n = out.lines().filter(|l| !l.trim().is_empty()).count();
+        vars.set("bt_text", bt_text_for(n));
     }
 
     /// Decision 2's RSSI gate: full mode refreshes every tick, battery mode
@@ -693,9 +766,25 @@ impl Net {
         let verdict = guard_state_to_verdict(&guard_state)
             .unwrap_or_else(|| classify(&conn, sec, &v4, &v6, &tuns_str, &dns_str, nconf));
 
-        vars.set(&class_key("netsec"), verdict.as_str());
+        // S2 (bar-status-panel SPEC §2/§3): IPC module target renamed
+        // "netsec" -> "netwarn" (see `set_eco_class()`'s own comment for
+        // why the CSS class value and the module's static `class` field
+        // both stay "netsec" regardless). `net_warn` is the new boolean the
+        // pill's own `show_if` reads — true for every verdict except the
+        // two "nothing to see" ones (SPEC §2's "appears only while active"
+        // rule).
+        vars.set(&class_key("netwarn"), verdict.as_str());
         self.set_eco_class(vars, pm_mode);
         vars.set("sec_text", barico(verdict.icon()));
+        vars.set("sec_state", verdict.as_str());
+        vars.set(
+            "net_warn",
+            if net_warn_for(verdict) {
+                "true"
+            } else {
+                "false"
+            },
+        );
         self.track_guard_blocked(verdict);
 
         let eth_class = if !carrier_up {
@@ -711,6 +800,17 @@ impl Net {
             _ => format!("{} {}", barico_label(IC_ETH), eth_ip4),
         };
         vars.set("eth_text", eth_text);
+        let eth_state = match eth_class {
+            "disconnected" => "off".to_string(),
+            "linked" => "no IP".to_string(),
+            _ => eth_ip4.clone(),
+        };
+        vars.set("eth_state", eth_state);
+        // S2 (bar-status-panel SPEC §2): the `eth` and `wifi` pills are
+        // gone from the bar, so no module carries these two classes now.
+        // main.rs's `flush_vars` drops a class for a module that is not on
+        // the bar (`genconfig::class_target_known`), with no IPC and no
+        // retry. The `.eth.*`/`.wifi.*` colour-by-quality look is dropped.
         vars.set(&class_key("eth"), eth_class);
 
         self.refresh_busy_var(vars);
@@ -725,6 +825,9 @@ impl Net {
         let link = run("iw", &["dev", &self.wifi_dev, "link"]).await;
         if dump.trim().is_empty() || link.starts_with("Not connected") {
             vars.set("wifi_text", barico(IC_WIFIOFF));
+            vars.set("wifi_icon", barico(IC_WIFIOFF));
+            vars.set("wifi_pct", "");
+            vars.set("wifi_state", "off");
             vars.set(&class_key("wifi"), "disconnected");
             return;
         }
@@ -732,6 +835,12 @@ impl Net {
         let rssi = parse_signal_dbm(&dump).unwrap_or(-90);
         let pct = rssi_pct(rssi);
         vars.set("wifi_text", format!("{} {}%", barico_label(arc(pct)), pct));
+        // Icon and number apart, for the status button (icon only) and the
+        // status panel row (icon column, value column).
+        vars.set("wifi_icon", barico(arc(pct)));
+        vars.set("wifi_pct", format!("{pct}%"));
+        let ssid = parse_iw_link(&link).ssid;
+        vars.set("wifi_state", wifi_state_text(ssid.as_deref(), pct));
         vars.set(&class_key("wifi"), wifi_css_class(pct));
     }
 
@@ -2126,6 +2235,28 @@ mod tests {
         );
     }
 
+    // ---- net_warn_for(): the netwarn pill's show_if boolean, every verdict.
+    #[test]
+    fn net_warn_for_is_false_only_for_secure_and_offline() {
+        assert!(!net_warn_for(Verdict::Secure));
+        assert!(!net_warn_for(Verdict::Offline));
+        assert!(net_warn_for(Verdict::Portal));
+        assert!(net_warn_for(Verdict::Open));
+        assert!(net_warn_for(Verdict::Exposed));
+        assert!(net_warn_for(Verdict::DnsLeak));
+        assert!(net_warn_for(Verdict::Conflict));
+        assert!(net_warn_for(Verdict::Blocked));
+    }
+
+    // ---- bt_text_for(): the status popup's bluetooth row label, 0/1/many.
+    #[test]
+    fn bt_text_for_covers_zero_one_and_many() {
+        assert_eq!(bt_text_for(0), "No devices");
+        assert_eq!(bt_text_for(1), "1 device");
+        assert_eq!(bt_text_for(2), "2 devices");
+        assert_eq!(bt_text_for(11), "11 devices");
+    }
+
     // ---- guard_state_to_verdict(): vpnguard's state file, layered on top
     // of classify() rather than folded into it (see the function's doc).
     #[test]
@@ -2451,6 +2582,17 @@ mod tests {
             Some("80MHz")
         );
         assert_eq!(bitrate_width("54.0 MBit/s"), None);
+    }
+
+    #[test]
+    fn wifi_state_text_joins_ssid_and_pct() {
+        assert_eq!(wifi_state_text(Some("My Network"), 72), "My Network · 72%");
+    }
+
+    #[test]
+    fn wifi_state_text_falls_back_to_bare_pct_without_an_ssid() {
+        assert_eq!(wifi_state_text(None, 42), "42%");
+        assert_eq!(wifi_state_text(Some(""), 42), "42%");
     }
 
     #[test]

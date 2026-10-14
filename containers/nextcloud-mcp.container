@@ -1,0 +1,27 @@
+# Nextcloud MCP server for Claude Code, on 127.0.0.1:8000/mcp.
+# Rootless podman quadlet. It starts at login, and at boot with linger.
+# Runbook: ~/brain/Areas/infra/hosts/nauthiz/nextcloud-mcp.md
+
+[Unit]
+Description=Nextcloud MCP server (cloud.madmin.net)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=ghcr.io/cbcoutinho/nextcloud-mcp-server:0.184.1
+ContainerName=nextcloud-mcp
+# cloud.madmin.net is IPv6-only (ULA) from this machine. The podman
+# bridge has no IPv6, so the container uses the host stack.
+Network=host
+Entrypoint=/opt/venv/bin/nextcloud-mcp-server
+Exec=run --host 127.0.0.1 --port 8000
+# The env file holds the Nextcloud app password. Edit it, then restart.
+EnvironmentFile=%h/.config/nextcloud-mcp/env
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

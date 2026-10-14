@@ -1,0 +1,11 @@
+# Installed to /etc/sudoers.d/mango-physlock (0440) by system/remote/install.sh.
+#
+# Lets ironbar/scripts/remote.sh --privacy-watch start and stop the root
+# input-grab helper (mango-physlock.service) without a password prompt.
+# Two fixed verbs, no free arguments — same reasoning as
+# sudoers.d-mango-powermode and sudoers.d-mango-hotspot: sudoers matches
+# the command line literally, so nothing else about the service (its
+# ExecStart, its ExecStopPost, systemctl status/restart/...) runs through
+# this rule.
+%wheel ALL=(root) NOPASSWD: /usr/bin/systemctl start mango-physlock.service
+%wheel ALL=(root) NOPASSWD: /usr/bin/systemctl stop mango-physlock.service

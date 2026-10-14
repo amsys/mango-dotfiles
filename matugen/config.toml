@@ -38,6 +38,14 @@ output_path = '~/.config/ironbar/style.css'
 input_path = '~/.config/matugen/templates/swaylock/config'
 output_path = '~/.config/swaylock/config'
 
+# hyprlock is the primary locker (docs/power.md); swaylock above stays the
+# fallback sleep-lock.py starts if hyprlock never confirms a lock. No
+# post_hook: like swaylock, hyprlock is a fresh process per lock, so there is
+# no running instance to signal — same reasoning as the swaylock entry above.
+[templates.hyprlock]
+input_path = '~/.config/matugen/templates/hyprlock/hyprlock.conf'
+output_path = '~/.config/hypr/hyprlock.conf'
+
 [templates.rofi]
 input_path = '~/.config/matugen/templates/rofi/colors.rasi'
 output_path = '~/.config/rofi/colors.rasi'

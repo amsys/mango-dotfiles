@@ -23,11 +23,20 @@
 #
 #   sudo mango-hotspot up   <<< "$payload"   # normal use, from hotspot.sh
 #   sudo mango-hotspot down                  # tear down, no payload needed
+#   sudo mango-hotspot protect               # block clients from the Wi-Fi/Ethernet uplinks
+#   sudo mango-hotspot unprotect             # remove that block
 #   mango-hotspot test                       # self-check, no root needed
+#
+# PROTECT=1 on stdin (or the protect verb) inserts two FORWARD REJECT rules,
+# p2p0 -> ${MANGO_WIFI_DEV:-wlo1} and p2p0 -> ${MANGO_ETH_DEV:-eno2}, and
+# writes $RUN_DIR/protected. When the VPN drops, the main table sends client
+# packets to the physical uplink and these rules reject them, so nothing
+# leaks direct. The tunnel itself leaves from OUTPUT and is not affected.
 set -uo pipefail
 
 IFACE="${MANGO_HS_IFACE:-p2p0}"
 UPLINK="${MANGO_WIFI_DEV:-wlo1}"
+ETH_DEV="${MANGO_ETH_DEV:-eno2}"
 SUBNET="${MANGO_HS_SUBNET:-10.44.0}"
 RUN_DIR="${MANGO_HS_RUN_DIR:-/run/mango-hotspot}"
 HOSTAPD_BIN="${MANGO_HS_HOSTAPD:-hostapd}"
@@ -42,6 +51,7 @@ valid() { # key value
 	SSID) [ "${#2}" -ge 1 ] && [ "${#2}" -le 32 ] && case "$2" in *[!\ -~]* | *'"'*) return 1 ;; *) return 0 ;; esac ;;
 	PSK) [ "${#2}" -ge 8 ] && [ "${#2}" -le 63 ] && case "$2" in *[!\ -~]* | *'"'*) return 1 ;; *) return 0 ;; esac ;;
 	BAND) case "$2" in bg | a) return 0 ;; esac ;;
+	PROTECT) case "$2" in 0 | 1) return 0 ;; esac ;;
 	CHANNEL)
 		case "$2" in
 		1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) return 0 ;;
@@ -63,12 +73,40 @@ kill_pidfile() { # pidfile
 	rm -f "$1"
 }
 
+# Protection rules: one helper builds the rule text, so up, protect, unprotect,
+# down and the test all use the same argument list.
+protect_rule() { # dev -> rule spec for -C / -D
+	echo "-i $IFACE -o $1 -j REJECT"
+}
+
+protect_insert_args() { # dev -> argument list for iptables -I
+	echo "FORWARD 1 $(protect_rule "$1")"
+}
+
+protect_add() {
+	for _d in "$UPLINK" "$ETH_DEV"; do
+		# shellcheck disable=SC2046  # reason: the rule text is split into words on purpose
+		iptables -C FORWARD $(protect_rule "$_d") 2>/dev/null ||
+			iptables -I $(protect_insert_args "$_d")
+	done
+	mkdir -p "$RUN_DIR"
+	: >"$RUN_DIR/protected"
+}
+
+protect_remove() {
+	for _d in "$UPLINK" "$ETH_DEV"; do
+		# shellcheck disable=SC2046  # reason: the rule text is split into words on purpose
+		while iptables -D FORWARD $(protect_rule "$_d") 2>/dev/null; do :; done
+	done
+	rm -f "$RUN_DIR/protected"
+}
+
 # ---------------------------------------------------------------- up
 
 cmd_up() {
-	SSID="" PSK="" BAND="" CHANNEL=""
+	SSID="" PSK="" BAND="" CHANNEL="" PROTECT=0
 	while IFS='=' read -r k v; do
-		case "$k" in SSID | PSK | BAND | CHANNEL) valid "$k" "$v" && export "$k=$v" ;; esac
+		case "$k" in SSID | PSK | BAND | CHANNEL | PROTECT) valid "$k" "$v" && export "$k=$v" ;; esac
 	done
 	[ -n "$SSID" ] && [ -n "$PSK" ] && [ -n "$BAND" ] && [ -n "$CHANNEL" ] || {
 		echo "mango-hotspot: missing or invalid SSID/PSK/BAND/CHANNEL on stdin" >&2
@@ -149,11 +187,31 @@ cmd_up() {
 	if ! ufw status verbose 2>/dev/null | grep -q '^Default: .*allow (routed)'; then
 		ufw route allow in on "$IFACE" comment 'mango hotspot egress' >/dev/null 2>&1 || true
 	fi
+	if [ "$PROTECT" = 1 ]; then
+		protect_add
+	else
+		protect_remove
+	fi
+}
+
+# ---------------------------------------------------------------- protect / unprotect
+
+cmd_protect() {
+	ip link show "$IFACE" >/dev/null 2>&1 || {
+		echo "mango-hotspot: $IFACE does not exist; start the hotspot first" >&2
+		exit 1
+	}
+	protect_add
+}
+
+cmd_unprotect() {
+	protect_remove
 }
 
 # ---------------------------------------------------------------- down
 
 cmd_down() {
+	protect_remove
 	kill_pidfile "$RUN_DIR/hostapd.pid"
 	kill_pidfile "$RUN_DIR/dnsmasq.pid"
 	iptables -t nat -D POSTROUTING -s "$SUBNET.0/24" -j MASQUERADE 2>/dev/null || true
@@ -195,16 +253,30 @@ cmd_test() {
 		echo "mango-hotspot test: valid() accepted a too-short PSK" >&2
 		exit 1
 	}
+	_want_w="FORWARD 1 -i p2p0 -o wlo1 -j REJECT"
+	_want_e="FORWARD 1 -i p2p0 -o eno2 -j REJECT"
+	_got_w=$(IFACE=p2p0 protect_insert_args wlo1)
+	_got_e=$(IFACE=p2p0 protect_insert_args eno2)
+	[ "$_got_w" = "$_want_w" ] && [ "$_got_e" = "$_want_e" ] || {
+		echo "mango-hotspot test: protect rule text wrong: '$_got_w' / '$_got_e'" >&2
+		exit 1
+	}
+	valid PROTECT 0 && valid PROTECT 1 && ! valid PROTECT 2 && ! valid PROTECT "" || {
+		echo "mango-hotspot test: valid() wrong for PROTECT" >&2
+		exit 1
+	}
 	echo ok
 }
 
 case "${1:-}" in
 up) cmd_up ;;
 down) cmd_down ;;
+protect) cmd_protect ;;
+unprotect) cmd_unprotect ;;
 status) cmd_status ;;
 test) cmd_test ;;
 *)
-	echo "usage: mango-hotspot up|down|status|test" >&2
+	echo "usage: mango-hotspot up|down|protect|unprotect|status|test" >&2
 	exit 1
 	;;
 esac

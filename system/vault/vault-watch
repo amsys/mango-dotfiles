@@ -4,15 +4,19 @@
 #   vault-watch [--self-test]
 #
 # Snapshots and diffs against baseline:
-# - listening sockets            ss -tulpnH | sort
-# - loaded kernel modules        lsmod | sort
+# - listening TCP sockets        address + process name, no pid or fd
+# - loaded kernel module names   no sizes or use counts
 # - /etc/ld.so.preload content
-# - clients of the mango Wayland socket
+#
+# Each snapshot holds only stable values. PIDs, fd numbers, UDP sockets
+# and module use counts change all the time and caused a false alert on
+# almost every run.
 #
 # Baselines live in ${XDG_STATE_HOME:-$HOME/.local/state}/vault-watch.
 # VAULT_WATCH_DIR overrides the directory.
 #
-# On a change, calls notify-send.
+# On a change, calls notify-send. The alert names the changed items and
+# replaces the previous alert, so alerts do not stack.
 #
 # check: vault-watch --self-test
 
@@ -20,6 +24,8 @@ set -eu
 
 XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 VAULT_WATCH_DIR="${VAULT_WATCH_DIR:-$XDG_STATE_HOME/vault-watch}"
+# Bump when the snapshot content changes shape; main() then re-baselines.
+FORMAT=2
 
 die() { printf 'vault-watch: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'vault-watch: %s\n' "$*" >&2; }
@@ -28,11 +34,15 @@ take_snapshot() {
 	dir="$1"
 	mkdir -p "$dir"
 
-	# Listening sockets
-	ss -tulpnH 2>/dev/null | sort >"$dir/sockets" || true
+	echo "$FORMAT" >"$dir/format"
 
-	# Loaded kernel modules
-	lsmod 2>/dev/null | sort >"$dir/modules" || true
+	# Listening TCP sockets: local address and process name only
+	ss -Htlnp 2>/dev/null |
+		awk '{ p = $6; sub(/,pid=.*$/, "", p); sub(/^users:\(\(/, "", p); print $4, p }' |
+		sort -u >"$dir/sockets" || true
+
+	# Loaded kernel module names
+	lsmod 2>/dev/null | awk 'NR > 1 { print $1 }' | sort >"$dir/modules" || true
 
 	# ld.so.preload
 	if [ -f /etc/ld.so.preload ]; then
@@ -40,27 +50,15 @@ take_snapshot() {
 	else
 		: >"$dir/preload"
 	fi
-
-	# Mango Wayland socket clients
-	uid=$(id -u)
-	wayland_socket="/run/user/$uid/wayland-1"
-	if [ -S "$wayland_socket" ]; then
-		if command -v lsof >/dev/null 2>&1; then
-			lsof "$wayland_socket" 2>/dev/null | sort >"$dir/wayland-clients" || : >"$dir/wayland-clients"
-		else
-			: >"$dir/wayland-clients"
-		fi
-	else
-		: >"$dir/wayland-clients"
-	fi
 }
 
 compare_snapshots() {
 	baseline_dir="$1"
 	current_dir="$2"
 	changed=0
+	report=""
 
-	for file in sockets modules preload wayland-clients; do
+	for file in sockets modules preload; do
 		baseline="$baseline_dir/$file"
 		current="$current_dir/$file"
 
@@ -70,10 +68,15 @@ compare_snapshots() {
 
 		if ! diff -q "$baseline" "$current" >/dev/null 2>&1; then
 			warn "$file changed"
+			lines=$(diff "$baseline" "$current" | grep '^[<>]' | head -5)
+			report="$report$file:
+$lines
+"
 			changed=1
 		fi
 	done
 
+	REPORT="$report"
 	return $changed
 }
 
@@ -106,8 +109,10 @@ self_test() {
 main() {
 	[ "${1:-}" = "--self-test" ] && { self_test; exit $?; }
 
-	# Create baseline if it does not exist
-	if [ ! -d "$VAULT_WATCH_DIR" ]; then
+	# Create baseline if it does not exist, or if an older script version
+	# wrote it in a different format (no false alert after an upgrade)
+	if [ "$(cat "$VAULT_WATCH_DIR/format" 2>/dev/null)" != "$FORMAT" ]; then
+		rm -rf "$VAULT_WATCH_DIR"
 		mkdir -p "$VAULT_WATCH_DIR"
 		take_snapshot "$VAULT_WATCH_DIR"
 		return 0
@@ -118,9 +123,14 @@ main() {
 	trap 'rm -rf "$tmpdir"' EXIT
 	take_snapshot "$tmpdir"
 
-	# Compare and notify on change
+	# Compare and notify on change. The notification id is kept in the
+	# state dir, so a new alert replaces the old one instead of stacking.
 	if ! compare_snapshots "$VAULT_WATCH_DIR" "$tmpdir" 2>/dev/null; then
-		notify-send -u critical "vault-watch" "System state changed"
+		idfile="$XDG_STATE_HOME/vault-watch.notify-id"
+		mkdir -p "$XDG_STATE_HOME"
+		id=$(cat "$idfile" 2>/dev/null || echo 0)
+		notify-send -p -r "$id" -u normal "vault-watch: system state changed" "$REPORT" \
+			>"$idfile.tmp" 2>/dev/null && mv "$idfile.tmp" "$idfile"
 	fi
 
 	# Update baseline for next run

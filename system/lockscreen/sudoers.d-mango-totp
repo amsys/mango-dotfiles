@@ -1,0 +1,17 @@
+# Installed to /etc/sudoers.d/mango-totp (0440) by
+# system/lockscreen/install.sh.
+#
+# Lets the lock screen show the TPM TOTP, the same code the boot screen
+# shows (mango/scripts/lock-status.sh). /dev/tpmrm0 is root:tss 0660, so
+# the user session cannot ask the TPM itself.
+#
+# Exactly one command with exactly one argument. `calculate` prints the
+# code for the current 30 s slot and never the secret. No `-t` (codes for
+# other times) and no `-T` (another TCTI). env_reset, the default, drops
+# TSS2_* and TPM2TOTP_* from the caller's environment.
+#
+# hyprlock asks for a code at most once per 30 s while the screen is
+# locked, so this rule does not log each run and opens no PAM session.
+Cmnd_Alias MANGO_TOTP = /usr/bin/tpm2-totp calculate
+Defaults!MANGO_TOTP !log_allowed, !pam_session
+%wheel ALL=(root) NOPASSWD: MANGO_TOTP

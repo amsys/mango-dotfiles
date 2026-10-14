@@ -20,9 +20,12 @@
 //! `power.rs::should_refresh_on_tick` gating on `discharging`.
 //!
 //! Link existence is a sysfs stat, not a fork (`ip link show` in the
-//! original): `is_up()`/`uplink_label()` become `/sys/class/net/<iface>`
-//! stats. Only `iw dev <iface> info` (the channel) still forks, and only
-//! while the hotspot is up.
+//! original): `is_up()` is a `/sys/class/net/<iface>` stat. While the
+//! hotspot is up, three forks run: `iw dev <iface> info` (the channel),
+//! `ip -o route get 1.1.1.1` and `nmcli ... connection show --active`
+//! (the uplink: a VPN name, or `direct`). The protected flag is the file
+//! `/run/mango-hotspot/protected`. A protected+VPN up to VPN down edge sends
+//! one desktop notification.
 
 use crate::cmd::run;
 use crate::mango::CLASS_PREFIX;
@@ -60,14 +63,63 @@ fn is_up() -> bool {
     Path::new("/sys/class/net").join(iface()).exists()
 }
 
-/// hotspot.sh:79-85 `uplink_label()`, as a sysfs stat instead of
-/// `ip link show nordlynx`.
-fn uplink_label() -> &'static str {
-    if Path::new("/sys/class/net/nordlynx").exists() {
-        "NordVPN"
-    } else {
-        "direct"
+const PROTECTED_FLAG: &str = "/run/mango-hotspot/protected";
+
+/// The `dev` field of one `ip -o route get` line.
+fn route_dev(line: &str) -> Option<String> {
+    let mut it = line.split_whitespace();
+    while let Some(w) = it.next() {
+        if w == "dev" {
+            return it.next().map(str::to_string);
+        }
     }
+    None
+}
+
+/// NAME of the active VPN connection (type wireguard, vpn or tun) on `dev`,
+/// from `nmcli -t -f TYPE,DEVICE,NAME` lines. NAME comes last and may hold
+/// ':', which `nmcli -t` writes as `\:`.
+fn vpn_name_for_dev(nmcli: &str, dev: &str) -> Option<String> {
+    nmcli.lines().find_map(|l| {
+        let mut p = l.splitn(3, ':');
+        let (ty, d, name) = (p.next()?, p.next()?, p.next()?);
+        (matches!(ty, "wireguard" | "vpn" | "tun") && d == dev && !name.is_empty())
+            .then(|| name.replace("\\:", ":"))
+    })
+}
+
+/// `NordVPN (al134.nordvpn.com)` -> `NordVPN (al134)`.
+fn short_label(name: &str) -> String {
+    name.replace(".nordvpn.com", "")
+}
+
+/// Name of the VPN that carries the default route, if any (SPEC §3).
+async fn uplink_vpn() -> Option<String> {
+    let route = run("ip", &["-o", "route", "get", "1.1.1.1"]).await;
+    let dev = route.lines().find_map(route_dev)?;
+    let nm = run(
+        "nmcli",
+        &["-t", "-f", "TYPE,DEVICE,NAME", "connection", "show", "--active"],
+    )
+    .await;
+    vpn_name_for_dev(&nm, &dev).map(|n| short_label(&n))
+}
+
+/// Notify only on the edge protected+VPN up -> protected+VPN down, and only
+/// when the previous state is known (`prev` is `None` on the first refresh).
+fn vpn_down_edge(prev: Option<(bool, bool, bool)>, up: bool, protected: bool, vpn_up: bool) -> bool {
+    matches!(prev, Some((true, true, true))) && up && protected && !vpn_up
+}
+
+/// Tooltip text of the Uplink row.
+fn uplink_row(vpn: Option<&str>, protected: bool) -> String {
+    let base = vpn.unwrap_or("direct");
+    let tag = match (protected, vpn.is_some()) {
+        (true, true) => "  \u{2713} protected",
+        (true, false) => "  \u{26a0} VPN down",
+        (false, _) => "  \u{26a0} not protected",
+    };
+    format!("{base}{tag}")
 }
 
 fn cache_path() -> PathBuf {
@@ -118,11 +170,13 @@ async fn channel() -> String {
 
 pub struct Hotspot {
     up: bool,
+    /// Last (up, protected, vpn_up); `None` before the first refresh.
+    last: Option<(bool, bool, bool)>,
 }
 
 impl Hotspot {
     pub fn new() -> Self {
-        Self { up: false }
+        Self { up: false, last: None }
     }
 
     /// Client-count backstop (see module doc). Gated on `up`, exactly like
@@ -135,6 +189,9 @@ impl Hotspot {
     /// hotspot.sh:121-144.
     pub async fn refresh(&mut self, vars: &mut Vars) {
         self.up = is_up();
+        if !self.up {
+            self.last = Some((false, false, false));
+        }
         vars.set("hotspot_show", if self.up { "true" } else { "false" });
         if !self.up {
             vars.set("hotspot_text", "");
@@ -145,14 +202,26 @@ impl Hotspot {
         }
 
         let (ssid, psk) = read_creds();
-        let uplink = uplink_label();
+        let vpn = uplink_vpn().await;
+        let protected = Path::new(PROTECTED_FLAG).exists();
+        let vpn_up = vpn.is_some();
+        if vpn_down_edge(self.last, self.up, protected, vpn_up) {
+            tokio::spawn(async {
+                run(
+                    "notify-send",
+                    &["-a", "mango-bard", "Hotspot", "VPN down \u{2014} hotspot clients have no internet"],
+                )
+                .await;
+            });
+        }
+        self.last = Some((self.up, protected, vpn_up));
         let chan = channel().await;
         let clients = client_count();
 
         let mut tip = String::new();
         tip.push_str(&sect("", &format!("{ssid}  \u{b7}  ch {chan}")));
         tip.push_str(&kv("Password", &psk));
-        tip.push_str(&kv("Uplink", uplink));
+        tip.push_str(&kv("Uplink", &uplink_row(vpn.as_deref(), protected)));
         tip.push_str(&kv("Clients", &format!("{clients} connected")));
 
         vars.set("hotspot_text", barico(IC_HOTSPOT));
@@ -168,7 +237,7 @@ impl Hotspot {
         );
         vars.set(
             &class_key("hotspot"),
-            if uplink == "NordVPN" { "vpn" } else { "active" },
+            if vpn_up { "vpn" } else { "active" },
         );
     }
 }
@@ -189,6 +258,52 @@ mod tests {
         assert!(!h.should_refresh_on_tick(), "down by default");
         h.up = true;
         assert!(h.should_refresh_on_tick());
+    }
+
+    #[test]
+    fn route_dev_reads_dev_field() {
+        assert_eq!(
+            route_dev("1.1.1.1 dev wg_nord_al134 table 51820 src 10.5.0.2 uid 1000"),
+            Some("wg_nord_al134".to_string())
+        );
+        assert_eq!(route_dev("garbage"), None);
+    }
+
+    #[test]
+    fn vpn_name_matches_dev_and_keeps_colons() {
+        let nm = "802-11-wireless:wlan0:home\nwireguard:wg_nord_al134:NordVPN (al134.nordvpn.com)\nvpn:tun0:corp\\:a\\:b\n";
+        assert_eq!(
+            vpn_name_for_dev(nm, "wg_nord_al134").as_deref(),
+            Some("NordVPN (al134.nordvpn.com)")
+        );
+        assert_eq!(vpn_name_for_dev(nm, "tun0").as_deref(), Some("corp:a:b"));
+        assert_eq!(vpn_name_for_dev(nm, "wlan0"), None);
+        assert_eq!(vpn_name_for_dev("", "wlan0"), None);
+    }
+
+    #[test]
+    fn short_label_drops_nordvpn_host() {
+        assert_eq!(short_label("NordVPN (al134.nordvpn.com)"), "NordVPN (al134)");
+        assert_eq!(short_label("corp"), "corp");
+    }
+
+    #[test]
+    fn uplink_row_variants() {
+        assert_eq!(uplink_row(Some("X"), true), "X  \u{2713} protected");
+        assert_eq!(uplink_row(None, true), "direct  \u{26a0} VPN down");
+        assert_eq!(uplink_row(None, false), "direct  \u{26a0} not protected");
+        assert_eq!(uplink_row(Some("X"), false), "X  \u{26a0} not protected");
+    }
+
+    #[test]
+    fn vpn_down_edge_only_on_protected_loss() {
+        let full = Some((true, true, true));
+        assert!(vpn_down_edge(full, true, true, false));
+        assert!(!vpn_down_edge(None, true, true, false), "first refresh");
+        assert!(!vpn_down_edge(Some((true, true, false)), true, true, false), "already down");
+        assert!(!vpn_down_edge(full, true, true, true), "still up");
+        assert!(!vpn_down_edge(full, true, false, false), "not protected");
+        assert!(!vpn_down_edge(Some((true, false, true)), true, true, false));
     }
 
     #[test]

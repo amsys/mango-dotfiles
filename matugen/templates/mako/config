@@ -69,3 +69,12 @@ on-button-left=exec $HOME/.config/mango/scripts/claude-notify.sh click "$id"
 # stays open past the default timeout instead of hiding while ignored.
 [app-name=claude category=blocked]
 default-timeout=0
+
+# Status panel open: hide notifications so they do not cover it.
+# mango-bard adds and removes this mode (main.rs NotifGate). Critical
+# notifications stay visible.
+[mode=status-panel]
+invisible=1
+
+[mode=status-panel urgency=critical]
+invisible=0

@@ -164,6 +164,9 @@ fi
 # the only healthy state for these while a session is up.
 ENABLED_UNITS=(mango-bard.service ironbar.service mango-sleep-lock.service
 	mango-powerkey.service mango-outputs.service)
+# tmp-sweep.timer is not started by config.conf. install-config.sh enables it,
+# and systemd starts it through its own [Install] section.
+ENABLED_UNITS+=(tmp-sweep.timer)
 # Linked but never enabled: a bar toggle starts them, never the login.
 ONDEMAND_UNITS=(wayvnc.service wayvnc-privacy.service kdeconnectd.service
 	mango-keepawake.service)
@@ -295,10 +298,10 @@ for u in gnome-keyring-daemon.service gnome-keyring-daemon.socket; do
 	fi
 done
 
-if [[ -n "$(find "$HOME/Wallpapers" -maxdepth 1 -type f -print -quit 2>/dev/null)" ]]; then
-	ok "$HOME/Wallpapers has images"
+if [[ -n "$(find "$HOME/pictures/wallpapers" -maxdepth 1 -type f -print -quit 2>/dev/null)" ]]; then
+	ok "$HOME/pictures/wallpapers has images"
 else
-	warn "$HOME/Wallpapers is empty or missing — SUPER+W has nothing to switch to"
+	warn "$HOME/pictures/wallpapers is empty or missing — SUPER+W has nothing to switch to"
 fi
 
 # ------------------------------------------------------------------ summary --

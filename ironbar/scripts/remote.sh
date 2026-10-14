@@ -45,12 +45,30 @@
 #                      the virtual output when one is recorded
 #   --privacy-watch    wayvnc-privacy.service ExecStart — blanks every
 #                      output for as long as a VNC client is connected,
-#                      and pauses a running pomodoro block for that time
+#                      and pauses a running pomodoro block for that time.
+#                      Also starts the root physical-lock helper
+#                      (mango-physlock.service, over sudo — SPEC.md §7.2)
+#                      on connect, grabbing every physical keyboard/
+#                      touchpad/mouse/touchscreen; on disconnect, locks
+#                      the session and confirms it (sleep-lock.py lock
+#                      --until-locked) *before* stopping that helper or
+#                      turning the panels back on — SPEC.md §7.2 step 4's
+#                      "no unlocked gap". A lock that cannot be confirmed
+#                      leaves the helper running and the panels off.
 #   --privacy-restore  wayvnc-privacy.service ExecStopPost — undoes a
 #                      blank left over by a crashed/killed watcher, and
 #                      releases the pomodoro pause if this script holds it
 #   --idle-wake        hypridle's 600s on-resume — skips turning the
 #                       panels back on while privacy blanking is active
+#   --takeover         mango-physlock's Esc-hold takeover (SPEC.md §7.3):
+#                      lock the session, confirming it rather than
+#                      waiting for the eventual unlock, then stop wayvnc
+#                      + wayvnc-privacy, restore any pulled tag, destroy
+#                      the headless output and turn the panels back on.
+#                      Exit 0 only once every step lands; exit 1 (keep
+#                      the physical-input grab) if the lock itself
+#                      cannot be confirmed — called by mango-physlock,
+#                      never by a person directly.
 set -u
 
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mango-remote"
@@ -66,6 +84,10 @@ POMO_PAUSED="$RUNTIME_DIR/pomo-paused"
 # create in one compositor run and never reuses a name, so the name must be
 # discovered after each create, never hardcoded.
 VOUT_FILE="$RUNTIME_DIR/virtual-output"
+# Exists while --takeover runs. --takeover stops wayvnc-privacy, whose
+# ExecStopPost (--privacy-restore) must then leave the physical lock to
+# the takeover instead of stopping mango-physlock under it.
+TAKEOVER_MARK="$RUNTIME_DIR/takeover"
 # One line per pulled client: "<id>\t<monitor>\t<tagmask>" (tagmask is
 # mango's pipe-joined form, e.g. "4" or "4|5"), written by --pull and
 # consumed by --restore.
@@ -76,6 +98,64 @@ PULLED="$RUNTIME_DIR/pulled-clients"
 # from the query --pull-next/--pull-list build their candidate list from —
 # this is the one place that origin survives, for both to merge back in.
 PULLED_ORIGIN="$RUNTIME_DIR/pulled-origin"
+
+# Move every client on the virtual output to the first physical monitor.
+# mango does not move clients when an output goes away, so a window left
+# on the virtual output is lost after destroy_all_virtual_output. Used by
+# --toggle-vnc (off) and --takeover, before each destroy.
+evacuate_virtual_output() {
+	VOUT=$(cat "$VOUT_FILE" 2>/dev/null || true)
+	# The cache file can be gone after a crashed earlier run while the
+	# output still exists. Discover the name again, or the destroy
+	# orphans the windows on it.
+	[ -n "$VOUT" ] || VOUT=$(mmsg get all-monitors 2>/dev/null |
+		jq -r '.monitors[].name | select(startswith("HEADLESS"))' | head -n1)
+	TARGET=$(mmsg get all-monitors 2>/dev/null |
+		jq -r '.monitors[].name | select(startswith("HEADLESS") | not)' | head -n1)
+	if [ -n "$VOUT" ] && [ -n "$TARGET" ]; then
+		mmsg get all-clients 2>/dev/null |
+			jq -r --arg v "$VOUT" '.clients[] | select(.monitor == $v) | .id | tostring' |
+			while IFS= read -r id; do
+				# tagmon, and the trailing 1 to keep the client's own
+				# tags — same reason as --pull.
+				mmsg dispatch "tagmon,$TARGET,1" client,"$id" >/dev/null 2>&1
+			done
+	fi
+}
+
+# Give back the pomodoro pause that --privacy-watch holds. Call it just
+# before `sleep-lock.py lock --until-locked`: the lock then gets "ok" from
+# its own pause and keeps the block paused until the real unlock. Without
+# this the lock got "noop", and --privacy-restore resumed the block while
+# the screen was still locked.
+release_privacy_pause() {
+	if [ -e "$POMO_PAUSED" ]; then
+		mango-bard pomo unpause -q 2>/dev/null || true
+		rm -f "$POMO_PAUSED"
+	fi
+}
+
+# Take the pomodoro pause back after a lock attempt failed. The panels
+# stay dark, so a running block would ring in an empty room.
+retake_privacy_pause() {
+	if [ "$(mango-bard pomo pause 2>/dev/null)" = ok ]; then
+		: >"$POMO_PAUSED"
+	fi
+}
+
+# End the physical lock: lock the session, confirm it, then stop the
+# grab. Returns 1 and keeps the grab when no lock is confirmed, so the
+# laptop never gets its input back on an unlocked session.
+end_physical_lock() {
+	systemctl is-active --quiet mango-physlock.service || return 0
+	release_privacy_pause
+	if "$HOME/.config/mango/scripts/sleep-lock.py" lock --until-locked; then
+		sudo -n systemctl stop mango-physlock.service 2>/dev/null
+		return 0
+	fi
+	retake_privacy_pause
+	return 1
+}
 
 # The VNC set only. kdeconnectd runs on its own switch — see
 # --toggle-kdeconnect.
@@ -113,23 +193,7 @@ case "${1:-}" in
 		# does not move clients when an output goes away, so such a window
 		# is lost after the destroy below. Move every one of them to the
 		# first physical monitor first.
-		VOUT=$(cat "$VOUT_FILE" 2>/dev/null || true)
-		# The cache file can be gone after a crashed earlier run while the
-		# output still exists. Discover the name again, or the destroy
-		# below orphans the windows on it.
-		[ -n "$VOUT" ] || VOUT=$(mmsg get all-monitors 2>/dev/null |
-			jq -r '.monitors[].name | select(startswith("HEADLESS"))' | head -n1)
-		TARGET=$(mmsg get all-monitors 2>/dev/null |
-			jq -r '.monitors[].name | select(startswith("HEADLESS") | not)' | head -n1)
-		if [ -n "$VOUT" ] && [ -n "$TARGET" ]; then
-			mmsg get all-clients 2>/dev/null |
-				jq -r --arg v "$VOUT" '.clients[] | select(.monitor == $v) | .id | tostring' |
-				while IFS= read -r id; do
-					# tagmon, and the trailing 1 to keep the client's own
-					# tags — same reason as --pull.
-					mmsg dispatch "tagmon,$TARGET,1" client,"$id" >/dev/null 2>&1
-				done
-		fi
+		evacuate_virtual_output
 		systemctl --user stop $VNC_UNITS || notify-send -a mango-bard "Remote access" "Failed to stop"
 		mmsg dispatch destroy_all_virtual_output >/dev/null 2>&1
 		rm -f "$VOUT_FILE"
@@ -138,12 +202,15 @@ case "${1:-}" in
 		# It stays as healing for a crashed watcher. No state file means
 		# nothing here blanked the panels: leave them alone, so an
 		# eco-driven off does not light them with nobody at the machine.
-		if [ -e "$WLOPM_STATE" ]; then
+		# Not while the physical lock is still on: --privacy-restore keeps
+		# the panels dark on purpose when it could not confirm a lock.
+		if [ -e "$WLOPM_STATE" ] && ! systemctl is-active --quiet mango-physlock.service; then
 			wlopm --on '*' >/dev/null 2>&1
 			rm -f "$WLOPM_STATE"
 		fi
 	else
 		mkdir -p "$RUNTIME_DIR" && chmod 0700 "$RUNTIME_DIR"
+		rm -f "$TAKEOVER_MARK"  # a stale marker would skip the physical lock end
 		# A crashed earlier toggle can leave a virtual output behind. Clear
 		# all of them first so exactly one exists after create.
 		mmsg dispatch destroy_all_virtual_output >/dev/null 2>&1
@@ -310,11 +377,33 @@ case "${1:-}" in
 				if [ "$(mango-bard pomo pause 2>/dev/null)" = ok ]; then
 					: >"$POMO_PAUSED"
 				fi
+				# Grab every physical keyboard/touchpad/mouse/touchscreen
+				# so a person at the laptop cannot type or click into the
+				# session the remote user is also driving (SPEC.md §7.2).
+				# Root-only — the session user is deliberately not in
+				# `input` — so this is the one step here that goes over
+				# sudo; mango-physlock.sudoers allows only this exact
+				# command, no password.
+				sudo -n systemctl start mango-physlock.service 2>/dev/null ||
+					notify-send -a mango-bard "Remote access" "Could not start the physical-lock helper — the laptop's own input stays live"
 				;;
 			*client-disconnected*)
 				[ -n "$(wayvncctl -j client-list 2>/dev/null | jq -c '.[]' 2>/dev/null)" ] && continue
 				"$0" --restore
-				"$0" --privacy-restore
+				# Lock the session and confirm it before anything that
+				# depends on being locked: releasing the physical-input
+				# grab, or turning the panels back on, ahead of the lock
+				# actually landing would open exactly the "unlocked gap"
+				# SPEC.md §7.2 step 4 exists to close. `lock
+				# --until-locked` (not plain `lock`) returns once locked
+				# rather than blocking this event loop until the person
+				# at the laptop unlocks again — see sleep-lock.py's own
+				# module doc for why plain `lock` cannot be used here.
+				if end_physical_lock; then
+					"$0" --privacy-restore
+				else
+					notify-send -a mango-bard "Remote access" "Could not confirm the lock on disconnect — leaving the panels off and the physical grab in place"
+				fi
 				;;
 			esac
 		done
@@ -322,6 +411,14 @@ case "${1:-}" in
 	done
 	;;
 --privacy-restore)
+	# Every end of the VNC set runs this (ExecStopPost): the toggle off
+	# and a wayvnc crash too, not only a client disconnect. When the
+	# physical lock is still on, lock and stop it before any panel comes
+	# on. On failure keep the panels dark and the grab in place.
+	if [ ! -e "$TAKEOVER_MARK" ] && ! end_physical_lock; then
+		notify-send -a mango-bard "Remote access" "Could not confirm the lock — the panels stay off and the physical grab stays on"
+		exit 1
+	fi
 	# Before the blank check: the pomodoro release must not depend on
 	# whether the panels are still recorded as blanked. This runs on
 	# ExecStopPost too, so a killed watcher does not strand a paused
@@ -338,8 +435,36 @@ case "${1:-}" in
 --idle-wake)
 	[ -e "$WLOPM_STATE" ] || wlopm --on '*'
 	;;
+--takeover)
+	# mango-physlock's Esc-hold takeover (SPEC.md §7.3). Called by the
+	# root helper itself, over runuser — never by a person directly, and
+	# never while holding its own input grab's state: physlock.py only
+	# releases the grab once this exits 0.
+	release_privacy_pause
+	if ! "$HOME/.config/mango/scripts/sleep-lock.py" lock --until-locked; then
+		retake_privacy_pause
+		notify-send -a mango-bard "Remote access" "Takeover: could not confirm the lock — the remote session stays as-is"
+		exit 1
+	fi
+	mkdir -p "$RUNTIME_DIR" && : >"$TAKEOVER_MARK"
+	trap 'rm -f "$TAKEOVER_MARK"' EXIT
+	# The locker runs in its own systemd scope (sleep-lock.py
+	# _reexec_in_own_scope), so this unit stop cannot kill it.
+	systemctl --user stop wayvnc.service wayvnc-privacy.service 2>/dev/null
+	"$0" --restore
+	evacuate_virtual_output
+	mmsg dispatch destroy_all_virtual_output >/dev/null 2>&1
+	rm -f "$VOUT_FILE"
+	# SPEC 7.3 step 6: panels on only now, after the lock is confirmed.
+	# Every output, not only the ones WLOPM_STATE recorded: the person is
+	# at the laptop and must see the lock screen.
+	"$0" --privacy-restore
+	wlopm --on '*' >/dev/null 2>&1
+	rm -f "$TAKEOVER_MARK"
+	exit 0
+	;;
 *)
-	echo "usage: remote.sh --toggle-vnc|--toggle-kdeconnect|--pull <mon> <tag>|--pull-next|--pull-prev|--pull-list|--restore|--vnc-exec|--privacy-watch|--privacy-restore|--idle-wake" >&2
+	echo "usage: remote.sh --toggle-vnc|--toggle-kdeconnect|--pull <mon> <tag>|--pull-next|--pull-prev|--pull-list|--restore|--vnc-exec|--privacy-watch|--privacy-restore|--idle-wake|--takeover" >&2
 	exit 1
 	;;
 esac

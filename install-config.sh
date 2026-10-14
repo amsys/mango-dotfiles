@@ -124,6 +124,15 @@ link "$REPO/system/vault/vault-watch.service" "$XDG_CONFIG_HOME/systemd/user/vau
 link "$REPO/system/vault/vault-watch.timer" "$XDG_CONFIG_HOME/systemd/user/vault-watch.timer"
 log
 
+# tmp-sweep: removes stale cargo artifacts and Claude scratch dirs from the
+# tmpfs /tmp, and warns when the per-user /tmp quota is near full. The timer
+# runs it every 10 minutes (system/tmpsweep/tmp-sweep.timer).
+log "tmp-sweep"
+link "$REPO/system/tmpsweep/tmp-sweep" "$HOME/.local/bin/tmp-sweep"
+link "$REPO/system/tmpsweep/tmp-sweep.service" "$XDG_CONFIG_HOME/systemd/user/tmp-sweep.service"
+link "$REPO/system/tmpsweep/tmp-sweep.timer" "$XDG_CONFIG_HOME/systemd/user/tmp-sweep.timer"
+log
+
 # ironbar/scripts, not the whole ironbar/ dir — that would also symlink the
 # mango-bard crate's Rust sources into ~/.config/ironbar/, which the
 # generated config.json (built fresh by start.sh on every login, never
@@ -274,6 +283,7 @@ UNITS=(
 	"systemd/mango-powerkey.service:mango-powerkey.service"
 	"systemd/mango-outputs.service:mango-outputs.service"
 	"system/vault/vault-watch.timer:vault-watch.timer"
+	"system/tmpsweep/tmp-sweep.timer:tmp-sweep.timer"
 )
 # Linked but never enabled: started/stopped only from a bar toggle, never
 # at login — wayvnc/kdeconnectd from the remote-access toggle

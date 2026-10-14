@@ -85,7 +85,7 @@ if status is-interactive
 
     # Orchestein tooling
     fish_add_path "$HOME/.local/bin"
-    fish_add_path "$HOME/src/maestro"
+    fish_add_path "$HOME/.local/src/maestro"
     fish_add_path "$XDG_DATA_HOME/npm/bin"
     abbr --add p paseo
     abbr --add m maestro

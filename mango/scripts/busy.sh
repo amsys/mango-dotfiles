@@ -19,7 +19,7 @@ LCK="${MANGO_PACMAN_LCK:-/var/lib/pacman/db.lck}"
 # Browsers write to a temp name until the transfer completes: Firefox .part,
 # Chromium .crdownload, a few others .download. An abandoned one would block
 # suspend forever, so only count files touched in the last few minutes.
-DL="${MANGO_DOWNLOAD_DIR:-$HOME/Downloads}"
+DL="${MANGO_DOWNLOAD_DIR:-$HOME/downloads}"
 DL_FRESH_MIN="${MANGO_DOWNLOAD_FRESH_MIN:-5}"
 
 # reason string, or empty when nothing is happening

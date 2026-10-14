@@ -10,7 +10,7 @@ Description=Watch Consolidated.kdbx for any change
 # systemd watches the parent directory for the last path component, so this
 # also fires when the file is replaced by a rename. Both KeePassXC (atomic
 # save) and the Nextcloud client (download, then rename) replace it that way.
-PathChanged=%h/Nextcloud/Database/Consolidated.kdbx
+PathChanged=%h/nextcloud/Database/Consolidated.kdbx
 Unit=kdbx-history.service
 
 [Install]

@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+# tmp-sweep: keep /tmp below the per-user quota.
+#
+# /tmp is a tmpfs with a per-user quota (80% of its size). Two things fill it:
+# cargo artifacts in /tmp/cargo-target and Claude Code scratch directories in
+# /tmp/claude-<uid>. This script removes stale cargo artifacts and stale
+# scratch directories. It never removes the scratch directory of a live
+# Claude session. It never touches a cargo profile that a running build
+# locks. When use reaches 85% of the quota, it sends one critical
+# notification. A user timer runs it every 10 minutes.
+#
+# Usage: tmp-sweep [--dry-run] [--selftest]
+"""Sweep stale cargo artifacts and Claude scratch directories from /tmp."""
+
+import argparse
+import ctypes
+import fcntl
+import json
+import os
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+CARGO_ROOT = "/tmp/cargo-target"
+TMP = "/tmp"
+HOUR = 3600
+PRESSURE_HIGH = 0.70
+NOTIFY_ON = 0.85
+NOTIFY_OFF = 0.80
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def log(msg):
+    """Print one log line to stdout (the journal)."""
+    print(msg, flush=True)
+
+
+def human(n):
+    """Format a byte count for the log."""
+    for unit in ("B", "K", "M", "G"):
+        if abs(n) < 1024 or unit == "G":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{int(n)}B"
+        n /= 1024.0
+    return f"{n}"
+
+
+# --- quota ---------------------------------------------------------------
+
+def read_quota(path=TMP):
+    """Read the user quota of a mount.
+
+    Args:
+        path: A directory on the mount.
+
+    Returns:
+        A tuple (source, used_bytes, limit_bytes). The source is "quotactl"
+        or "statvfs".
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        cmd = (0x800007 << 8) | 0  # Q_GETQUOTA, USRQUOTA
+        buf = ctypes.create_string_buffer(72)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            r = libc.syscall(443, fd, ctypes.c_uint(cmd), os.getuid(), buf)
+        finally:
+            os.close(fd)
+        if r == 0:
+            bhard, _bs, cur = struct.unpack("QQQQQQQQI4x", buf.raw)[:3]
+            if bhard > 0:
+                return "quotactl", cur, bhard * 1024
+    except (OSError, AttributeError, struct.error):
+        pass
+    st = os.statvfs(path)
+    total = st.f_blocks * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    return "statvfs", used, int(total * 0.8)
+
+
+def age_limits(pressure):
+    """Return (cargo_age, claude_age) in seconds for a pressure value."""
+    if pressure >= PRESSURE_HIGH:
+        return 3 * HOUR, 24 * HOUR
+    return 24 * HOUR, 72 * HOUR
+
+
+# --- file helpers ----------------------------------------------------------
+
+def inside(path, root):
+    """Return True when path is strictly below root."""
+    try:
+        return (os.path.commonpath([path, root]) == root
+                and os.path.abspath(path) != root)
+    except ValueError:
+        return False
+
+
+def used_time(st):
+    """Last use of an entry.
+
+    A file uses the newer of atime and mtime. A directory uses mtime only:
+    /tmp mounts with strictatime, so each scandir of this sweep sets the
+    directory atime to now, and the next run would see every directory as
+    fresh.
+    """
+    if stat.S_ISDIR(st.st_mode):
+        return st.st_mtime
+    return max(st.st_atime, st.st_mtime)
+
+
+def walk_tree(path, dev):
+    """Walk a tree without following symlinks or crossing mounts.
+
+    Args:
+        path: Start path (file or directory).
+        dev: Device id of the root. Entries on another device are skipped.
+
+    Returns:
+        A tuple (newest_use, disk_bytes). The newest use is None when the
+        tree has no entry.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None, 0
+    if st.st_dev != dev:
+        return None, 0
+    newest = used_time(st)
+    size = st.st_blocks * 512
+    if os.path.isdir(path) and not os.path.islink(path):
+        try:
+            with os.scandir(path) as it:
+                entries = list(it)
+        except OSError:
+            return newest, size
+        for e in entries:
+            t, s = walk_tree(e.path, dev)
+            size += s
+            if t is not None and t > newest:
+                newest = t
+    return newest, size
+
+
+def remove(path, root, uid, dry, report):
+    """Remove one path after the safety checks.
+
+    Args:
+        path: File or directory to remove.
+        root: The root that must contain the path.
+        uid: Required owner uid.
+        dry: When True, remove nothing.
+        report: List that gets (path, bytes) for each removal.
+
+    Returns:
+        The bytes freed (or that would be freed).
+    """
+    if not inside(os.path.abspath(path), root):
+        log(f"refuse {path}: outside {root}")
+        return 0
+    try:
+        st = os.lstat(path)
+        if st.st_uid != uid:
+            return 0
+        _, size = walk_tree(path, st.st_dev)
+        if dry:
+            log(f"would remove {path} ({human(size)})")
+        elif os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+    except OSError as exc:
+        log(f"skip {path}: {exc}")
+        return 0
+    report.append((path, size))
+    return size
+
+
+# --- cargo -----------------------------------------------------------------
+
+def profile_dirs(root):
+    """List cargo profile dirs: a dir with .cargo-lock, depth 1 or 2."""
+    found = []
+    try:
+        level1 = [e.path for e in os.scandir(root)
+                  if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return found
+    for p in sorted(level1):
+        if os.path.isfile(os.path.join(p, ".cargo-lock")):
+            found.append(p)
+            continue
+        try:
+            level2 = [e.path for e in os.scandir(p)
+                      if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        for q in sorted(level2):
+            if os.path.isfile(os.path.join(q, ".cargo-lock")):
+                found.append(q)
+    return found
+
+
+def sweep_profile(prof, root, max_age, now, uid, dry):
+    """Sweep one profile dir while its .cargo-lock is held.
+
+    Returns:
+        A tuple (freed_bytes, report), or (None, []) when a build runs.
+    """
+    lock_path = os.path.join(prof, ".cargo-lock")
+    try:
+        lfd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        log(f"skip {prof}: cannot open lock: {exc}")
+        return 0, []
+    report = []
+    freed = 0
+    try:
+        try:
+            fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log(f"skip {prof}: build running")
+            return None, []
+        dev = os.lstat(prof).st_dev
+        for sub in ("deps", "examples"):
+            d = os.path.join(prof, sub)
+            try:
+                entries = list(os.scandir(d))
+            except OSError:
+                continue
+            for e in entries:
+                try:
+                    st = os.lstat(e.path)
+                except OSError:
+                    continue
+                if (not stat.S_ISREG(st.st_mode)
+                        or st.st_dev != dev or st.st_nlink > 1):
+                    continue
+                if now - used_time(st) > max_age:
+                    freed += remove(e.path, root, uid, dry, report)
+        for sub in ("build", ".fingerprint", "incremental"):
+            d = os.path.join(prof, sub)
+            try:
+                entries = list(os.scandir(d))
+            except OSError:
+                continue
+            for e in entries:
+                if not e.is_dir(follow_symlinks=False):
+                    continue
+                newest, _ = walk_tree(e.path, dev)
+                if newest is not None and now - newest > max_age:
+                    freed += remove(e.path, root, uid, dry, report)
+    finally:
+        os.close(lfd)  # closing the fd drops the flock
+    return freed, report
+
+
+def sweep_cargo(root, max_age, now, uid, dry):
+    """Sweep all profile dirs below root.
+
+    Returns:
+        A tuple (freed_bytes, skipped_profiles, report).
+    """
+    if os.path.islink(root) or not os.path.isdir(root):
+        return 0, [], []
+    root = os.path.abspath(root)
+    freed, skipped, report = 0, [], []
+    for prof in profile_dirs(root):
+        f, r = sweep_profile(prof, root, max_age, now, uid, dry)
+        if f is None:
+            skipped.append(prof)
+        else:
+            freed += f
+            report += r
+    return freed, skipped, report
+
+
+# --- claude scratch dirs ---------------------------------------------------
+
+def proc_starttime(proc_root, pid):
+    """Return field 22 of /proc/<pid>/stat as a string, or None."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "stat")) as fh:
+            return fh.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def protected_sessions(claude_root, sessions_dir, proc_root, uid):
+    """Find the scratch UUID dirs that a live Claude session owns.
+
+    Args:
+        claude_root: The /tmp/claude-<uid> directory.
+        sessions_dir: The ~/.claude/sessions directory.
+        proc_root: The /proc directory.
+        uid: The current uid.
+
+    Returns:
+        A tuple (uuids, paths). The uuids are session ids from the registry.
+        The paths are UUID dir paths that a process has open. Returns
+        (None, None) when the answer is unknown (fail closed).
+    """
+    uuids, paths = set(), set()
+    if os.path.isdir(sessions_dir):
+        try:
+            names = os.listdir(sessions_dir)
+        except OSError as exc:
+            log(f"claude sweep skipped: cannot list {sessions_dir}: {exc}")
+            return None, None
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(sessions_dir, name)) as fh:
+                    data = json.load(fh)
+                pid, sid = int(data["pid"]), str(data["sessionId"])
+                start = str(data["procStart"])
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if proc_starttime(proc_root, pid) == start:
+                uuids.add(sid)
+    try:
+        pids = [n for n in os.listdir(proc_root) if n.isdigit()]
+    except OSError as exc:
+        log(f"claude sweep skipped: cannot scan {proc_root}: {exc}")
+        return None, None
+    prefix = os.path.abspath(claude_root) + os.sep
+    try:
+        for pid in pids:
+            base = os.path.join(proc_root, pid)
+            try:
+                if os.stat(base).st_uid != uid:
+                    continue
+                targets = [os.readlink(os.path.join(base, "cwd"))]
+                fddir = os.path.join(base, "fd")
+                for fd in os.listdir(fddir):
+                    try:
+                        targets.append(os.readlink(os.path.join(fddir, fd)))
+                    except OSError:
+                        pass
+            except OSError:
+                continue  # process vanished or access denied
+            for t in targets:
+                if t.startswith(prefix):
+                    parts = t[len(prefix):].split(os.sep)
+                    if len(parts) >= 2 and UUID_RE.match(parts[1]):
+                        paths.add(os.path.join(prefix, parts[0], parts[1]))
+    except Exception as exc:  # reason: fail closed on any scan error
+        log(f"claude sweep skipped: /proc scan failed: {exc}")
+        return None, None
+    return uuids, paths
+
+
+def sweep_claude(claude_root, max_age, now, uid, dry, sessions_dir, proc_root):
+    """Sweep stale session scratch dirs under claude_root.
+
+    Returns:
+        A tuple (freed_bytes, protected_count, report). Freed is 0 and the
+        count is -1 when the sweep was skipped.
+    """
+    if os.path.islink(claude_root) or not os.path.isdir(claude_root):
+        return 0, 0, []
+    claude_root = os.path.abspath(claude_root)
+    uuids, paths = protected_sessions(claude_root, sessions_dir, proc_root, uid)
+    if uuids is None:
+        return 0, -1, []
+    dev = os.lstat(claude_root).st_dev
+    freed, protected, report = 0, 0, []
+    for proj in sorted(os.scandir(claude_root), key=lambda e: e.name):
+        if not proj.is_dir(follow_symlinks=False):
+            continue
+        try:
+            kids = sorted(os.scandir(proj.path), key=lambda e: e.name)
+        except OSError:
+            continue
+        for k in kids:
+            if not k.is_dir(follow_symlinks=False) or not UUID_RE.match(k.name):
+                continue
+            if k.name in uuids or k.path in paths:
+                protected += 1
+                continue
+            newest, _ = walk_tree(k.path, dev)
+            if newest is not None and now - newest > max_age:
+                freed += remove(k.path, claude_root, uid, dry, report)
+        if not dry:
+            try:
+                os.rmdir(proj.path)  # fails unless empty
+            except OSError:
+                pass
+    return freed, protected, report
+
+
+# --- notify ----------------------------------------------------------------
+
+def top_entries(path, uid, n=3):
+    """Return the n biggest top-level entries of path owned by uid."""
+    rows = []
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return rows
+    for e in entries:
+        try:
+            st = os.lstat(e.path)
+        except OSError:
+            continue
+        if st.st_uid != uid:
+            continue
+        _, size = walk_tree(e.path, st.st_dev)
+        rows.append((size, e.name))
+    rows.sort(reverse=True)
+    return rows[:n]
+
+
+def notify(pressure, uid):
+    """Send one critical notification per crossing of the high mark."""
+    rd = os.environ.get("XDG_RUNTIME_DIR") or ""
+    marker = os.path.join(rd, "tmp-sweep.notified") if rd else None
+    if pressure < NOTIFY_OFF:
+        if marker and os.path.exists(marker):
+            try:
+                os.unlink(marker)
+            except OSError:
+                pass
+        return
+    if pressure < NOTIFY_ON or (marker and os.path.exists(marker)):
+        return
+    body = ", ".join(f"{name} {human(sz)}" for sz, name in top_entries(TMP, uid))
+    try:
+        subprocess.run(
+            ["notify-send", "-u", "critical", "-a", "tmp-sweep",
+             f"/tmp at {pressure * 100:.0f}% of your quota", body],
+            check=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"notify failed: {exc}")
+        return
+    if marker:
+        try:
+            with open(marker, "w"):
+                pass
+        except OSError as exc:
+            log(f"marker failed: {exc}")
+
+
+# --- main ------------------------------------------------------------------
+
+def run(dry):
+    """Run one sweep of the real roots and print the summary line."""
+    uid = os.getuid()
+    now = time.time()
+    source, used0, limit = read_quota(TMP)
+    pressure0 = used0 / limit if limit else 0.0
+    cargo_age, claude_age = age_limits(pressure0)
+    sessions = os.path.expanduser("~/.claude/sessions")
+    cf, skipped, _ = sweep_cargo(CARGO_ROOT, cargo_age, now, uid, dry)
+    lf, prot, _ = sweep_claude(f"{TMP}/claude-{uid}", claude_age, now, uid,
+                               dry, sessions, "/proc")
+    _, used1, _ = read_quota(TMP)
+    pressure1 = used1 / limit if limit else 0.0
+    verb = "would free" if dry else "freed"
+    log(f"tmp-sweep: quota={source} used {human(used0)} -> {human(used1)} "
+        f"of {human(limit)} pressure {pressure0 * 100:.0f}% -> "
+        f"{pressure1 * 100:.0f}% age cargo {cargo_age // HOUR}h "
+        f"claude {claude_age // HOUR}h {verb} cargo {human(cf)} "
+        f"claude {human(lf)} protected {prot} "
+        f"skipped(build running) {len(skipped)}")
+    if not dry:
+        notify(pressure1, uid)
+    return 0
+
+
+def selftest():
+    """Run the self test on fake roots. Returns the exit code."""
+    uid = os.getuid()
+    passed = 0
+    failed = []
+
+    def check(name, cond):
+        nonlocal passed
+        if cond:
+            passed += 1
+        else:
+            failed.append(name)
+
+    now = time.time()
+    old = now - 100 * HOUR
+    with tempfile.TemporaryDirectory(prefix="tmp-sweep-st-") as tmp:
+        def mk(path, age=None, data=b"x" * 4096):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(data)
+            if age is not None:
+                os.utime(path, (age, age))
+            return path
+
+        root = os.path.join(tmp, "cargo-target")
+        prof = os.path.join(root, "debug")
+        mk(os.path.join(prof, ".cargo-lock"), data=b"")
+        stale = mk(os.path.join(prof, "deps", "stale.rlib"), old)
+        fresh = mk(os.path.join(prof, "deps", "fresh.rlib"), now)
+        linked = mk(os.path.join(prof, "deps", "bin-abc"), old)
+        os.link(linked, os.path.join(prof, "bin"))
+        os.utime(linked, (old, old))
+        outside = mk(os.path.join(tmp, "outside", "target.txt"), old)
+        link = os.path.join(prof, "deps", "link.rlib")
+        os.symlink(outside, link)
+        inc_keep = mk(os.path.join(prof, "incremental", "u1", "new"), now)
+        mk(os.path.join(prof, "incremental", "u1", "olda"), old)
+        os.utime(os.path.dirname(inc_keep), (old, old))
+        fp_old = os.path.join(prof, ".fingerprint", "u2")
+        mk(os.path.join(fp_old, "f"), old)
+        os.utime(fp_old, (old, old))
+        # A directory atime of now (set by an earlier sweep's scandir) must
+        # not keep a stale unit.
+        fp_scanned = os.path.join(prof, ".fingerprint", "u3")
+        mk(os.path.join(fp_scanned, "f"), old)
+        os.utime(fp_scanned, (now, old))
+
+        # locked profile
+        prof2 = os.path.join(root, "release")
+        mk(os.path.join(prof2, ".cargo-lock"), data=b"")
+        locked_file = mk(os.path.join(prof2, "deps", "stale.rlib"), old)
+        held = os.open(os.path.join(prof2, ".cargo-lock"), os.O_RDONLY)
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+        freed, skipped, _ = sweep_cargo(root, 24 * HOUR, now, uid, False)
+        os.close(held)
+        check("stale deps file removed", not os.path.exists(stale))
+        check("fresh deps file kept", os.path.exists(fresh))
+        check("hard-linked deps file kept", os.path.exists(linked))
+        check("incremental unit with fresh file kept whole",
+              os.path.exists(inc_keep)
+              and os.path.exists(os.path.join(prof, "incremental", "u1", "olda")))
+        check("stale fingerprint unit removed", not os.path.exists(fp_old))
+        check("dir atime from an earlier scan ignored",
+              not os.path.exists(fp_scanned))
+        check("locked profile skipped",
+              prof2 in skipped and os.path.exists(locked_file))
+        check("symlink target kept", os.path.exists(outside))
+        check("freed bytes counted", freed >= 4096)
+
+        # dry run removes nothing
+        stale2 = mk(os.path.join(prof, "deps", "stale2.rlib"), old)
+        sweep_cargo(root, 24 * HOUR, now, uid, True)
+        check("dry run keeps files", os.path.exists(stale2))
+
+        # claude roots
+        croot = os.path.join(tmp, "claude-x")
+        u = lambda n: "%08x-0000-0000-0000-%012x" % (n, n)
+        stale_u, keep_u, live_u, dead_u, cwd_u = (u(1), u(2), u(3), u(4), u(5))
+        d_stale = os.path.dirname(mk(os.path.join(croot, "proj", stale_u, "f"), old))
+        os.utime(d_stale, (old, old))
+        d_fresh = os.path.dirname(mk(os.path.join(croot, "proj", keep_u, "f"), now))
+        d_other = os.path.dirname(mk(os.path.join(croot, "proj", "bash-edit-diff", "f"), old))
+        os.utime(d_other, (old, old))
+        d_live = os.path.dirname(mk(os.path.join(croot, "proj", live_u, "f"), old))
+        os.utime(d_live, (old, old))
+        d_dead = os.path.dirname(mk(os.path.join(croot, "proj", dead_u, "f"), old))
+        os.utime(d_dead, (old, old))
+        d_cwd = os.path.dirname(mk(os.path.join(croot, "proj", cwd_u, "f"), old))
+        os.utime(d_cwd, (old, old))
+
+        # fake registry and fake /proc
+        sess = os.path.join(tmp, "sessions")
+        fproc = os.path.join(tmp, "proc")
+        os.makedirs(sess)
+        os.makedirs(os.path.join(fproc, "4242"))
+        with open(os.path.join(fproc, "4242", "stat"), "w") as fh:
+            fh.write("4242 (a b) c) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777 0 0\n")
+        with open(os.path.join(sess, "4242.json"), "w") as fh:
+            json.dump({"pid": 4242, "sessionId": live_u, "procStart": "777"}, fh)
+        with open(os.path.join(sess, "4243.json"), "w") as fh:
+            json.dump({"pid": 4242, "sessionId": dead_u, "procStart": "999"}, fh)
+        with open(os.path.join(sess, "bad.json"), "w") as fh:
+            fh.write("not json")
+        with open(os.path.join(sess, "4242.abc.key"), "w") as fh:
+            fh.write("k")
+        check("proc starttime parsed after last paren",
+              proc_starttime(fproc, 4242) == "777")
+
+        child = subprocess.Popen(["sleep", "30"], cwd=d_cwd)
+        try:
+            time.sleep(0.2)
+            cf, prot, _ = sweep_claude(croot, 24 * HOUR, now, uid, False,
+                                       sess, "/proc")
+        finally:
+            child.kill()
+            child.wait()
+        # /proc is real here, so the fake registry entry (pid 4242) is not
+        # live; test the registry with the fake proc root separately below.
+        check("cwd of live process kept", os.path.isdir(d_cwd))
+        check("stale uuid dir removed", not os.path.exists(d_stale))
+        check("fresh uuid dir kept", os.path.isdir(d_fresh))
+        check("non-uuid dir kept", os.path.isdir(d_other))
+        check("mismatched procStart removed (real proc)", not os.path.exists(d_dead))
+        check("protected count reported", prot >= 1)
+
+        # registry check with the fake proc root
+        d_live2 = os.path.dirname(mk(os.path.join(croot, "proj", live_u, "f"), old))
+        os.utime(d_live2, (old, old))
+        d_dead2 = os.path.dirname(mk(os.path.join(croot, "proj", dead_u, "f"), old))
+        os.utime(d_dead2, (old, old))
+        sweep_claude(croot, 24 * HOUR, now, uid, False, sess,
+                     os.path.join(tmp, "proc"))
+        check("live registry session kept", os.path.isdir(d_live2))
+        check("stale registry mismatch removed", not os.path.exists(d_dead2))
+
+        # fail closed: unreadable sessions dir
+        os.chmod(sess, 0)
+        try:
+            if os.access(sess, os.R_OK):
+                check("fail closed (skipped: running as root)", True)
+            else:
+                d_fc = os.path.dirname(mk(os.path.join(croot, "proj", u(9), "f"), old))
+                os.utime(d_fc, (old, old))
+                _, n, _ = sweep_claude(croot, 24 * HOUR, now, uid, False,
+                                       sess, "/proc")
+                check("unreadable sessions dir skips sweep",
+                      n == -1 and os.path.isdir(d_fc))
+        finally:
+            os.chmod(sess, 0o700)
+
+        # age limits
+        check("age limits calm", age_limits(0.5) == (24 * HOUR, 72 * HOUR))
+        check("age limits pressure", age_limits(0.7) == (3 * HOUR, 24 * HOUR))
+
+    if failed:
+        print("selftest FAILED: " + "; ".join(failed))
+        return 1
+    print(f"selftest: {passed} passed")
+    return 0
+
+
+def main():
+    """Parse arguments and run."""
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="remove nothing, send no notification")
+    ap.add_argument("--selftest", action="store_true",
+                    help="run the built-in tests on fake roots")
+    args = ap.parse_args()
+    if args.selftest:
+        return selftest()
+    return run(args.dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

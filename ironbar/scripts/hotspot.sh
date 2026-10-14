@@ -1,12 +1,20 @@
 #!/bin/sh
-# Virtual Wi-Fi hotspot for ironbar's hotspot module, plus a rofi picker for
-# the uplink (direct or NordVPN).
+# Virtual Wi-Fi hotspot for ironbar's hotspot module, plus a rofi menu that
+# starts it through the current VPN (protected) or direct (unprotected).
+#
+# The uplink is the laptop's default route, so a VPN is picked with net.sh's
+# NetworkManager picker (`net.sh --sec-click`), never with a list of its own.
+# The menu opens again once after that picker closes and the VPN state changed.
+# A protected hotspot adds a FORWARD reject rule (mango-hotspot PROTECT=1), so
+# its clients lose the internet when the VPN drops instead of going direct.
+# See docs/features/hotspot-vpn/SPEC.md.
 #
 # Four modes:
 #   --status  custom/hotspot exec — up/down + tooltip
-#   --menu    on-click            — toggle + uplink picker
+#   --menu    on-click            — state-dependent start/pick/stop menu
 #   --toggle  on-click-middle     — toggle without opening the menu
 #   test      self-check (no root, no network) — asserts freq_to_chan()
+#             and short_label()
 #
 # Why this drives hostapd/dnsmasq directly instead of NetworkManager's
 # `shared` AP mode: this box's chip (Intel AX201) fails to create a plain
@@ -76,25 +84,40 @@ ensure_creds() {
 
 is_up() { ip link show "$IFACE" >/dev/null 2>&1; }
 
+# "NordVPN (al134.nordvpn.com)" -> "NordVPN (al134)"; other names unchanged.
+short_label() { printf '%s' "$1" | sed 's/\.nordvpn\.com)$/)/'; }
+
+# Name of the active VPN connection that carries the default route, shortened;
+# prints nothing when the uplink is direct. A VPN is an active NM connection of
+# type wireguard, vpn or tun whose DEVICE is the route's dev. NAME comes last
+# in the nmcli line because it may hold ':' (escaped as '\:' in -t output).
 uplink_label() {
-	if ip link show nordlynx >/dev/null 2>&1; then
-		printf 'NordVPN'
-	else
-		printf 'direct'
-	fi
+	ul_dev=$(ip -o route get 1.1.1.1 2>/dev/null |
+		awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+	[ -n "$ul_dev" ] || return 0
+	nmcli -t -f TYPE,DEVICE,NAME connection show --active 2>/dev/null |
+		while IFS=: read -r ul_type ul_cdev ul_name; do
+			case "$ul_type" in wireguard | vpn | tun) ;; *) continue ;; esac
+			[ "$ul_cdev" = "$ul_dev" ] || continue
+			short_label "$(printf '%s' "$ul_name" | sed 's/\\:/:/g')"
+			break
+		done
 }
+
+is_protected() { [ -e "${RUN_DIR:-/run/mango-hotspot}/protected" ]; }
 
 client_count() {
 	f="/run/mango-hotspot/dnsmasq.leases"
 	[ -r "$f" ] && wc -l <"$f" || echo 0
 }
 
+# do_up [0|1]: 1 = protected (clients never go out direct), default 0.
 do_up() {
 	ensure_creds
 	BC=$(uplink_bandchan 2>&1) || { notify "$BC"; return 1; }
 	BAND=$(printf '%s\n' "$BC" | cut -d' ' -f1)
 	CHANNEL=$(printf '%s\n' "$BC" | cut -d' ' -f2)
-	OUT=$(printf 'SSID=%s\nPSK=%s\nBAND=%s\nCHANNEL=%s\n' "$SSID" "$PSK" "$BAND" "$CHANNEL" |
+	OUT=$(printf 'SSID=%s\nPSK=%s\nBAND=%s\nCHANNEL=%s\nPROTECT=%s\n' "$SSID" "$PSK" "$BAND" "$CHANNEL" "${1:-0}" |
 		sudo -n /usr/local/bin/mango-hotspot up 2>&1) || { notify "Failed to start: $OUT"; return 1; }
 }
 
@@ -103,7 +126,13 @@ do_down() {
 }
 
 toggle() {
-	if is_up; then do_down; else do_up; fi
+	if is_up; then
+		do_down
+	elif [ -n "$(uplink_label)" ]; then
+		do_up 1
+	else
+		do_up 0
+	fi
 	# Refresh on the actual state-change edge only — NOT from a trap on
 	# every exit. hotspot.rs has no watcher of its own (IRONBAR.md T6b —
 	# there is no stable inode to inotify across up/down cycles), so this
@@ -123,6 +152,9 @@ if [ "${1:-}" = test ]; then
 	[ "$(freq_to_chan 2452)" = "bg 9" ] || { echo "freq_to_chan 2.4GHz wrong"; exit 1; }
 	[ "$(freq_to_chan 5180)" = "a 36" ] || { echo "freq_to_chan 5GHz wrong"; exit 1; }
 	freq_to_chan 5500 >/dev/null 2>&1 && { echo "freq_to_chan should refuse a DFS channel"; exit 1; }
+	[ "$(short_label 'NordVPN (al134.nordvpn.com)')" = "NordVPN (al134)" ] || { echo "short_label NordVPN wrong"; exit 1; }
+	[ "$(short_label 'ProtonVPN CH-12')" = "ProtonVPN CH-12" ] || { echo "short_label ProtonVPN wrong"; exit 1; }
+	[ -z "$(short_label '')" ] || { echo "short_label empty wrong"; exit 1; }
 	echo ok
 	exit 0
 fi
@@ -145,7 +177,8 @@ $(kv Password "$PSK")
 $(kv Uplink "$UL")
 $(kv Clients "$N connected")"
 	CLASS=active
-	[ "$UL" = NordVPN ] && CLASS=vpn
+	[ -n "$UL" ] && CLASS=vpn
+	UL="${UL:-direct}"
 	# wifi_tethering, Material Symbols Rounded — codepoint carried over from the
 	# classic Material Icons PUA mapping like net.sh's icons, but unverified on
 	# this box; check it renders once the bar picks this module up and swap the
@@ -166,41 +199,79 @@ fi
 [ "${1:-}" = --menu ] || { echo "usage: hotspot.sh --status|--menu|--toggle|test" >&2; exit 1; }
 
 ensure_creds
-STATE="off"
-is_up && STATE="on"
-CHAN=""
-is_up && CHAN=" · ch $(iw dev "$IFACE" info 2>/dev/null | awk '/channel/ {print $2; exit}')"
 UL=$(uplink_label)
+ULM=$(printf '%s' "$UL" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+ROWS=""
+ACTS=""
+# add_row "text" action — rofi returns the row index; ACTS is the same list.
+add_row() {
+	ROWS="${ROWS:+$ROWS
+}$1"
+	ACTS="${ACTS:+$ACTS
+}$2"
+}
+PWROW="Show password"
 
-RULE='<span alpha="30%">────────────────────</span>'
-ROW1="Hotspot: $STATE  ·  $SSID$CHAN"
-ROW2="Uplink: direct"
-ROW3="Uplink: NordVPN — $UL"
-ROW4="Show password"
+if is_up; then
+	CHAN=$(iw dev "$IFACE" info 2>/dev/null | awk '/channel/ {print $2; exit}')
+	N=$(client_count)
+	STATUS="● On  ·  $SSID  ·  ch $CHAN  ·  $N clients"
+	if is_protected && [ -n "$UL" ]; then
+		add_row "$STATUS" none
+		add_row "Via  $ULM  ✓ protected        ›" pick
+	elif is_protected; then
+		add_row "⚠ VPN down — clients have no internet" none
+		add_row "Reconnect a VPN                  ›" pick
+	else
+		add_row "$STATUS" none
+		add_row "Via  ${ULM:-direct}  ⚠ not protected" none
+		add_row "Pick a VPN and protect           ›" pickprot
+	fi
+	add_row "Turn hotspot off" off
+else
+	if [ -n "$UL" ]; then
+		add_row "▶ Start hotspot via $ULM" up1
+		add_row "Via  $ULM  ✓ protected        ›" pick
+	else
+		add_row "Pick a VPN, then start           ›" pick
+		add_row "Start unprotected (direct)" up0
+	fi
+fi
+add_row "$PWROW" pw
 
-LIST=$(printf '%s\n%s\n%s\n%s\n%s' "$ROW1" "$RULE" "$ROW2" "$ROW3" "$ROW4")
-
-IDX=$(printf '%s\n' "$LIST" | rofi -dmenu -format i -markup-rows -p "Hotspot" \
+IDX=$(printf '%s\n' "$ROWS" | rofi -dmenu -format i -markup-rows -p "Hotspot" \
 	-theme-str 'window { width: 480px; }')
 RC=$?
 [ "$RC" = 0 ] || exit 0
 case "$IDX" in '' | *[!0-9]*) exit 0 ;; esac
 
-case "$IDX" in
-0) toggle ;;
-2) nordvpn disconnect >/dev/null 2>&1 || notify "Already direct" ;;
-3)
-	# Already on NordVPN — nothing to pick, the row exists to show/confirm state.
-	[ "$UL" = NordVPN ] && exit 0
-	# nordvpn column-formats this list (multiple names per line, padded) when it
-	# detects a terminal on its inherited stdout, which it still does even
-	# piped straight into rofi — flatten on whitespace so each name is its own
-	# rofi row, or a multi-name line comes back as one invalid string. -i makes
-	# rofi's filter case-insensitive regardless of the user's rofi defaults.
-	COUNTRY=$(nordvpn countries 2>/dev/null | tr -s ' \t' '\n' | grep . | rofi -dmenu -i -p "Country")
-	[ -n "$COUNTRY" ] && {
-		OUT=$(nordvpn connect "$COUNTRY" 2>&1) || notify "NordVPN connect failed: $OUT"
-	}
+ACT=$(printf '%s\n' "$ACTS" | sed -n "$((IDX + 1))p")
+
+case "$ACT" in
+up1)
+	do_up 1
+	mango-bard refresh hotspot 2>/dev/null
 	;;
-4) notify "SSID: $SSID  ·  Password: $PSK" ;;
+up0)
+	do_up 0
+	mango-bard refresh hotspot 2>/dev/null
+	;;
+off)
+	do_down
+	mango-bard refresh hotspot 2>/dev/null
+	;;
+pick | pickprot)
+	# Wait for the shared VPN picker, then reopen this menu once if the VPN
+	# state changed. The reopened menu never reopens on its own: only a new
+	# press on a "›" row runs the picker again.
+	"$(dirname "$0")/net.sh" --sec-click
+	NEW=$(uplink_label)
+	if [ "$ACT" = pickprot ] && [ -n "$NEW" ]; then
+		OUT=$(sudo -n /usr/local/bin/mango-hotspot protect 2>&1) || notify "Failed to protect: $OUT"
+		mango-bard refresh hotspot 2>/dev/null
+	fi
+	[ "$NEW" = "$UL" ] && [ "$ACT" != pickprot ] && exit 0
+	exec "$0" --menu
+	;;
+pw) notify "SSID: $SSID  ·  Password: $PSK" ;;
 esac

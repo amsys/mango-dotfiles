@@ -46,20 +46,41 @@ impl Keepass {
             // ponytail: unscoped to the whole `org.freedesktop.secrets`
             // service, not just our collection's object path — busctl has
             // no member/path filter, and resolving the path needs an async
-            // fork this sync constructor can't make. main.rs's select arm
-            // only re-arms a refresh on a `signal` line (see
-            // `is_signal_line`, below), so a method call from another app
-            // is still parsed but no longer triggers work — measurably
-            // cheap, unlike the feedback loop this used to be
-            // (T-keepass-loop). Upgrade: scope with `gdbus monitor
-            // --object-path <resolved>` once even that parsing shows up.
+            // fork this sync constructor can't make. `is_signal_line`
+            // below filters in Rust to real `signal`-type lines, so a
+            // method call from another app is still parsed but no longer
+            // triggers work — measurably cheap, unlike the feedback loop
+            // this used to be (T-keepass-loop).
+            //
+            // S1 (bar-status-panel SPEC §8): a bare service-name argument
+            // also makes busctl track ownership of that exact name (its own
+            // built-in `NameOwnerChanged` match, filtered to
+            // `arg0='org.freedesktop.secrets'`) *in addition to* every
+            // method call/return and signal already addressed to or from
+            // it — on this bus that is a wide net: podman's own healthcheck
+            // timers and other unrelated systemd/session traffic share the
+            // session bus and were reaching this monitor too (SPEC audit:
+            // ~25 wakeups/s). An explicit `--match` with no positional
+            // SERVICE argument installs only the one rule this collector
+            // actually needs — real signals (the only line type
+            // `is_signal_line` keeps) whose sender currently owns
+            // `org.freedesktop.secrets` — and drops the implicit
+            // NameOwnerChanged/eavesdrop-everything behavior the positional
+            // form carries. `sender=` resolves through the bus's own
+            // name-ownership tracking, same as a plain `dbus-monitor
+            // sender='<name>'` rule, so it still matches `PropertiesChanged`
+            // off any object path the running KeePassXC owns, not just the
+            // literal `/org/freedesktop/secrets` root. Upgrade: scope with
+            // `gdbus monitor --object-path <resolved>` once even this
+            // narrower match shows up as noise.
             mon: MonitorChild::new(
                 "busctl",
                 &[
                     "--user",
                     "monitor",
                     "--json=short",
-                    "org.freedesktop.secrets",
+                    "--match",
+                    "type='signal',sender='org.freedesktop.secrets'",
                 ],
             ),
         }

@@ -1,6 +1,6 @@
 //! mango-bard — event-driven daemon feeding ironbar's ironvars. T1 scope:
 //! clock + powermode watcher + control socket + ironbar IPC client. See
-//! /home/martin/work/mango-dotfiles/IRONBAR.md for the full design and the
+//! /home/martin/projects/system/mango-dotfiles/IRONBAR.md for the full design and the
 //! T0 spike findings this implementation is built on.
 
 mod archupdate;
@@ -60,15 +60,22 @@ const FLUSH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// How long the mouse must stay over a hover-eligible pill before its popup
 /// opens. A calibration knob, same convention as net.rs's own debounce —
-/// tuned, not derived. T13: dropped from 300ms to 80ms once
-/// `ECO_TIMER_SLACK_MS` was found to be the real ~650-850ms cause (see
-/// IRONBAR.md's T13 entry) — 80ms matches the value this repo already chose
-/// for the same first-hover question in `waybar/fast-tooltips.c`
-/// (`MANGO_TOOLTIP_DELAY_MS` default): short enough to read as instant, long
-/// enough that a mouse passing through on its way elsewhere never triggers a
-/// popup at all. `waybar/fast-tooltips.c` moved to `ironbar/fast-tooltips.c`
-/// at the T8 cutover; the constant it tunes and this value are unchanged.
-const HOVER_DELAY: Duration = Duration::from_millis(80);
+/// tuned, not derived.
+///
+/// T13 history: dropped from 300ms to 80ms once `ECO_TIMER_SLACK_MS` was
+/// found to be the real ~650-850ms cause (see IRONBAR.md's T13 entry) —
+/// 80ms matched the value this repo already chose for the same first-hover
+/// question in `waybar/fast-tooltips.c` (`MANGO_TOOLTIP_DELAY_MS` default).
+///
+/// S1 (bar-status-panel SPEC §4): back up to 300ms. 80ms turned out shorter
+/// than the time the pointer takes to pass over one pill at normal
+/// movement speed, so every pass across the bar — not just a deliberate
+/// hover — opened a popup. 300ms is long enough that a pass-through never
+/// triggers one, short enough to still read as immediate for a pointer
+/// that actually stops. `waybar/fast-tooltips.c`'s own
+/// `MANGO_TOOLTIP_DELAY_MS` is a separate GTK3-tooltip shim, untouched by
+/// this change.
+const HOVER_DELAY: Duration = Duration::from_millis(300);
 
 /// T-popup-hold: how long a popup stays visible after the pointer leaves
 /// its pill, before actually closing — long enough to cross the `popup_gap`
@@ -280,14 +287,14 @@ async fn main() {
             let quiet = rest.contains(&"-q");
             let parts: Vec<&str> = rest.into_iter().filter(|a| *a != "-q").collect();
             match parts.as_slice() {
-                [verb @ ("enter" | "exit"), bar, widget] => {
+                [verb @ ("enter" | "exit" | "toggle"), bar, widget] => {
                     client_cmd(&format!("hover {verb} {bar} {widget}"), quiet).await
                 }
                 [verb @ ("hold" | "release"), bar] => {
                     client_cmd(&format!("hover {verb} {bar}"), quiet).await
                 }
                 _ => Err(
-                    "usage: mango-bard hover <enter|exit> <bar> <widget> [-q] | hover <hold|release> <bar> [-q]"
+                    "usage: mango-bard hover <enter|exit|toggle> <bar> <widget> [-q] | hover <hold|release> <bar> [-q]"
                         .into(),
                 ),
             }
@@ -331,6 +338,16 @@ async fn flush_vars(vars: &mut Vars, ipc: &mut IronbarIpc, stats: &mut Stats) {
         let result = match k.strip_prefix(mango::CLASS_PREFIX) {
             Some(module_key) => {
                 let module = module_key.split('#').next().unwrap_or(module_key);
+                // S2: the module is not on the bar (a pill the status panel
+                // removed, e.g. keepass/hotspot/remote). The send can never
+                // succeed, so mark the value as sent with no IPC instead of
+                // retrying it forever. `ack` (not `forget`) keeps the value
+                // in `live`, so the collector's next identical `set` is a
+                // no-op and does not arm a flush.
+                if !genconfig::class_target_known(module) {
+                    vars.ack(&k);
+                    continue;
+                }
                 let old = vars.live_value(&k).map(str::to_string);
                 let r = ipc.set_class(module, old.as_deref(), &v).await;
                 if r.is_ok() {
@@ -450,6 +467,18 @@ async fn dispatch_refresh(
         "power" | "battery" | "bat" | "ac" => {
             *power_due = Some(Instant::now());
         }
+        // S2 (bar-status-panel SPEC §3): only ever poked from the `status`
+        // module's own click, right before it toggles the popup open
+        // (genconfig.rs::status_module()'s on_click_left — the same
+        // refresh-then-toggle-popup pattern T7a established). `bri_pct`/
+        // `bt_text` are the two popup values with no event stream of their
+        // own to stay fresh off — both reads are synchronous, non-forking
+        // or single-fork, and SPEC §3 explicitly wants them read on open
+        // only, never polled.
+        "status-detail" => {
+            power.refresh_brightness(vars);
+            net.refresh_bt_text(vars).await;
+        }
         "cpu" => cpu.refresh(vars),
         "memory" | "mem" => mem.refresh(vars),
         // T7a: only ever poked from inside the popup's own script while it
@@ -565,6 +594,9 @@ fn hover_refresh_topics(widget: &str) -> &'static [&'static str] {
         // popup is one box covering every row (`popup_multi`), so there is
         // no way to refresh only the row under the pointer.
         "sysload" => &["cpu-detail", "mem-detail"],
+        // The status panel opens by click (`hover toggle`), through the
+        // same open path, so it refreshes its click-only data here.
+        "status" => &["status-detail"],
         "devload" => &["claude", "docker", "archupdate"],
         "clock" => &["clock-detail"],
         "date" => &["date-detail"],
@@ -620,6 +652,33 @@ fn hover_enter(
     let hide = hover_open.take().map(|(old_bar, _)| old_bar);
     *hover_pending = Some(key);
     *hover_due = Some(Instant::now() + HOVER_DELAY);
+    hide
+}
+
+/// `Hover::Toggle`'s pure state transition: a click on a click-opened
+/// popup's pill. When that popup is open, close it (returns its bar for
+/// an immediate `hide_popup`). Otherwise queue it to open on the next loop
+/// turn with no `HOVER_DELAY`: a click is a deliberate act, not a pointer
+/// passing by. The open path is the same one hover uses, so the refresh
+/// topics run first and the popup lands in `hover_open`, where exit,
+/// hold, release and the grace timer close it.
+fn hover_toggle(
+    key: (String, String),
+    hover_pending: &mut Option<(String, String)>,
+    hover_due: &mut Option<Instant>,
+    hover_open: &mut Option<(String, String)>,
+    hover_hide_due: &mut Option<Instant>,
+) -> Option<String> {
+    *hover_hide_due = None;
+    if hover_open.as_ref() == Some(&key) {
+        *hover_open = None;
+        *hover_pending = None;
+        *hover_due = None;
+        return Some(key.0);
+    }
+    let hide = hover_open.take().map(|(old_bar, _)| old_bar);
+    *hover_pending = Some(key);
+    *hover_due = Some(Instant::now());
     hide
 }
 
@@ -691,6 +750,102 @@ async fn client_cmd(cmd: &str, quiet: bool) -> Result<(), String> {
         println!("{resp}");
     }
     Ok(())
+}
+
+/// Status panel notification gate: whether mako's `status-panel` mode is on, tracked as
+/// pure state only — the actual `makoctl mode` call is IO done by `run()`'s
+/// select loop, the same split `hover_enter`/`hover_toggle` above use
+/// between a testable pure transition and the IO at the call site.
+struct NotifGate {
+    on: bool,
+    since: Option<Instant>,
+    /// Set once `force_expire` turns the mode off while `status` is still
+    /// the open widget, so `sync` does not immediately re-add it; cleared
+    /// only once `hover_open` stops being `"status"` (a stuck
+    /// open must never hide notifications for more than `NOTIF_GATE_MAX`).
+    expired: bool,
+}
+
+/// What `run()`'s select loop must do about mako's mode after a
+/// `NotifGate::sync` or `force_expire` call.
+#[derive(Debug, PartialEq, Eq)]
+enum NotifGateAction {
+    None,
+    Add,
+    Remove,
+}
+
+/// Runs `makoctl mode <op> status-panel` off the select loop, after the
+/// call queued before it. Two plain detached tasks could finish out of
+/// order on a fast open/close (the remove before the add), which would leave
+/// the mode on while the gate reads off, with no expiry timer armed. Each
+/// task awaits the previous one's handle, so the calls run in order without
+/// tokio's `sync` feature (the crate does not enable it).
+fn queue_mako(last: &mut Option<tokio::task::JoinHandle<()>>, op: &'static str) {
+    let prev = last.take();
+    *last = Some(tokio::spawn(async move {
+        if let Some(p) = prev {
+            let _ = p.await;
+        }
+        cmd::run("makoctl", &["mode", op, "status-panel"]).await;
+    }));
+}
+
+/// Cap on the gate: a `status-panel` mode left on past this
+/// (e.g. an Esc close the control socket never saw) is forced off.
+const NOTIF_GATE_MAX: Duration = Duration::from_secs(30);
+
+impl NotifGate {
+    fn new() -> Self {
+        Self {
+            on: false,
+            since: None,
+            expired: false,
+        }
+    }
+
+    /// Called once per select-loop turn, after the whole `tokio::select!`
+    /// — the one place that has already seen whatever that turn did to
+    /// `hover_open`, however it changed it — with the widget currently
+    /// open, if any.
+    fn sync(&mut self, open_widget: Option<&str>) -> NotifGateAction {
+        if open_widget != Some("status") {
+            // Left the status panel (or nothing is open): a future open
+            // gets its own full budget again.
+            self.expired = false;
+            if self.on {
+                self.on = false;
+                self.since = None;
+                return NotifGateAction::Remove;
+            }
+            return NotifGateAction::None;
+        }
+        if self.on || self.expired {
+            return NotifGateAction::None;
+        }
+        self.on = true;
+        self.since = Some(Instant::now());
+        NotifGateAction::Add
+    }
+
+    /// The select loop's own timer-arm deadline — same `Option<Instant>`
+    /// shape as `hover_hide_due` above, `None` while the gate is off.
+    fn expiry_due(&self) -> Option<Instant> {
+        self.since.map(|t| t + NOTIF_GATE_MAX)
+    }
+
+    /// Fires when `expiry_due()` elapses (the 30 s cap). Forces the
+    /// mode off and marks `expired` so `sync` will not re-add it while
+    /// `status` is still the open widget.
+    fn force_expire(&mut self) -> NotifGateAction {
+        if !self.on {
+            return NotifGateAction::None;
+        }
+        self.on = false;
+        self.since = None;
+        self.expired = true;
+        NotifGateAction::Remove
+    }
 }
 
 async fn run() -> Result<(), String> {
@@ -779,6 +934,13 @@ async fn run() -> Result<(), String> {
     // — see `hover_exit`'s own doc comment for why this replaced an
     // immediate hide.
     let mut hover_hide_due: Option<Instant> = None;
+
+    // Status panel notification gate: mirrors `hover_open` so notifications stay
+    // hidden while the status panel is open. Synced once per select-loop
+    // turn, below, from whatever `hover_open` is by then.
+    let mut notif_gate = NotifGate::new();
+    // The last queued `makoctl mode` call for the gate; see `queue_mako`.
+    let mut mako_last: Option<tokio::task::JoinHandle<()>> = None;
 
     clock::refresh(&mut vars);
     if vars.has_dirty() {
@@ -1193,6 +1355,13 @@ async fn run() -> Result<(), String> {
                                         &mut hover_open,
                                         &mut hover_hide_due,
                                     ),
+                                    HoverEvent::Toggle => hover_toggle(
+                                        (bar, widget),
+                                        &mut hover_pending,
+                                        &mut hover_due,
+                                        &mut hover_open,
+                                        &mut hover_hide_due,
+                                    ),
                                     HoverEvent::Exit => {
                                         hover_exit(
                                             (bar, widget),
@@ -1244,6 +1413,14 @@ async fn run() -> Result<(), String> {
                 net.regrade(&mut vars, pm_mode).await;
                 if vars.has_dirty() {
                     dirty_since.get_or_insert_with(Instant::now);
+                }
+                // The uplink (VPN up or down) changes with the route: re-read
+                // the hotspot tooltip now, not at the next minute tick.
+                if hotspot.should_refresh_on_tick() {
+                    hotspot.refresh(&mut vars).await;
+                    if vars.has_dirty() {
+                        dirty_since.get_or_insert_with(Instant::now);
+                    }
                 }
                 regrade_due = None;
             }
@@ -1374,6 +1551,23 @@ async fn run() -> Result<(), String> {
                 // (see that comment) — no restore needed here.
             }
 
+            // Status panel notification gate: the status-panel notification gate's 30s
+            // cap — same single-slot shape as `hover_hide_due` above, but
+            // its deadline lives inside `notif_gate` itself (its own
+            // `since`), since nothing else needs to read or cancel it.
+            _ = async {
+                match notif_gate.expiry_due() {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if notif_gate.force_expire() == NotifGateAction::Remove {
+                    // Queued to the mako worker: the select loop must not
+                    // block on a wedged mako.
+                    queue_mako(&mut mako_last, "-r");
+                }
+            }
+
             _ = async {
                 match dirty_since {
                     Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t + FLUSH_DEBOUNCE)).await,
@@ -1391,6 +1585,16 @@ async fn run() -> Result<(), String> {
                 // a no-op (makoctl mode -r on a mode that isn't active) if
                 // nothing had DND on.
                 pomo_fd.get_ref().release_dnd().await;
+                // Same reasoning as `release_dnd` just
+                // above — unconditional, a no-op (makoctl mode -r on a
+                // mode that isn't active) if the status panel wasn't open,
+                // and awaited rather than detached so it actually runs
+                // before this process exits.
+                // Let a queued add finish first, so this remove is the last word.
+                if let Some(h) = mako_last.take() {
+                    let _ = h.await;
+                }
+                cmd::run("makoctl", &["mode", "-r", "status-panel"]).await;
                 // A silent `mmsg watch` never takes SIGPIPE and leaks
                 // forever (mango.rs: Watch::kill doc comment) — kill_on_drop
                 // alone isn't enough since nothing drops `mango` before exit.
@@ -1407,6 +1611,25 @@ async fn run() -> Result<(), String> {
                 return Ok(());
             }
         }
+
+        // Status panel notification gate: one call per select-loop turn, after the
+        // whole `tokio::select!` above — the one place that has already
+        // seen whatever that turn did to `hover_open`, no matter which arm
+        // did it (direct `Toggle`/`Exit` branching, the `hover_due` open,
+        // or the `hover_hide_due` close). A no-op turn (neither branch
+        // touched `hover_open`) still costs only the `Option` comparisons
+        // inside `sync`.
+        match notif_gate.sync(hover_open.as_ref().map(|(_, w)| w.as_str())) {
+            NotifGateAction::Add => {
+                // Queued to the mako worker: a popup opening must not
+                // block the loop on a wedged mako.
+                queue_mako(&mut mako_last, "-a");
+            }
+            NotifGateAction::Remove => {
+                queue_mako(&mut mako_last, "-r");
+            }
+            NotifGateAction::None => {}
+        }
     }
 }
 
@@ -1416,6 +1639,55 @@ mod tests {
 
     fn key(bar: &str, widget: &str) -> (String, String) {
         (bar.to_string(), widget.to_string())
+    }
+
+    #[test]
+    fn toggle_opens_at_once_closes_when_open_and_replaces_another_popup() {
+        let mut pending = None;
+        let mut due = None;
+        let mut open = Some(key("bar-eDP-1", "sysload"));
+        let mut hide_due = Some(Instant::now());
+        let before = Instant::now();
+        // Another popup is open: it must close, status is queued with no delay.
+        let hide = hover_toggle(
+            key("bar-eDP-1", "status"),
+            &mut pending,
+            &mut due,
+            &mut open,
+            &mut hide_due,
+        );
+        assert_eq!(hide.as_deref(), Some("bar-eDP-1"));
+        assert_eq!(pending, Some(key("bar-eDP-1", "status")));
+        assert!(due.unwrap() <= Instant::now() && due.unwrap() >= before);
+        assert!(open.is_none() && hide_due.is_none());
+
+        // Opened (the select loop does this after show_popup): a second click closes.
+        pending = None;
+        due = None;
+        open = Some(key("bar-eDP-1", "status"));
+        let hide = hover_toggle(
+            key("bar-eDP-1", "status"),
+            &mut pending,
+            &mut due,
+            &mut open,
+            &mut hide_due,
+        );
+        assert_eq!(hide.as_deref(), Some("bar-eDP-1"));
+        assert!(open.is_none() && pending.is_none() && due.is_none());
+
+        // Open status + pointer leaves: exit arms the grace close.
+        open = Some(key("bar-eDP-1", "status"));
+        hover_exit(
+            key("bar-eDP-1", "status"),
+            &mut pending,
+            &mut due,
+            &open,
+            &mut hide_due,
+        );
+        assert!(
+            hide_due.is_some(),
+            "leaving the status button must arm the grace close"
+        );
     }
 
     #[test]
@@ -1603,7 +1875,10 @@ mod tests {
 
     #[test]
     fn hover_refresh_topics_skips_bluetooth_and_workspace_pills() {
-        // bluetooth: native module, no daemon-tracked ironvar to refresh.
+        // bluetooth: native module, no daemon-tracked ironvar to refresh —
+        // and, since S1 (bar-status-panel SPEC §4/§6) dropped its
+        // `on_mouse_enter`, nothing ever calls this with "bluetooth" any
+        // more either. Kept as a defensive regression guard.
         // workspace pills: already kept fresh by mango.apply()'s own event
         // stream. Neither should fall through to the generic full resync.
         assert!(hover_refresh_topics("bluetooth").is_empty());
@@ -1611,5 +1886,71 @@ mod tests {
         assert!(hover_refresh_topics("pomo").is_empty()); // handled separately
                                                           // T28: music is already kept live off its own event stream.
         assert!(hover_refresh_topics("music").is_empty());
+    }
+
+    // NotifGate's pure transition, no mako socket
+    // needed: every case below only inspects `on`/`since`/`expired` via
+    // the `NotifGateAction` `sync`/`force_expire` return, same style as
+    // the hover_* tests above.
+
+    #[test]
+    fn notif_gate_open_adds_once() {
+        let mut gate = NotifGate::new();
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::Add);
+        // Still open on the next turn: no repeat add.
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::None);
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::None);
+    }
+
+    #[test]
+    fn notif_gate_close_removes() {
+        let mut gate = NotifGate::new();
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::Add);
+        // A different widget (or nothing) open: remove once.
+        assert_eq!(gate.sync(Some("cpu")), NotifGateAction::Remove);
+        assert_eq!(gate.sync(Some("cpu")), NotifGateAction::None);
+        assert_eq!(gate.sync(None), NotifGateAction::None);
+    }
+
+    #[test]
+    fn notif_gate_expiry_removes_and_does_not_reopen_while_still_open() {
+        let mut gate = NotifGate::new();
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::Add);
+        assert!(gate.expiry_due().is_some());
+
+        // Backdate `since` past NOTIF_GATE_MAX instead of actually
+        // sleeping 30s in a unit test — `Instant` supports `Sub<Duration>`.
+        gate.since = Some(Instant::now() - NOTIF_GATE_MAX - Duration::from_secs(1));
+        assert_eq!(gate.force_expire(), NotifGateAction::Remove);
+        // A second expiry call with nothing re-armed is a no-op, not a
+        // repeat remove.
+        assert_eq!(gate.force_expire(), NotifGateAction::None);
+
+        // Must not re-add while `status` is still the open
+        // widget (an Esc close the control socket never saw would
+        // otherwise hide notifications again right away).
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::None);
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::None);
+    }
+
+    #[test]
+    fn notif_gate_reopen_after_close_adds_again() {
+        let mut gate = NotifGate::new();
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::Add);
+        assert_eq!(gate.sync(None), NotifGateAction::Remove);
+        // A fresh open after a real close gets its own budget.
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::Add);
+    }
+
+    #[test]
+    fn notif_gate_reopen_after_expiry_adds_again_once_closed_first() {
+        // Expiry's `expired` flag must not leak into the *next* genuine
+        // open/close cycle once hover_open has actually left "status".
+        let mut gate = NotifGate::new();
+        gate.sync(Some("status"));
+        gate.since = Some(Instant::now() - NOTIF_GATE_MAX - Duration::from_secs(1));
+        gate.force_expire();
+        gate.sync(None); // leaves status: clears `expired`
+        assert_eq!(gate.sync(Some("status")), NotifGateAction::Add);
     }
 }

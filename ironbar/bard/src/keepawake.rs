@@ -27,7 +27,6 @@
 
 use crate::cmd::is_active;
 use crate::mango::CLASS_PREFIX;
-use crate::tooltip::{kv, sect, set_titled};
 use crate::vars::Vars;
 
 /// nf-md-coffee, filled cup on a saucer — shown while active. Carried over
@@ -62,15 +61,13 @@ impl Keepawake {
             (if self.active { IC_ON } else { IC_OFF }).to_string(),
         );
 
-        let mut tip = String::new();
-        tip.push_str(&sect("", "blocks idle lock/dpms/suspend + lid close"));
-        tip.push_str(&kv("State", if self.active { "on" } else { "off" }));
-        set_titled(
-            vars,
-            "inhibit_tip",
-            "Keep-awake",
-            tip.trim_end_matches('\n').to_string(),
-        );
+        // S1 (bar-status-panel SPEC §2/§5e/§7): `awake_on` is the pill's
+        // own `show_if` gate (genconfig.rs::inhibit_module) — the dynamic
+        // hover tip this used to build (`inhibit_tip`, via `sect`/`kv`) is
+        // gone along with the popup it fed; the pill now carries a static
+        // tooltip instead, since it is only ever visible in the one state
+        // that tip described.
+        vars.set("awake_on", if self.active { "true" } else { "false" });
 
         vars.set(
             &class_key("inhibit"),
